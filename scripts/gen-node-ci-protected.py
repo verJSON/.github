@@ -870,8 +870,6 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         "          RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}\n",
         "          RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-"
         "${{ github.run_id }}-${{ github.run_attempt }}\n",
-        "          RUN_ATTEMPT: ${{ github.run_attempt }}\n",
-        "          RUN_ID: ${{ github.run_id }}\n",
         "          SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}\n",
     ):
         if step.count(source_only_env) != 1:
@@ -1712,6 +1710,14 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       )
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
+                  prisma_engine_mount_args, prisma_engine_mount_targets = (
+                      ci_build_artifacts.prisma_schema_engine_candidate_mount(
+                          script_env,
+                          prisma_engine_available,
+                          prisma_engine_host_path or None,
+                          prisma_engine_target,
+                      )
+                  )
                   script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
                   script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"
                   script_env["npm_config_script_shell"] = "/bin/sh"
@@ -1730,6 +1736,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       cache_root,
                       changelog_cache_root,
                       *isolated_paths,
+                      *prisma_engine_mount_targets,
                       *tool_prefixes,
                       *((browser_cache,) if browser_cache is not None else ()),
                   )
@@ -1857,6 +1864,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                                     "--ro-bind", "/etc/passwd", "/etc/passwd",
                                     "--ro-bind", "/etc/group", "/etc/group",
                                     *tool_mount_args,
+                                    *prisma_engine_mount_args,
                                     "--bind", str(workspace), str(workspace),
                                     *artifact_mount_args,
                                     *git_mount_args,

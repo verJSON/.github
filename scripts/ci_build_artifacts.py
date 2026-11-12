@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from contextlib import contextmanager
 from dataclasses import dataclass
 import errno
+import fcntl
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -19,13 +22,15 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
@@ -52,6 +57,31 @@ MAX_BWRAP_STATUS_BYTES = 16 * 1024
 MAX_BWRAP_STATUS_LINE_BYTES = 4096
 MAX_BWRAP_STATUS_RECORDS = 64
 MAX_TRUSTED_WRAPPER_STATUS_BYTES = 4096
+PIDFD_SIGNAL_PROCESS_GROUP = 4
+
+# This process is the session leader until it execs the trusted Bubblewrap binary.
+_BWRAP_LAUNCH_GATE = r"""
+import ctypes, json, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(4, 0, 0, 0, 0) != 0 or libc.prctl(3, 0, 0, 0, 0) != 0:
+    os._exit(125)
+env_fd = int(sys.argv[1])
+with os.fdopen(env_fd, 'rb') as stream:
+    environment = json.load(stream)
+def read_exact(size):
+    result = b''
+    while len(result) < size:
+        chunk = os.read(0, size - len(result))
+        if not chunk:
+            os._exit(125)
+        result += chunk
+    return result
+challenge = read_exact(32)
+os.write(1, challenge)
+if read_exact(1) != b'\x01':
+    os._exit(125)
+os.execvpe(sys.argv[2], sys.argv[2:], environment)
+"""
 RUNTIME_INPUT_DEFAULTS: dict[str, Any] = {
     "ci-level-id": "ci",
     "ci-level-fail-fast": True,
@@ -113,6 +143,194 @@ class ArtifactError(ValueError):
 
 class IntegrityError(ArtifactError):
     """Trusted input or authenticated workflow result failed integrity checks."""
+
+
+class _SupervisorDeadlineExpired(IntegrityError):
+    pass
+
+
+class _SupervisorReapTimeout(IntegrityError):
+    pass
+
+
+class BorrowedSupervisorNamespace:
+    def __init__(self, native_launcher: Any):
+        self._native_launcher = native_launcher
+        self._slots = (ctypes.c_int * 2)(-1, -1)
+        self._lock = threading.RLock()
+        self._attempted = False
+        self._ready = False
+        self._active_leases = 0
+
+    def all_closed(self) -> bool:
+        with self._lock:
+            return all(descriptor == -1 for descriptor in self._slots)
+
+    def _pointer(self, index: int) -> Any:
+        return ctypes.cast(ctypes.byref(self._slots, index * ctypes.sizeof(ctypes.c_int)),
+                           ctypes.POINTER(ctypes.c_int))
+
+    @contextmanager
+    def lease(self) -> Iterator[tuple[int, int]]:
+        with self._lock:
+            if not self._ready or any(fd < 0 for fd in self._slots):
+                raise IntegrityError("borrowed sandbox namespace identity is unavailable")
+            if select.select([self._slots[1]], [], [], 0)[0]:
+                raise IntegrityError("borrowed sandbox supervisor is no longer live")
+            prior_leases = self._active_leases
+            try:
+                self._active_leases = prior_leases + 1
+                yield self._slots[0], self._slots[1]
+            finally:
+                self._active_leases = prior_leases
+
+    def supervisor_exited(self) -> bool:
+        with self._lock:
+            if not self._ready or self._slots[1] < 0:
+                raise IntegrityError("borrowed sandbox namespace identity is unavailable")
+            return bool(select.select([self._slots[1]], [], [], 0)[0])
+
+    def close(self) -> None:
+        with self._lock:
+            if self._active_leases:
+                raise IntegrityError("borrowed sandbox namespace still has an active lease")
+            self._attempted = True
+            self._ready = False
+            failures: list[BaseException] = []
+            for index in range(2):
+                if self._slots[index] >= 0:
+                    try:
+                        result = self._native_launcher._owned_close(self._pointer(index))
+                        if result != 0:
+                            raise IntegrityError(f"borrowed namespace descriptor close failed: errno {-result}")
+                    except BaseException as error:
+                        failures.append(error)
+            if failures:
+                primary = next((error for error in failures if not isinstance(error, Exception)), failures[0])
+                for error in failures:
+                    if error is not primary:
+                        primary.add_note(f"additional borrowed descriptor cleanup failure: {type(error).__name__}")
+                if not self.all_closed():
+                    primary.add_note("borrowed namespace descriptor owner remains retained in this process")
+                raise _release_retired_owner_after_error(self, primary)
+            _release_atomic_owner(self)
+
+
+class PinnedSupervisorNamespace:
+    """A revocable provisional namespace identity; borrowed descriptors are caller-owned."""
+
+    def __init__(self, attempt_id: str, supervisor_pid: int, namespace_inode: int, namespace_fd: int, pidfd: int,
+                 native_launcher: Any | None = None):
+        if native_launcher is not None and (namespace_fd != -1 or pidfd != -1):
+            raise IntegrityError("native sandbox namespace descriptors must be acquired into owned slots")
+        self.attempt_id = attempt_id
+        self.supervisor_pid = supervisor_pid
+        self.namespace_inode = namespace_inode
+        self._namespace_fd = namespace_fd
+        self._pidfd = pidfd
+        self._lock = threading.RLock()
+        self._native_launcher = native_launcher
+        self._native_slots = (ctypes.c_int * 2)(-1, -1) if native_launcher is not None else None
+
+    def lease(self) -> Any:
+        return self._lock
+
+    def all_closed(self) -> bool:
+        with self._lock:
+            return self._native_slots is None or all(fd == -1 for fd in self._native_slots)
+
+    def _acquire_native(self, namespace_fd: int, pidfd: int) -> None:
+        with self._lock:
+            if self._native_slots is None or self._namespace_fd != -1 or self._pidfd != -1:
+                raise IntegrityError("trusted sandbox namespace ownership is invalid")
+            for index, source in enumerate((namespace_fd, pidfd)):
+                pointer = ctypes.cast(ctypes.byref(self._native_slots, index * ctypes.sizeof(ctypes.c_int)),
+                                      ctypes.POINTER(ctypes.c_int))
+                if self._native_launcher._owned_dup(pointer, source) != 0 or self._native_slots[index] < 0:
+                    raise IntegrityError("trusted sandbox namespace duplication failed")
+            if (os.fstat(self._native_slots[0]).st_ino != self.namespace_inode
+                    or select.select([self._native_slots[1]], [], [], 0)[0]):
+                raise IntegrityError("trusted sandbox namespace identity is no longer live")
+            self._namespace_fd, self._pidfd = self._native_slots[0], self._native_slots[1]
+
+    def borrow(self) -> tuple[int, int]:
+        with self._lock:
+            if self._namespace_fd < 0 or self._pidfd < 0:
+                raise IntegrityError("trusted sandbox namespace identity is revoked")
+            if self._native_launcher is not None:
+                raise IntegrityError("trusted sandbox namespace requires a caller-owned lease")
+            namespace_fd = -1
+            pidfd = -1
+            try:
+                if select.select([self._pidfd], [], [], 0)[0]:
+                    raise IntegrityError("trusted sandbox supervisor is no longer live")
+                namespace_fd = os.dup(self._namespace_fd)
+                pidfd = os.dup(self._pidfd)
+                if os.fstat(namespace_fd).st_ino != self.namespace_inode or select.select([pidfd], [], [], 0)[0]:
+                    raise IntegrityError("trusted sandbox namespace identity is no longer live")
+                return namespace_fd, pidfd
+            except (OSError, ValueError, IntegrityError) as error:
+                for descriptor in (namespace_fd, pidfd):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                if isinstance(error, IntegrityError):
+                    raise
+                raise IntegrityError("trusted sandbox namespace identity is unavailable") from error
+
+    def borrow_into(self, owner: BorrowedSupervisorNamespace) -> None:
+        if not isinstance(owner, BorrowedSupervisorNamespace):
+            raise IntegrityError("borrowed sandbox namespace owner is invalid")
+        with owner._lock, self._lock:
+            if self._namespace_fd < 0 or self._pidfd < 0:
+                raise IntegrityError("trusted sandbox namespace identity is revoked")
+            if (self._native_launcher is None or owner._native_launcher is not self._native_launcher
+                    or owner._attempted or any(fd != -1 for fd in owner._slots)):
+                raise IntegrityError("borrowed sandbox namespace owner is invalid")
+            _retain_atomic_owner(owner)
+            owner._attempted = True
+            if select.select([self._pidfd], [], [], 0)[0]:
+                raise IntegrityError("trusted sandbox supervisor is no longer live")
+            for index, source in enumerate((self._namespace_fd, self._pidfd)):
+                if owner._native_launcher._owned_dup(owner._pointer(index), source) != 0 or owner._slots[index] < 0:
+                    raise IntegrityError("borrowed sandbox namespace duplication failed")
+            if (os.fstat(owner._slots[0]).st_ino != self.namespace_inode
+                    or select.select([owner._slots[1]], [], [], 0)[0]):
+                raise IntegrityError("borrowed sandbox namespace identity is no longer live")
+            owner._ready = True
+
+    def _revoke(self) -> bool:
+        with self._lock:
+            if self._native_slots is not None:
+                self._namespace_fd = self._pidfd = -1
+                success = True
+                failures: list[BaseException] = []
+                for index in range(2):
+                    if self._native_slots[index] >= 0:
+                        pointer = ctypes.cast(ctypes.byref(self._native_slots, index * ctypes.sizeof(ctypes.c_int)),
+                                              ctypes.POINTER(ctypes.c_int))
+                        try:
+                            if self._native_launcher._owned_close(pointer) != 0:
+                                success = False
+                        except BaseException as error:
+                            failures.append(error)
+                            success = False
+                if failures:
+                    primary = next((error for error in failures if not isinstance(error, Exception)), failures[0])
+                    for error in failures:
+                        if error is not primary:
+                            primary.add_note(f"additional namespace revocation failure: {type(error).__name__}")
+                    raise primary
+                return success
+            descriptors = (self._namespace_fd, self._pidfd)
+            self._namespace_fd = self._pidfd = -1
+            success = True
+            for descriptor in descriptors:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        success = False
+            return success
 
 
 _TAR_EXTENSION_TYPES = frozenset(
@@ -445,9 +663,19 @@ def _coerce_host_signal_queue(
     if host_signals is not None and cancellation_signal is not None:
         raise IntegrityError("provide one host cancellation source")
     if host_signals is not None:
-        if not all(
-            callable(getattr(host_signals, method, None))
-            for method in ("poll", "launch_decision", "acceptance_cutoff")
+        latched_signal = getattr(host_signals, "host_cancel_signal", ...)
+        if (
+            not all(
+                callable(getattr(host_signals, method, None))
+                for method in ("poll", "launch_decision", "acceptance_cutoff")
+            )
+            or (
+                latched_signal is not None
+                and (
+                    not isinstance(latched_signal, int)
+                    or latched_signal not in {signal.SIGINT, signal.SIGTERM}
+                )
+            )
         ):
             raise IntegrityError("host cancellation queue is invalid")
         return host_signals
@@ -456,6 +684,17 @@ def _coerce_host_signal_queue(
             raise IntegrityError("host cancellation callback is invalid")
         return _CallableHostSignalQueue(cancellation_signal)
     return HostSignalQueue()
+
+
+def _read_host_cancellation(signals: HostSignalQueue | _CallableHostSignalQueue, *, launch: bool = False) -> int | None:
+    try:
+        return signals.launch_decision() if launch else signals.poll()
+    except Exception as error:
+        if getattr(error, "cancellation_evidence_unavailable", False) is True:
+            raise
+        failure = IntegrityError("host cancellation evidence unavailable")
+        failure.cancellation_evidence_unavailable = True
+        raise failure from error
 
 
 class ScriptCandidateTerminal(ArtifactError):
@@ -590,6 +829,22 @@ def _script_candidate_status_failure(status: TrustedCandidateStatus) -> ScriptCa
     )
 
 
+HARNESS_LAUNCH_GATE_ENTRYPOINT = r'''import os, sys
+try:
+    gate = int(sys.argv[1])
+    try:
+        frame = os.read(gate, 2)
+        end = os.read(gate, 1)
+    finally:
+        os.close(gate)
+    if frame != b"G" or end != b"" or len(sys.argv) < 3:
+        os._exit(125)
+    os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+except BaseException:
+    os._exit(125)
+'''
+
+
 SANDBOX_SUPERVISOR_ENTRYPOINT = r'''import ctypes, json, os, queue, re, select, signal, subprocess, sys, time
 from pathlib import Path
 watched_signals = {signal.SIGINT, signal.SIGTERM}
@@ -628,7 +883,7 @@ def latch_supervisor_signal():
     return supervisor_signal
 
 def emit(event, **fields):
-    record = {"version": 2, "pid": os.getpid(), "event": event}
+    record = {"version": 3, "pid": os.getpid(), "event": event}
     record.update(fields)
     sys.stdout.buffer.write(json.dumps(record, separators=(",", ":")).encode("ascii") + b"\n")
     sys.stdout.buffer.flush()
@@ -679,14 +934,19 @@ def namespace_pids():
     )
 
 def reap_adopted_children():
+    # Peek before reaping: an unreaped candidate's status belongs to its Popen object.
+    # Consuming it here would make Popen report the lost status as exit code 0.
     global reaped_count
     while True:
         try:
-            pid, _status = os.waitpid(-1, os.WNOHANG)
+            exited = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return
-        if pid == 0:
+        if exited is None:
             return
+        if candidate is not None and candidate.returncode is None and exited.si_pid == candidate.pid:
+            return
+        os.waitpid(exited.si_pid, 0)
         reaped_count += 1
 
 def terminate_namespace_children():
@@ -711,6 +971,26 @@ def terminate_namespace_children():
         elif kill_deadline is not None and now >= kill_deadline:
             raise RuntimeError("namespace descendants survived bounded SIGKILL cleanup")
         time.sleep(0.02)
+
+def read_identity_challenge():
+    deadline = time.monotonic() + 5.0
+    frame = bytearray()
+    while len(frame) <= 75:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("host identity challenge timed out")
+        readable, _writable, _exceptional = select.select([0], [], [], remaining)
+        if not readable:
+            raise TimeoutError("host identity challenge timed out")
+        chunk = os.read(0, 1)
+        if not chunk:
+            raise RuntimeError("host identity challenge ended early")
+        frame.extend(chunk)
+        if chunk == b"\n":
+            if re.fullmatch(rb"challenge:[0-9a-f]{64}\n", bytes(frame)) is None:
+                raise RuntimeError("host identity challenge is invalid")
+            return bytes(frame[10:-1]).decode("ascii")
+    raise RuntimeError("host identity challenge exceeds its size limit")
 
 def read_control():
     deadline = time.monotonic() + 5.0
@@ -804,6 +1084,8 @@ def main():
         pid_namespace = os.stat("/proc/self/ns/pid").st_ino
         ready_emitted = True
         emit("ready", pidNamespace=pid_namespace)
+        challenge_nonce = read_identity_challenge()
+        emit("identity-proof", pidNamespace=pid_namespace, nonce=challenge_nonce)
         control = read_control()
         if control in (b"abort:2\n", b"abort:15\n"):
             control_state = "abort"
@@ -884,6 +1166,7 @@ def main():
                             pass
                         candidate_killed = True
                     time.sleep(0.01)
+                    reap_adopted_children()
                 candidate_return_code = candidate.wait()
                 reaped_count += 1
                 candidate_reaped = True
@@ -1110,12 +1393,39 @@ def _bubblewrap_child_identity(data: bytes) -> tuple[int | None, int | None, boo
     return child_pid if not exited else None, pid_namespace, exited
 
 
+def _pin_reported_supervisor(child_pid: int, pid_namespace: int) -> int:
+    if type(child_pid) is not int or child_pid <= 1 or type(pid_namespace) is not int or pid_namespace <= 0:
+        raise IntegrityError("Bubblewrap supervisor identity is invalid")
+    descriptor: int | None = None
+    verified = False
+    try:
+        descriptor = os.pidfd_open(child_pid)
+        if type(descriptor) is not int or descriptor < 0:
+            raise IntegrityError("Bubblewrap supervisor pidfd is invalid")
+        if os.stat(f"/proc/{child_pid}/ns/pid").st_ino != pid_namespace:
+            raise IntegrityError("Bubblewrap supervisor PID namespace identity changed")
+        verified = True
+        return descriptor
+    except OSError as error:
+        raise IntegrityError("cannot safely pin the Bubblewrap-reported supervisor PID") from error
+    finally:
+        if not verified and type(descriptor) is int and descriptor >= 0:
+            active_error = sys.exc_info()[1]
+            try:
+                os.close(descriptor)
+            except BaseException as close_error:
+                if active_error is not None:
+                    active_error.add_note(f"provisional pidfd close failed: {type(close_error).__name__}")
+                else:
+                    raise IntegrityError("provisional supervisor pidfd close failed") from close_error
+
+
 def _trusted_wrapper_event(line: bytes) -> dict[str, Any]:
     record = _strict_json_object(line, "trusted sandbox event")
     common = {"version", "pid", "event"}
     if (
         type(record.get("version")) is not int
-        or record["version"] != 2
+        or record["version"] != 3
         or type(record.get("pid")) is not int
         or record["pid"] != 1
         or not isinstance(record.get("event"), str)
@@ -1124,6 +1434,7 @@ def _trusted_wrapper_event(line: bytes) -> dict[str, Any]:
     event = record["event"]
     expected_fields = {
         "ready": common | {"pidNamespace"},
+        "identity-proof": common | {"pidNamespace", "nonce"},
         "control-accepted": common,
         "control-aborted": common | {"signal"},
     "candidate-not-started": common | {"reason"},
@@ -1149,6 +1460,12 @@ def _trusted_wrapper_event(line: bytes) -> dict[str, Any]:
     if event == "ready":
         if type(record["pidNamespace"]) is not int or record["pidNamespace"] <= 0:
             raise IntegrityError("trusted sandbox ready event has an invalid PID namespace")
+    elif event == "identity-proof":
+        if (
+            type(record["pidNamespace"]) is not int or record["pidNamespace"] <= 0
+            or type(record["nonce"]) is not str or re.fullmatch(r"[0-9a-f]{64}", record["nonce"]) is None
+        ):
+            raise IntegrityError("trusted sandbox identity proof is invalid")
     elif event == "control-aborted":
         if type(record["signal"]) is not int or record["signal"] not in {2, 15}:
             raise IntegrityError("trusted sandbox abort ACK has an invalid signal")
@@ -1191,6 +1508,45 @@ def _trusted_wrapper_event(line: bytes) -> dict[str, Any]:
     return record
 
 
+def _verify_inner_supervisor_identity(
+    provisional_pidfd: int, child_pid: int, pid_namespace: int, expected_nonce: str, proof_line: bytes,
+    owned_namespace_fd: int | None = None,
+) -> None:
+    if (
+        type(provisional_pidfd) is not int or provisional_pidfd < 0
+        or type(child_pid) is not int or child_pid <= 1
+        or type(pid_namespace) is not int or pid_namespace <= 0
+        or type(expected_nonce) is not str or re.fullmatch(r"[0-9a-f]{64}", expected_nonce) is None
+    ):
+        raise IntegrityError("trusted supervisor challenge identity is invalid")
+    proof = _trusted_wrapper_event(proof_line)
+    if (proof["event"] != "identity-proof" or proof["pidNamespace"] != pid_namespace
+            or not hmac.compare_digest(proof["nonce"], expected_nonce)):
+        raise IntegrityError("trusted supervisor identity proof does not match the challenge")
+    namespace_fd = -1
+    try:
+        if select.select([provisional_pidfd], [], [], 0)[0]:
+            raise IntegrityError("trusted supervisor exited before identity verification")
+        if owned_namespace_fd is None:
+            namespace_fd = os.open(f"/proc/{child_pid}/ns/pid", os.O_RDONLY | os.O_CLOEXEC)
+        if os.fstat(namespace_fd if owned_namespace_fd is None else owned_namespace_fd).st_ino != pid_namespace:
+            raise IntegrityError("trusted supervisor namespace changed during identity verification")
+        if select.select([provisional_pidfd], [], [], 0)[0]:
+            raise IntegrityError("trusted supervisor exited during identity verification")
+    except OSError as error:
+        raise IntegrityError("trusted supervisor identity verification failed") from error
+    finally:
+        if namespace_fd >= 0:
+            active_error = sys.exc_info()[1]
+            try:
+                os.close(namespace_fd)
+            except BaseException as close_error:
+                if active_error is not None:
+                    active_error.add_note(f"identity namespace close failed: {type(close_error).__name__}")
+                else:
+                    raise IntegrityError("identity namespace close failed") from close_error
+
+
 def _parse_trusted_candidate_status(
     data: bytes,
     process_returncode: int,
@@ -1198,15 +1554,27 @@ def _parse_trusted_candidate_status(
     host_cancel_signal: int | None = None,
     forwarded_signal: int | None = None,
     expected_pid_namespace: int | None = None,
+    expected_identity_nonce: str | None = None,
 ) -> TrustedCandidateStatus:
     if not isinstance(data, bytes) or len(data) > MAX_TRUSTED_WRAPPER_STATUS_BYTES:
         raise IntegrityError("trusted sandbox status is missing or oversized")
     if not data.endswith(b"\n"):
         raise IntegrityError("trusted sandbox status is missing its final newline")
     lines = data.splitlines()
-    if not lines or len(lines) > 8 or any(not line for line in lines):
+    if not lines or len(lines) > 9 or any(not line for line in lines):
         raise IntegrityError("trusted sandbox status has an invalid record count")
     records = [_trusted_wrapper_event(line) for line in lines]
+    proof_indices = [index for index, record in enumerate(records) if record["event"] == "identity-proof"]
+    if proof_indices:
+        if (proof_indices != [1] or records[0]["event"] != "ready"
+                or records[1]["pidNamespace"] != records[0]["pidNamespace"]
+                or type(expected_identity_nonce) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", expected_identity_nonce) is None
+                or not hmac.compare_digest(records[1]["nonce"], expected_identity_nonce)):
+            raise IntegrityError("trusted sandbox identity proof is contradictory")
+        records = [records[0], *records[2:]]
+    elif any(record["event"] in {"control-accepted", "control-aborted"} for record in records):
+        raise IntegrityError("trusted sandbox control lacks identity proof")
     final = records[-1]
     if final["event"] != "terminal" or process_returncode < 0 or process_returncode > 255:
         raise IntegrityError("trusted sandbox terminal status is missing or invalid")
@@ -1406,6 +1774,12 @@ def _parse_trusted_candidate_status(
     )
 
 def _trusted_event_prefix_is_valid(events: list[str]) -> bool:
+    proof_indices = [index for index, event in enumerate(events) if event == "identity-proof"]
+    if proof_indices and (proof_indices != [1] or not events or events[0] != "ready"):
+        return False
+    if not proof_indices and any(event in {"control-accepted", "control-aborted"} for event in events):
+        return False
+    normalized = [event for event in events if event != "identity-proof"]
     complete_paths = (
         ("terminal",),
         ("ready", "cleanup-start", "terminal"),
@@ -1419,7 +1793,1035 @@ def _trusted_event_prefix_is_valid(events: list[str]) -> bool:
         ("ready", "control-accepted", "candidate-started", "candidate-outcome", "cleanup-start", "terminal"),
         ("ready", "control-accepted", "candidate-started", "candidate-outcome", "cleanup-start", "cleanup-complete", "terminal"),
     )
-    return any(tuple(events) == path[: len(events)] for path in complete_paths)
+    return any(tuple(normalized) == path[: len(normalized)] for path in complete_paths)
+
+
+class AtomicReapResult(ctypes.Structure):
+    _fields_ = [("complete", ctypes.c_int), ("code", ctypes.c_int), ("status", ctypes.c_int)]
+
+
+class InnerSupervisorDescriptors:
+    def __init__(self, launcher: Any):
+        self._slots = (ctypes.c_int * 2)(-1, -1)
+        self._launcher = launcher
+        self._lock = threading.RLock()
+        self._active_leases = 0
+
+    def all_closed(self) -> bool:
+        with self._lock:
+            return all(fd == -1 for fd in self._slots)
+
+    @contextmanager
+    def lease(self, expected_pidfd: int) -> Iterator[int]:
+        with self._lock:
+            if self._slots[0] < 0 or self._slots[0] != expected_pidfd or self._slots[1] < 0:
+                raise IntegrityError("inner supervisor descriptor identity changed")
+            prior_leases = self._active_leases
+            try:
+                self._active_leases = prior_leases + 1
+                yield self._slots[1]
+            finally:
+                self._active_leases = prior_leases
+
+    def _pointer(self, index: int) -> Any:
+        return ctypes.cast(ctypes.byref(self._slots, index * ctypes.sizeof(ctypes.c_int)),
+                           ctypes.POINTER(ctypes.c_int))
+
+    def acquire(self, child_pid: int, pid_namespace: int) -> int:
+        with self._lock:
+            if (type(child_pid) is not int or child_pid <= 1 or type(pid_namespace) is not int
+                    or pid_namespace <= 0 or any(fd != -1 for fd in self._slots)):
+                raise IntegrityError("Bubblewrap supervisor identity is invalid")
+            for index, acquire in enumerate((self._launcher._owned_pidfd_open, self._launcher._owned_pid_namespace)):
+                result = acquire(self._pointer(index), child_pid)
+                if result != 0 or self._slots[index] < 0:
+                    raise IntegrityError("cannot safely acquire Bubblewrap supervisor identity")
+            if os.fstat(self._slots[1]).st_ino != pid_namespace:
+                raise IntegrityError("Bubblewrap supervisor PID namespace identity changed")
+            return self._slots[0]
+
+    def namespace_fd(self) -> int:
+        with self._lock:
+            if self._slots[1] < 0:
+                raise IntegrityError("Bubblewrap supervisor namespace is unavailable")
+            return self._slots[1]
+
+    def close_all(self) -> None:
+        with self._lock:
+            if self._active_leases:
+                raise IntegrityError("inner supervisor descriptors still have an active lease")
+            failures: list[BaseException] = []
+            for index in range(2):
+                if self._slots[index] < 0:
+                    continue
+                try:
+                    result = self._launcher._owned_close(self._pointer(index))
+                    if result != 0:
+                        raise IntegrityError(f"inner supervisor descriptor close failed: errno {-result}")
+                except BaseException as error:
+                    failures.append(error)
+            if failures:
+                primary = next((error for error in failures if not isinstance(error, Exception)), failures[0])
+                for error in failures:
+                    if error is not primary:
+                        primary.add_note(f"additional inner descriptor cleanup failure: {type(error).__name__}")
+                raise _release_retired_owner_after_error(self, primary)
+            _release_atomic_owner(self)
+
+
+class AtomicMountDescriptors:
+    def __init__(self, launcher: Any, capacity: int):
+        if type(capacity) is not int or not 1 <= capacity <= MAX_FILES:
+            raise IntegrityError("atomic mount descriptor capacity is invalid")
+        self._launcher = launcher
+        self._slots = (ctypes.c_int * capacity)(*([-1] * capacity))
+        self._lock = threading.RLock()
+        self._active_leases = 0
+        self._retired = False
+        self._traversal_failed = False
+        self._sealed: tuple[frozenset[int], dict[int, tuple[int, int, int, int]]] | None = None
+
+    def _pointer(self, index: int) -> Any:
+        return ctypes.cast(ctypes.byref(self._slots, index * ctypes.sizeof(ctypes.c_int)),
+                           ctypes.POINTER(ctypes.c_int))
+
+    def _validate_slot(self, index: int, *, empty: bool) -> None:
+        if (type(index) is not int or not 0 <= index < len(self._slots)
+                or (self._slots[index] != -1 if empty else self._slots[index] < 0)):
+            raise IntegrityError("atomic mount descriptor slot is invalid")
+
+    def all_closed(self) -> bool:
+        with self._lock:
+            return all(fd == -1 for fd in self._slots)
+
+    @contextmanager
+    def lease(self) -> Iterator["AtomicMountDescriptors"]:
+        with self._lock:
+            if self._retired or self._traversal_failed:
+                raise IntegrityError("atomic mount descriptor owner is retired")
+            prior_leases = self._active_leases
+            try:
+                self._active_leases = prior_leases + 1
+                yield self
+            finally:
+                self._active_leases = prior_leases
+
+    def descriptor(self, index: int) -> int:
+        with self._lock:
+            if not self._active_leases:
+                raise IntegrityError("atomic mount descriptor requires an active lease")
+            self._validate_slot(index, empty=False)
+            return self._slots[index]
+
+    def seal(self, expected_identities: dict[int, tuple[int, int, int, int]]) -> None:
+        with self._lock:
+            if self._retired or self._traversal_failed or self._active_leases or self._sealed is not None:
+                raise IntegrityError("atomic mount descriptor owner cannot be sealed")
+            if (type(expected_identities) is not dict or not expected_identities
+                    or any(type(index) is not int or type(identity) is not tuple or len(identity) != 4
+                           or any(type(value) is not int for value in identity)
+                           for index, identity in expected_identities.items())):
+                raise IntegrityError("atomic mount descriptor identities are invalid")
+            if set(expected_identities) != {index for index, fd in enumerate(self._slots) if fd >= 0}:
+                raise IntegrityError("atomic mount descriptor identities are incomplete")
+            for index, expected in expected_identities.items():
+                self._validate_slot(index, empty=False)
+                metadata = os.fstat(self._slots[index])
+                identity = (metadata.st_dev, metadata.st_ino, metadata.st_uid, stat.S_IMODE(metadata.st_mode))
+                if identity != expected:
+                    raise IntegrityError("atomic mount descriptor identity changed")
+            self._sealed = (frozenset(expected_identities), dict(expected_identities))
+
+    def verify_sealed(self, indices: tuple[int, ...]) -> None:
+        with self._lock:
+            if not self._active_leases or self._sealed is None or self._sealed[0] != frozenset(indices):
+                raise IntegrityError("atomic sandbox mount descriptors are not sealed")
+            for index in indices:
+                self._validate_slot(index, empty=False)
+                metadata = os.fstat(self._slots[index])
+                identity = (metadata.st_dev, metadata.st_ino, metadata.st_uid, stat.S_IMODE(metadata.st_mode))
+                if identity != self._sealed[1][index]:
+                    raise IntegrityError("atomic mount descriptor identity changed before launch")
+
+    def open_at(self, index: int, directory_index: int | None, path: str | bytes, flags: int, mode: int = 0) -> None:
+        try:
+            encoded = os.fsencode(path)
+        except (TypeError, ValueError) as error:
+            raise IntegrityError("atomic mount path is invalid") from error
+        allowed_flags = os.O_ACCMODE | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if (not encoded or b"\x00" in encoded or type(flags) is not int or flags < 0
+                or flags & ~allowed_flags or not flags & os.O_NOFOLLOW
+                or type(mode) is not int or not 0 <= mode <= 0o777
+                or (flags & os.O_CREAT and (not flags & os.O_EXCL or flags & os.O_ACCMODE != os.O_WRONLY))
+                or (not flags & os.O_CREAT and (mode != 0 or flags & os.O_ACCMODE != os.O_RDONLY))):
+            raise IntegrityError("atomic mount open arguments are invalid")
+        if directory_index is None:
+            if encoded != b"/":
+                raise IntegrityError("atomic mount root must be the filesystem root")
+        elif encoded in (b".", b"..") or b"/" in encoded:
+            raise IntegrityError("atomic mount component is invalid")
+        with self._lock:
+            if self._retired or self._traversal_failed or self._active_leases or self._sealed is not None:
+                raise IntegrityError("atomic mount descriptor owner is unavailable")
+            self._open_at_locked(index, directory_index, encoded, flags, mode)
+
+    def _open_at_locked(self, index: int, directory_index: int | None, path: bytes, flags: int, mode: int) -> None:
+        self._validate_slot(index, empty=True)
+        if directory_index is None:
+            directory = -100
+        else:
+            self._validate_slot(directory_index, empty=False)
+            directory = self._slots[directory_index]
+        _retain_atomic_owner(self)
+        result = self._launcher._owned_openat(self._pointer(index), directory, path, flags, mode)
+        if result != 0 or self._slots[index] < 0:
+            raise IntegrityError(f"atomic mount open failed: errno {-result}")
+
+    def duplicate(self, index: int, source_index: int) -> None:
+        with self._lock:
+            if self._retired or self._traversal_failed or self._active_leases or self._sealed is not None:
+                raise IntegrityError("atomic mount descriptor owner is unavailable")
+            self._validate_slot(index, empty=True)
+            self._validate_slot(source_index, empty=False)
+            _retain_atomic_owner(self)
+            result = self._launcher._owned_dup(self._pointer(index), self._slots[source_index])
+            if result != 0 or self._slots[index] < 0:
+                raise IntegrityError(f"atomic mount duplication failed: errno {-result}")
+
+    def open_verified_directory(
+        self, index: int, path: str | bytes | Path, expected_identity: tuple[int, int, int, int],
+    ) -> None:
+        try:
+            encoded = os.fsencode(path)
+        except (TypeError, ValueError) as error:
+            raise IntegrityError("verified mount directory path is invalid") from error
+        components = encoded.split(b"/")[1:] if encoded.startswith(b"/") else []
+        if (not encoded.startswith(b"/") or b"\x00" in encoded or len(components) > MAX_DEPTH
+                or (encoded != b"/" and any(component in (b"", b".", b"..") for component in components))
+                or type(expected_identity) is not tuple or len(expected_identity) != 4
+                or any(type(value) is not int for value in expected_identity)):
+            raise IntegrityError("verified mount directory identity is invalid")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        with self._lock:
+            if self._retired or self._traversal_failed or self._active_leases or self._sealed is not None:
+                raise IntegrityError("atomic mount descriptor owner is unavailable")
+            self._validate_slot(index, empty=True)
+            self._traversal_failed = True
+            if encoded == b"/":
+                self._open_at_locked(index, None, b"/", flags, 0)
+            else:
+                scratch = [slot for slot, descriptor in enumerate(self._slots) if descriptor == -1 and slot != index]
+                if len(scratch) < (2 if len(components) > 1 else 1):
+                    raise IntegrityError("atomic mount traversal has insufficient descriptor slots")
+                current = scratch[0]
+                self._open_at_locked(current, None, b"/", flags, 0)
+                for position, component in enumerate(components):
+                    target = index if position == len(components) - 1 else next(slot for slot in scratch if slot != current)
+                    self._open_at_locked(target, current, component, flags, 0)
+                    self._close_locked(current)
+                    current = target
+            metadata = os.fstat(self._slots[index])
+            identity = (metadata.st_dev, metadata.st_ino, metadata.st_uid, stat.S_IMODE(metadata.st_mode))
+            if not stat.S_ISDIR(metadata.st_mode) or identity != expected_identity:
+                raise IntegrityError("verified mount directory identity changed")
+            self._traversal_failed = False
+
+    def close(self, index: int) -> None:
+        with self._lock:
+            if self._active_leases:
+                raise IntegrityError("atomic mount descriptors still have an active lease")
+            if self._traversal_failed and not self._retired:
+                raise IntegrityError("failed mount traversal requires complete cleanup")
+            if self._sealed is not None and not self._retired:
+                raise IntegrityError("sealed atomic mount descriptors cannot be closed individually")
+            self._close_locked(index)
+
+    def _close_locked(self, index: int) -> None:
+        self._validate_slot(index, empty=False)
+        result = self._launcher._owned_close(self._pointer(index))
+        if result != 0:
+            raise IntegrityError(f"atomic mount descriptor close failed: errno {-result}")
+
+    def close_all(self) -> None:
+        with self._lock:
+            if self._active_leases:
+                raise IntegrityError("atomic mount descriptors still have an active lease")
+            self._retired = True
+            failures: list[BaseException] = []
+            for index in range(len(self._slots)):
+                if self._slots[index] >= 0:
+                    try:
+                        self.close(index)
+                    except BaseException as error:
+                        failures.append(error)
+            if failures:
+                primary = next((error for error in failures if not isinstance(error, Exception)), failures[0])
+                for error in failures:
+                    if error is not primary:
+                        primary.add_note(f"additional mount descriptor cleanup failure: {type(error).__name__}")
+                if not self.all_closed():
+                    primary.add_note("atomic mount descriptor owner remains retained in this process")
+                raise _release_retired_owner_after_error(self, primary)
+            _release_atomic_owner(self)
+
+
+class AtomicDescriptorSlots:
+    def __init__(self, create_pipe: Callable[..., int], close_descriptor: Callable[..., int],
+                 reap_child: Callable[..., int] | None = None):
+        self._slots = (ctypes.c_int * 13)(*([-1] * 13))
+        self._create_pipe = create_pipe
+        self._close_descriptor = close_descriptor
+        self._reap_child = reap_child
+        self._lock = threading.RLock()
+        self._reap_result = AtomicReapResult()
+        self._launch_attempted = False
+        self._group_verified = False
+        self._group_capable = False
+        self._ready = False
+        self._release_attempted = False
+
+    def lease(self) -> Any:
+        return self._lock
+
+    def _pointer(self, index: int) -> Any:
+        return ctypes.cast(ctypes.byref(self._slots, index * ctypes.sizeof(ctypes.c_int)),
+                           ctypes.POINTER(ctypes.c_int))
+
+    def open_pair(self, index: int) -> None:
+        with self._lock:
+            if type(index) is not int or index not in (0, 2, 4, 6, 8, 11) or self._slots[index] != -1 or self._slots[index + 1] != -1:
+                raise IntegrityError("atomic descriptor slot is invalid")
+            result = self._create_pipe(self._pointer(index))
+            if result != 0:
+                raise IntegrityError(f"atomic pipe creation failed: errno {-result}")
+            if self._slots[index] < 0 or self._slots[index + 1] < 0:
+                raise IntegrityError("atomic pipe creation omitted descriptors")
+
+    def status_descriptor(self, index: int) -> int:
+        with self._lock:
+            if type(index) is not int or index not in (11, 12) or self._slots[index] < 0:
+                raise IntegrityError("atomic status descriptor is unavailable")
+            return self._slots[index]
+
+    def descriptor(self, index: int) -> int:
+        with self._lock:
+            if type(index) is not int or index not in (1, 2, 4, 7, 8, 10):
+                raise IntegrityError("atomic descriptor slot is invalid")
+            return self._slots[index]
+
+    def all_closed(self) -> bool:
+        with self._lock:
+            return all(descriptor == -1 for descriptor in self._slots)
+
+    def set_nonblocking(self, index: int) -> None:
+        with self._lock:
+            if type(index) is not int or index not in (1, 2, 4, 7, 8, 11) or self._slots[index] < 0:
+                raise IntegrityError("atomic descriptor slot is invalid")
+            os.set_blocking(self._slots[index], False)
+
+    def wait_readable(self, indices: tuple[int, ...], timeout: float) -> tuple[int, ...]:
+        if type(timeout) not in (int, float) or not 0 <= timeout <= 0.1:
+            raise IntegrityError("atomic descriptor wait timeout is invalid")
+        with self._lock:
+            if not indices or any(type(index) is not int or index not in (2, 4, 8, 11) or self._slots[index] < 0 for index in indices):
+                raise IntegrityError("atomic descriptor slot is invalid")
+            descriptors = [self._slots[index] for index in indices]
+            readable, _, _ = select.select(descriptors, [], [], timeout)
+            return tuple(index for index in indices if self._slots[index] in readable)
+
+    def _nonblocking_fd(self, index: int, allowed: tuple[int, ...]) -> int:
+        if type(index) is not int or index not in allowed or self._slots[index] < 0:
+            raise IntegrityError("atomic descriptor slot is invalid")
+        descriptor = self._slots[index]
+        if not fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_NONBLOCK:
+            raise IntegrityError("atomic descriptor is not nonblocking")
+        return descriptor
+
+    def read(self, index: int, size: int) -> bytes:
+        with self._lock:
+            return os.read(self._nonblocking_fd(index, (2, 8, 11)), size)
+
+    def read_ready(self) -> None:
+        with self._lock:
+            if self._ready or os.read(self._nonblocking_fd(4, (4,)), 2) != b"R":
+                raise IntegrityError("atomic launcher readiness frame is invalid")
+            self._ready = True
+
+    def write(self, index: int, data: bytes) -> int:
+        with self._lock:
+            return os.write(self._nonblocking_fd(index, (1,)), data)
+
+    def release(self, signals: HostSignalQueue | _CallableHostSignalQueue) -> None:
+        with self._lock:
+            if not self._ready or not self._group_capable or self._release_attempted:
+                raise IntegrityError("atomic launcher release state is invalid")
+            descriptor = self._nonblocking_fd(7, (7,))
+            try:
+                signum = signals.poll()
+            except Exception as error:
+                failure = IntegrityError("host cancellation evidence unavailable at atomic release")
+                failure.cancellation_evidence_unavailable = True
+                raise failure from error
+            if signum is not None:
+                raise ScriptPlanInterrupted(signum)
+            self._release_attempted = True
+            if os.write(descriptor, b"G") != 1:
+                raise IntegrityError("atomic launcher release was incomplete")
+
+    def signal_group(self, signum: int) -> bool:
+        with self._lock:
+            if self._slots[10] < 0 or not self._ready:
+                raise IntegrityError("atomic supervisor group is not ready")
+            present = _signal_pinned_process_group(self._slots[10], signum)
+            if signum == 0 and present and not self._release_attempted:
+                self._group_capable = True
+            if signum == 0 and self._reap_result.complete and not present:
+                self._group_verified = True
+            return present
+
+    def terminate_leader(self) -> bool:
+        with self._lock:
+            if self._slots[10] < 0:
+                raise IntegrityError("atomic supervisor pidfd is unavailable")
+            try:
+                signal.pidfd_send_signal(self._slots[10], signal.SIGKILL)
+            except ProcessLookupError:
+                return False
+            except OSError as error:
+                if error.errno == errno.ESRCH:
+                    return False
+                raise IntegrityError("cannot terminate pinned atomic supervisor") from error
+            return True
+
+    def close(self, index: int) -> None:
+        with self._lock:
+            if type(index) is not int or not 0 <= index < len(self._slots):
+                raise IntegrityError("atomic descriptor slot is invalid")
+            if index == 10 and self._slots[index] >= 0 and (
+                not self._reap_result.complete or (self._release_attempted and not self._group_verified)
+            ):
+                raise IntegrityError("atomic supervisor pidfd cleanup is not verified")
+            result = self._close_descriptor(self._pointer(index))
+            if result != 0:
+                raise IntegrityError(f"atomic descriptor close failed: errno {-result}")
+
+    def launch(
+        self, native_launch: Callable[..., int], pass_fds: tuple[int, ...], cwd: bytes | None,
+        argv: Any, envp: Any,
+    ) -> int:
+        with self._lock:
+            if self._launch_attempted or self._slots[10] != -1 or any(self._slots[index] < 0 for index in range(10)):
+                raise IntegrityError("atomic launcher descriptor state is invalid")
+            if any(type(fd) is not int or fd < 3 for fd in pass_fds) or len(set(pass_fds)) != len(pass_fds):
+                raise IntegrityError("atomic launcher inherited descriptors are invalid")
+            if any(fd in self._slots for fd in pass_fds):
+                raise IntegrityError("atomic launcher inherited descriptors overlap its pipes")
+            inherited = (ctypes.c_int * len(pass_fds))(*pass_fds) if pass_fds else None
+            self._launch_attempted = True
+            return native_launch(self._pointer(10), self._slots[0], self._slots[3], self._slots[5],
+                                 self._slots[6], self._slots[9], inherited, len(pass_fds), cwd, argv, envp)
+
+    def launch_bubblewrap(
+        self, native_launch: Callable[..., int], arguments: list[str], environment: dict[str, str],
+        pass_fds: tuple[int, ...], cwd: str | None,
+    ) -> int:
+        if not arguments or not os.path.isabs(arguments[0]):
+            raise IntegrityError("atomic Bubblewrap executable is invalid")
+        try:
+            encoded_arguments = [os.fsencode(argument) for argument in arguments]
+            encoded_environment = [os.fsencode(key) + b"=" + os.fsencode(value) for key, value in environment.items()]
+            encoded_cwd = os.fsencode(cwd) if cwd is not None else None
+        except (TypeError, ValueError) as error:
+            raise IntegrityError("atomic Bubblewrap arguments are invalid") from error
+        if any(b"\x00" in value for value in [*encoded_arguments, *encoded_environment]) or (
+            encoded_cwd is not None and b"\x00" in encoded_cwd
+        ) or any("=" in key for key in environment):
+            raise IntegrityError("atomic Bubblewrap arguments are invalid")
+        with self._lock:
+            if self._launch_attempted or self._slots[10] != -1 or any(
+                self._slots[index] < 0 for index in (*range(10), 11, 12)
+            ):
+                raise IntegrityError("atomic launcher descriptor state is invalid")
+            if any(type(fd) is not int or fd < 3 for fd in pass_fds) or len(set(pass_fds)) != len(pass_fds):
+                raise IntegrityError("atomic launcher inherited descriptors are invalid")
+            if any(fd in self._slots for fd in pass_fds):
+                raise IntegrityError("atomic launcher inherited descriptors overlap its pipes")
+            for descriptor in pass_fds:
+                os.fstat(descriptor)
+            native_arguments = [encoded_arguments[0], b"--json-status-fd", str(self._slots[12]).encode("ascii"), *encoded_arguments[1:]]
+            argv = (ctypes.c_char_p * (len(native_arguments) + 1))(*native_arguments, None)
+            envp = (ctypes.c_char_p * (len(encoded_environment) + 1))(*encoded_environment, None)
+            descriptors = (*pass_fds, self._slots[12])
+            inherited = (ctypes.c_int * len(descriptors))(*descriptors)
+            self._launch_attempted = True
+            return native_launch(self._pointer(10), self._slots[0], self._slots[3], self._slots[5],
+                                 self._slots[6], self._slots[9], inherited, len(descriptors), encoded_cwd, argv, envp)
+
+    def reap(self, timeout: float, expected_pidfd: int | None = None) -> int:
+        if type(timeout) not in (int, float) or not 0 <= timeout <= 86400:
+            raise IntegrityError("atomic supervisor reap timeout is invalid")
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if self._slots[10] < 0 or self._reap_child is None:
+                    raise IntegrityError("atomic supervisor reaping state is invalid")
+                if expected_pidfd is not None and self._slots[10] != expected_pidfd:
+                    raise IntegrityError("atomic supervisor pidfd identity changed")
+                if self._reap_result.complete:
+                    if self._reap_result.code == os.CLD_EXITED:
+                        return self._reap_result.status
+                    if self._reap_result.code in (os.CLD_KILLED, os.CLD_DUMPED):
+                        return -self._reap_result.status
+                    raise IntegrityError("atomic supervisor has an unexpected wait status")
+                result = self._reap_child(self._slots[10], ctypes.byref(self._reap_result))
+                if result not in (0, -errno.EINTR):
+                    raise IntegrityError(f"atomic supervisor reaping failed: errno {-result}")
+                if self._reap_result.complete:
+                    continue
+            if time.monotonic() >= deadline:
+                raise _SupervisorReapTimeout("atomic supervisor could not be reaped")
+            time.sleep(0.05)
+
+    def close_all(self) -> None:
+        with self._lock:
+            failures: list[BaseException] = []
+            for index in range(len(self._slots)):
+                if self._slots[index] >= 0:
+                    try:
+                        self.close(index)
+                    except BaseException as error:
+                        failures.append(error)
+            if failures:
+                interruption = next((error for error in failures if not isinstance(error, Exception)), None)
+                if interruption is not None:
+                    for error in failures:
+                        if error is not interruption:
+                            interruption.add_note(f"additional descriptor cleanup failure: {type(error).__name__}")
+                    raise _release_retired_owner_after_error(self, interruption)
+                failure = IntegrityError("atomic descriptor cleanup failed")
+                for error in failures[1:]:
+                    failure.add_note(f"additional descriptor cleanup failure: {type(error).__name__}")
+                raise _release_retired_owner_after_error(self, failure) from failures[0]
+            _release_atomic_owner(self)
+
+
+class AtomicPipe:
+    def __init__(self, descriptor: int):
+        self._descriptor = descriptor
+
+    def fileno(self) -> int:
+        if self._descriptor < 0:
+            raise ValueError("atomic pipe is closed")
+        return self._descriptor
+
+    def write(self, data: bytes) -> int:
+        written = 0
+        while written < len(data):
+            try:
+                count = os.write(self.fileno(), data[written:])
+            except InterruptedError:
+                continue
+            if count <= 0:
+                raise OSError("atomic pipe write failed")
+            written += count
+        return written
+
+    def flush(self) -> None:
+        self.fileno()
+
+    def close(self) -> None:
+        if self._descriptor >= 0:
+            descriptor = self._descriptor
+            self._descriptor = -1
+            os.close(descriptor)
+
+
+@dataclass
+class AtomicPidfdProcess:
+    stdin: Any
+    stdout: Any
+    pidfd: int
+    ready_fd: int
+    gate_fd: int
+    error_fd: int
+    returncode: int | None = None
+
+
+class SlotAtomicPipe(AtomicPipe):
+    def __init__(self, owner: AtomicDescriptorSlots, index: int):
+        self._owner = owner
+        self._index = index
+
+    def fileno(self) -> int:
+        descriptor = self._owner.descriptor(self._index)
+        if descriptor < 0:
+            raise ValueError("atomic pipe is closed")
+        return descriptor
+
+    def close(self) -> None:
+        self._owner.close(self._index)
+
+    def write(self, data: bytes) -> int:
+        written = 0
+        while written < len(data):
+            count = self._owner.write(self._index, data[written:])
+            if count <= 0:
+                raise OSError("atomic pipe write failed")
+            written += count
+        return written
+
+
+class SlotAtomicPidfdProcess(AtomicPidfdProcess):
+    def __init__(self, owner: AtomicDescriptorSlots):
+        self.owner = owner
+        self.stdin = SlotAtomicPipe(owner, 1)
+        self.stdout = SlotAtomicPipe(owner, 2)
+        self.returncode = None
+
+    @property
+    def pidfd(self) -> int:
+        return self.owner.descriptor(10)
+
+    @property
+    def ready_fd(self) -> int:
+        return self.owner.descriptor(4)
+
+    @property
+    def gate_fd(self) -> int:
+        return self.owner.descriptor(7)
+
+    @property
+    def error_fd(self) -> int:
+        return self.owner.descriptor(8)
+
+
+@dataclass
+class AtomicLaunchOwner:
+    child: AtomicPidfdProcess | None = None
+
+
+_atomic_launcher_lock = threading.Lock()
+_atomic_launcher_cache: tuple[str, Any, int] | None = None
+_retained_atomic_owners: set[Any] = set()
+_retained_atomic_owners_lock = threading.Lock()
+
+
+def _retain_atomic_owner(owner: Any) -> None:
+    with _retained_atomic_owners_lock:
+        _retained_atomic_owners.add(owner)
+
+
+def _release_atomic_owner(owner: Any) -> None:
+    with owner._lock, _retained_atomic_owners_lock:
+        if not owner.all_closed():
+            raise IntegrityError("atomic descriptor owner still has live descriptors")
+        _retained_atomic_owners.discard(owner)
+
+
+def _release_retired_owner_after_error(owner: Any, primary: BaseException) -> BaseException:
+    if not owner.all_closed():
+        return primary
+    try:
+        _release_atomic_owner(owner)
+    except BaseException as error:
+        if not isinstance(error, Exception) and isinstance(primary, Exception):
+            error.add_note(f"descriptor cleanup also failed: {type(primary).__name__}")
+            return error
+        primary.add_note(f"descriptor owner release failed: {type(error).__name__}")
+    return primary
+
+
+def _load_atomic_launcher(library_path: Path, expected_sha256: str) -> Callable[..., int]:
+    with _atomic_launcher_lock:
+        return _load_atomic_launcher_locked(library_path, expected_sha256)
+
+
+def _load_atomic_launcher_locked(library_path: Path, expected_sha256: str) -> Callable[..., int]:
+    global _atomic_launcher_cache
+    if not library_path.is_absolute() or type(expected_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise IntegrityError("trusted atomic launcher library path is invalid")
+    source_fd = -1
+    sealed_fd = -1
+    try:
+        source_fd = os.open(library_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        source_stat = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(source_stat.st_mode)
+            or source_stat.st_uid not in {0, os.geteuid()}
+            or source_stat.st_mode & 0o022
+            or not 0 < source_stat.st_size <= 8 * 1024 * 1024
+        ):
+            raise IntegrityError("trusted atomic launcher library metadata is invalid")
+        sealed_fd = os.memfd_create("trusted-atomic-launcher", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        digest = hashlib.sha256()
+        remaining = source_stat.st_size
+        while remaining:
+            chunk = os.read(source_fd, min(remaining, 65536))
+            if not chunk:
+                raise IntegrityError("trusted atomic launcher library was truncated")
+            digest.update(chunk)
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(sealed_fd, chunk[offset:])
+                if written <= 0:
+                    raise IntegrityError("trusted atomic launcher library copy failed")
+                offset += written
+            remaining -= len(chunk)
+        if os.read(source_fd, 1):
+            raise IntegrityError("trusted atomic launcher library changed while reading")
+        if digest.hexdigest() != expected_sha256:
+            raise IntegrityError("trusted atomic launcher library digest mismatch")
+        if _atomic_launcher_cache is not None:
+            cached_digest, cached_launch, _cached_fd = _atomic_launcher_cache
+            if cached_digest != expected_sha256:
+                raise IntegrityError("trusted atomic launcher library identity changed")
+            if cached_launch is None:
+                raise IntegrityError("trusted atomic launcher library is unavailable")
+            return cached_launch
+        seals = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+        fcntl.fcntl(sealed_fd, fcntl.F_ADD_SEALS, seals)
+        dynamic_linker = ctypes.CDLL(None)
+        dlmopen = dynamic_linker.dlmopen
+        dlmopen.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_int]
+        dlmopen.restype = ctypes.c_void_p
+        handle = dlmopen(-1, os.fsencode(f"/proc/self/fd/{sealed_fd}"), os.RTLD_NOW | os.RTLD_LOCAL)
+        if not handle:
+            raise IntegrityError("trusted atomic launcher linker namespace is unavailable")
+        library = ctypes.CDLL(None, handle=handle)
+        _atomic_launcher_cache = (expected_sha256, None, sealed_fd)
+        sealed_fd = -1
+        launch = library.verjson_pidfd_launch
+        launch.argtypes = [ctypes.POINTER(ctypes.c_int)] + [ctypes.c_int] * 5 + [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_size_t, ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(ctypes.c_char_p),
+        ]
+        launch.restype = ctypes.c_int
+        owned_pipe = library.verjson_owned_pipe
+        owned_pipe.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        owned_pipe.restype = ctypes.c_int
+        owned_close = library.verjson_owned_close
+        owned_close.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        owned_close.restype = ctypes.c_int
+        owned_dup = library.verjson_owned_dup
+        owned_dup.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        owned_dup.restype = ctypes.c_int
+        owned_openat = library.verjson_owned_openat
+        owned_openat.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_char_p,
+                                 ctypes.c_int, ctypes.c_uint]
+        owned_openat.restype = ctypes.c_int
+        owned_pidfd_open = library.verjson_owned_pidfd_open
+        owned_pidfd_open.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        owned_pidfd_open.restype = ctypes.c_int
+        owned_pid_namespace = library.verjson_owned_pid_namespace
+        owned_pid_namespace.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        owned_pid_namespace.restype = ctypes.c_int
+        owned_reap = library.verjson_owned_reap
+        owned_reap.argtypes = [ctypes.c_int, ctypes.POINTER(AtomicReapResult)]
+        owned_reap.restype = ctypes.c_int
+        launch._owned_pipe = owned_pipe
+        launch._owned_close = owned_close
+        launch._owned_dup = owned_dup
+        launch._owned_openat = owned_openat
+        launch._owned_pidfd_open = owned_pidfd_open
+        launch._owned_pid_namespace = owned_pid_namespace
+        launch._owned_reap = owned_reap
+        launch._trusted_library = library
+        _atomic_launcher_cache = (expected_sha256, launch, _atomic_launcher_cache[2])
+        return launch
+    except (OSError, AttributeError) as error:
+        raise IntegrityError("trusted atomic launcher library could not be loaded") from error
+    finally:
+        active_error = sys.exc_info()[1]
+        close_failure = None
+        for descriptor in (source_fd, sealed_fd):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    close_failure = close_failure or error
+        if close_failure is not None:
+            if active_error is None:
+                raise IntegrityError("trusted atomic launcher library cleanup failed") from close_failure
+            active_error.add_note(f"launcher library cleanup failed: {type(close_failure).__name__}")
+
+
+def _resolve_atomic_mount_arguments(
+    arguments: list[str], placeholders: dict[str, int],
+) -> list[str]:
+    bind_options = {"--bind", "--ro-bind", "--dev-bind", "--bind-try", "--ro-bind-try", "--dev-bind-try"}
+    no_argument_options = {"--unshare-user", "--unshare-pid", "--as-pid-1", "--unshare-ipc", "--unshare-uts",
+                           "--unshare-cgroup-try", "--disable-userns", "--die-with-parent", "--new-session",
+                           "--unshare-net", "--share-net"}
+    one_argument_options = {"--cap-drop", "--dir", "--tmpfs", "--proc", "--dev", "--chdir", "--hostname",
+                            "--unsetenv"}
+    two_argument_options = {"--chmod", "--setenv", "--symlink"}
+    resolved = list(arguments)
+    used: set[str] = set()
+    position = 1
+    while position < len(arguments):
+        option = arguments[position]
+        if option == "--":
+            break
+        if option in bind_options:
+            if position + 2 >= len(arguments):
+                raise IntegrityError("atomic sandbox bind arguments are incomplete")
+            source = arguments[position + 1]
+            if source in placeholders:
+                used.add(source)
+                resolved[position + 1] = f"/proc/self/fd/{placeholders[source]}"
+            else:
+                raise IntegrityError("atomic sandbox bind source is not owned")
+            position += 3
+        elif option in no_argument_options:
+            position += 1
+        elif option in one_argument_options:
+            if position + 1 >= len(arguments):
+                raise IntegrityError("atomic sandbox option is incomplete")
+            position += 2
+        elif option in two_argument_options:
+            if position + 2 >= len(arguments):
+                raise IntegrityError("atomic sandbox option is incomplete")
+            position += 3
+        else:
+            raise IntegrityError("atomic sandbox option is unsupported")
+    if used != set(placeholders):
+        raise IntegrityError("atomic sandbox mount descriptor is unused")
+    return resolved
+
+
+def _spawn_slot_atomic_supervisor(
+    arguments: list[str], environment: dict[str, str], pass_fds: tuple[int, ...], cwd: str | None,
+    native_launch: Callable[..., int], owner: AtomicDescriptorSlots, publication: AtomicLaunchOwner,
+    mount_owner: AtomicMountDescriptors | None = None, mount_slots: tuple[int, ...] = (),
+) -> SlotAtomicPidfdProcess:
+    child = SlotAtomicPidfdProcess(owner)
+    publication.child = child
+    for index in (0, 2, 4, 6, 8):
+        owner.open_pair(index)
+    for index in (1, 2, 4, 7, 8):
+        owner.set_nonblocking(index)
+    if pass_fds:
+        raise IntegrityError("atomic sandbox requires owned mount descriptors")
+    if mount_owner is None:
+        if mount_slots:
+            raise IntegrityError("atomic sandbox mount descriptor ownership is missing")
+        resolved = _resolve_atomic_mount_arguments(arguments, {})
+        result = owner.launch_bubblewrap(native_launch, resolved, environment, (), cwd)
+    else:
+        if (mount_owner._launcher is not native_launch or not mount_slots
+                or any(type(index) is not int for index in mount_slots)
+                or len(set(mount_slots)) != len(mount_slots)):
+            raise IntegrityError("atomic sandbox mount descriptor ownership is invalid")
+        with mount_owner.lease() as lease:
+            mount_owner.verify_sealed(mount_slots)
+            descriptors = tuple(lease.descriptor(index) for index in mount_slots)
+            placeholders = {f"/proc/self/fd/@verjson-slot-{index}@": descriptor
+                            for index, descriptor in zip(mount_slots, descriptors)}
+            resolved_arguments = _resolve_atomic_mount_arguments(arguments, placeholders)
+            result = owner.launch_bubblewrap(native_launch, resolved_arguments, environment, descriptors, cwd)
+    if result != 0:
+        raise IntegrityError(f"trusted atomic launcher failed: errno {-result}")
+    if child.pidfd < 0:
+        raise IntegrityError("trusted atomic launcher omitted its pidfd")
+    for index in (0, 3, 5, 6, 9):
+        owner.close(index)
+    return child
+
+
+def _spawn_atomic_supervisor(
+    arguments: list[str], environment: dict[str, str], pass_fds: tuple[int, ...],
+    cwd: str | None, native_launch: Callable[..., int], owner: AtomicLaunchOwner | None = None,
+) -> AtomicPidfdProcess:
+    if not arguments or not os.path.isabs(arguments[0]):
+        raise IntegrityError("trusted atomic launcher requires an absolute executable")
+    if any(type(fd) is not int or fd < 3 for fd in pass_fds) or len(set(pass_fds)) != len(pass_fds):
+        raise IntegrityError("trusted atomic launcher inherited descriptors are invalid")
+    for descriptor in pass_fds:
+        os.fstat(descriptor)
+    try:
+        encoded_arguments = [os.fsencode(argument) for argument in arguments]
+        encoded_environment = [os.fsencode(key) + b"=" + os.fsencode(value) for key, value in environment.items()]
+        encoded_cwd = os.fsencode(cwd) if cwd is not None else None
+    except (TypeError, ValueError) as error:
+        raise IntegrityError("trusted atomic launcher arguments are invalid") from error
+    if any(b"\x00" in value for value in [*encoded_arguments, *encoded_environment]) or (
+        encoded_cwd is not None and b"\x00" in encoded_cwd
+    ) or any("=" in key for key in environment):
+        raise IntegrityError("trusted atomic launcher arguments are invalid")
+    argv = (ctypes.c_char_p * (len(encoded_arguments) + 1))(*encoded_arguments, None)
+    envp = (ctypes.c_char_p * (len(encoded_environment) + 1))(*encoded_environment, None)
+    inherited = (ctypes.c_int * len(pass_fds))(*pass_fds) if pass_fds else None
+    owned: set[int] = set()
+    pidfd = ctypes.c_int(-1)
+    gate_w: int | None = None
+
+    def close_owned(descriptor: int) -> None:
+        owned.remove(descriptor)
+        os.close(descriptor)
+
+    try:
+        pipes = []
+        for _ in range(5):
+            pair = os.pipe2(os.O_CLOEXEC)
+            owned.update(pair)
+            pipes.append(pair)
+        (stdin_r, stdin_w), (stdout_r, stdout_w), (ready_r, ready_w), (gate_r, gate_w), (error_r, error_w) = pipes
+        if owned.intersection(pass_fds):
+            raise IntegrityError("trusted atomic launcher descriptors overlap")
+        result = native_launch(ctypes.byref(pidfd), stdin_r, stdout_w, ready_w, gate_r, error_w,
+                               inherited, len(pass_fds), encoded_cwd, argv, envp)
+        if pidfd.value >= 0:
+            owned.add(pidfd.value)
+        if result != 0:
+            raise IntegrityError(f"trusted atomic launcher failed: errno {-result}")
+        if pidfd.value < 0:
+            raise IntegrityError("trusted atomic launcher omitted its pidfd")
+        for descriptor in (stdin_r, stdout_w, ready_w, gate_r, error_w):
+            close_owned(descriptor)
+        stdin_stream = AtomicPipe(stdin_w)
+        stdout_stream = AtomicPipe(stdout_r)
+        child = AtomicPidfdProcess(stdin_stream, stdout_stream, pidfd.value, ready_r, gate_w, error_r)
+        if owner is not None:
+            owner.child = child
+        owned.difference_update((pidfd.value, stdin_w, stdout_r, ready_r, gate_w, error_r))
+        return child
+    except BaseException as error:
+        if owner is not None and owner.child is not None:
+            owned.difference_update((pidfd.value, stdin_w, stdout_r, ready_r, gate_w, error_r))
+            raise
+        if pidfd.value >= 0:
+            owned.add(pidfd.value)
+        if pidfd.value in owned:
+            cleanup_failures: list[BaseException] = []
+            try:
+                if gate_w is not None and gate_w in owned:
+                    close_owned(gate_w)
+            except BaseException as cleanup_error:
+                cleanup_failures.append(cleanup_error)
+            try:
+                signal.pidfd_send_signal(pidfd.value, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except BaseException as cleanup_error:
+                cleanup_failures.append(cleanup_error)
+            try:
+                failed_process = AtomicPidfdProcess(None, None, pidfd.value, -1, -1, -1)
+                _reap_pinned_supervisor(failed_process, pidfd.value, 5)
+            except BaseException as cleanup_error:
+                cleanup_failures.append(cleanup_error)
+            for cleanup_error in cleanup_failures:
+                error.add_note(f"atomic launcher cleanup failed: {type(cleanup_error).__name__}")
+        raise
+    finally:
+        active_error = sys.exc_info()[1]
+        close_failure = None
+        for descriptor in owned:
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                close_failure = close_failure or error
+        if close_failure is not None:
+            if active_error is None:
+                raise IntegrityError("atomic launcher descriptor cleanup failed") from close_failure
+            active_error.add_note(f"atomic launcher descriptor cleanup failed: {type(close_failure).__name__}")
+
+
+def _atomic_launcher_error(data: bytearray) -> None:
+    if len(data) != struct.calcsize("@ii"):
+        raise IntegrityError("trusted atomic launcher error frame is invalid")
+    stage, error = struct.unpack("@ii", data)
+    if stage not in range(1, 8) or error <= 0:
+        raise IntegrityError("trusted atomic launcher error frame is invalid")
+    raise IntegrityError(f"trusted atomic launcher failed at stage {stage}: errno {error}")
+
+
+def _wait_atomic_launcher_pipe(
+    descriptors: list[int], signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
+) -> list[int]:
+    while True:
+        signum = _read_host_cancellation(signals)
+        if signum is not None:
+            raise ScriptPlanInterrupted(signum)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise IntegrityError("trusted atomic launcher timed out")
+        try:
+            readable, _, _ = select.select(descriptors, [], [], min(remaining, 0.05))
+        except InterruptedError:
+            continue
+        if readable:
+            return readable
+
+
+def _wait_atomic_slot_pipe(
+    owner: AtomicDescriptorSlots, indices: tuple[int, ...],
+    signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
+) -> tuple[int, ...]:
+    while True:
+        signum = _read_host_cancellation(signals)
+        if signum is not None:
+            raise ScriptPlanInterrupted(signum)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise IntegrityError("trusted atomic launcher timed out")
+        try:
+            readable = owner.wait_readable(indices, min(remaining, 0.05))
+        except InterruptedError:
+            continue
+        if readable:
+            return readable
+
+
+def _await_atomic_launcher_ready(
+    child: AtomicPidfdProcess, signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
+) -> None:
+    error_data = bytearray()
+    while True:
+        if isinstance(child, SlotAtomicPidfdProcess):
+            readable = _wait_atomic_slot_pipe(child.owner, (4, 8), signals, deadline)
+            error_ready, ready = 8 in readable, 4 in readable
+        else:
+            readable = _wait_atomic_launcher_pipe([child.ready_fd, child.error_fd], signals, deadline)
+            error_ready, ready = child.error_fd in readable, child.ready_fd in readable
+        if error_ready:
+            chunk = (child.owner.read(8, 9 - len(error_data)) if isinstance(child, SlotAtomicPidfdProcess)
+                     else os.read(child.error_fd, 9 - len(error_data)))
+            if not chunk:
+                if error_data:
+                    _atomic_launcher_error(error_data)
+                raise IntegrityError("trusted atomic launcher exited before readiness")
+            error_data.extend(chunk)
+            if len(error_data) > 8:
+                raise IntegrityError("trusted atomic launcher error frame is invalid")
+        if ready:
+            if isinstance(child, SlotAtomicPidfdProcess):
+                child.owner.read_ready()
+                valid_ready = not error_data
+            else:
+                valid_ready = os.read(child.ready_fd, 2) == b"R" and not error_data
+            if not valid_ready:
+                raise IntegrityError("trusted atomic launcher readiness frame is invalid")
+            return
+
+
+def _await_atomic_launcher_error_channel(
+    child: AtomicPidfdProcess, signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
+) -> None:
+    error_data = bytearray()
+    while True:
+        if isinstance(child, SlotAtomicPidfdProcess):
+            _wait_atomic_slot_pipe(child.owner, (8,), signals, deadline)
+            chunk = child.owner.read(8, 9 - len(error_data))
+        else:
+            _wait_atomic_launcher_pipe([child.error_fd], signals, deadline)
+            chunk = os.read(child.error_fd, 9 - len(error_data))
+        if not chunk:
+            if error_data:
+                _atomic_launcher_error(error_data)
+            return
+        error_data.extend(chunk)
+        if len(error_data) > 8:
+            raise IntegrityError("trusted atomic launcher error frame is invalid")
 
 
 def run_supervised_bubblewrap(
@@ -1432,9 +2834,39 @@ def run_supervised_bubblewrap(
     cwd: str | None = None,
     test_hook: Callable[[str], None] | None = None,
     test_after_ack_marker: str | None = None,
+    execution_timeout_seconds: float | None = None,
+    namespace_notifications: queue.Queue[PinnedSupervisorNamespace] | None = None,
+    namespace_attempt_id: str | None = None,
+    _atomic_launcher: Callable[..., int] | None = None,
+    _mount_owner: AtomicMountDescriptors | None = None,
+    _mount_slots: tuple[int, ...] = (),
 ) -> TrustedCandidateStatus:
+    """Run the pinned supervisor; an optional deadline includes launch and cleanup.
+
+    This call does not close the shared plan's cancellation acceptance window.
+    """
     if not arguments:
         raise IntegrityError("trusted sandbox launcher arguments are invalid")
+    if (_atomic_launcher is None and (_mount_owner is not None or _mount_slots)) or (
+        _atomic_launcher is not None and pass_fds
+    ):
+        raise IntegrityError("atomic sandbox mount descriptors require an owned mount lease")
+    if execution_timeout_seconds is not None and (
+        type(execution_timeout_seconds) not in (int, float)
+        or not 0 < execution_timeout_seconds <= 86400
+    ):
+        raise IntegrityError("trusted sandbox execution deadline is invalid")
+    if namespace_notifications is None:
+        if namespace_attempt_id is not None:
+            raise IntegrityError("trusted sandbox namespace notification is invalid")
+    elif (
+        type(namespace_notifications) is not queue.Queue
+        or namespace_notifications.maxsize != 1
+        or execution_timeout_seconds is None
+        or type(namespace_attempt_id) is not str
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", namespace_attempt_id) is None
+    ):
+        raise IntegrityError("trusted sandbox namespace notification is invalid")
     signals = _coerce_host_signal_queue(host_signals, cancellation_signal)
     if test_after_ack_marker is not None and (
         not isinstance(test_after_ack_marker, str)
@@ -1443,9 +2875,24 @@ def run_supervised_bubblewrap(
     ):
         raise IntegrityError("trusted sandbox test marker path is invalid")
 
-    status_read_fd, status_write_fd = os.pipe()
-    process: subprocess.Popen[bytes] | None = None
+    inner_descriptors = InnerSupervisorDescriptors(_atomic_launcher) if _atomic_launcher is not None else None
+    status_owner = (AtomicDescriptorSlots(_atomic_launcher._owned_pipe, _atomic_launcher._owned_close,
+                                          _atomic_launcher._owned_reap)
+                    if _atomic_launcher is not None else None)
+    status_read_fd = status_write_fd = -1
+    process: subprocess.Popen[bytes] | AtomicPidfdProcess | None = None
+    atomic_owner = AtomicLaunchOwner()
     pidfd: int | None = None
+    provisional_pidfd: int | None = None
+    identity_nonce: str | None = None
+    challenge_sent = False
+    identity_verified = False
+    challenge_deadline: float | None = None
+    leader_pidfd: int | None = None
+    gate_environment_fd: int | None = None
+    gate_authenticated = False
+    gate_released = False
+    published_namespace: PinnedSupervisorNamespace | None = None
     status_data = bytearray()
     wrapper_data = bytearray()
     wrapper_offset = 0
@@ -1471,11 +2918,47 @@ def run_supervised_bubblewrap(
         if test_hook is not None:
             test_hook(event)
 
-    def drain_fd(descriptor: int, target: bytearray, limit: int) -> bool:
+    def publish_namespace() -> None:
+        nonlocal published_namespace
+        if not identity_verified or pidfd is None or child_pid is None or pid_namespace is None or namespace_notifications is None:
+            raise IntegrityError("trusted sandbox namespace identity is unavailable")
+        if inner_descriptors is not None:
+            notice = PinnedSupervisorNamespace(namespace_attempt_id, child_pid, pid_namespace, -1, -1, _atomic_launcher)
+            published_namespace = notice
+            try:
+                _retain_atomic_owner(notice)
+                with inner_descriptors.lease(pidfd) as namespace_fd:
+                    notice._acquire_native(namespace_fd, pidfd)
+                namespace_notifications.put_nowait(notice)
+            except (OSError, queue.Full) as error:
+                raise IntegrityError("trusted sandbox namespace publication failed") from error
+            return
+        namespace_fd = -1
+        pinned_pidfd = -1
+        try:
+            if select.select([pidfd], [], [], 0)[0]:
+                raise IntegrityError("trusted sandbox supervisor exited before publication")
+            namespace_fd = os.open(f"/proc/{child_pid}/ns/pid", os.O_RDONLY | os.O_CLOEXEC)
+            pinned_pidfd = os.dup(pidfd)
+            if os.fstat(namespace_fd).st_ino != pid_namespace or select.select([pidfd], [], [], 0)[0]:
+                raise IntegrityError("trusted sandbox namespace changed before publication")
+            notice = PinnedSupervisorNamespace(namespace_attempt_id, child_pid, pid_namespace, namespace_fd, pinned_pidfd)
+            published_namespace = notice
+            namespace_notifications.put_nowait(notice)
+        except (OSError, queue.Full) as error:
+            raise IntegrityError("trusted sandbox namespace publication failed") from error
+        finally:
+            if published_namespace is None:
+                for descriptor in (namespace_fd, pinned_pidfd):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+
+    def drain_fd(descriptor: int, target: bytearray, limit: int, slot_index: int | None = None) -> bool:
         eof = False
         while True:
             try:
-                chunk = os.read(descriptor, 4096)
+                chunk = (status_owner.read(slot_index, 4096) if slot_index is not None and status_owner is not None
+                         else os.read(descriptor, 4096))
             except BlockingIOError:
                 break
             if not chunk:
@@ -1510,23 +2993,38 @@ def run_supervised_bubblewrap(
         control_deadline = time.monotonic() + 5.0
 
     def pin_supervisor() -> None:
-        nonlocal pidfd
+        nonlocal provisional_pidfd
         if child_pid is None or pid_namespace is None:
             raise IntegrityError("Bubblewrap omitted a pinnable PID namespace identity")
         if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
             raise IntegrityError("host cannot safely pin and signal the trusted supervisor")
+        provisional_pidfd = (inner_descriptors.acquire(child_pid, pid_namespace) if inner_descriptors is not None
+                             else _pin_reported_supervisor(child_pid, pid_namespace))
+
+    def send_identity_challenge() -> None:
+        nonlocal identity_nonce, challenge_sent, challenge_deadline
+        if process is None or process.stdin is None or provisional_pidfd is None:
+            raise IntegrityError("trusted supervisor challenge pipe is unavailable")
+        identity_nonce = os.urandom(32).hex()
+        frame = f"challenge:{identity_nonce}\n".encode("ascii")
         try:
-            pidfd = os.pidfd_open(child_pid)
-            if os.stat(f"/proc/{child_pid}/ns/pid").st_ino != pid_namespace:
-                raise IntegrityError("Bubblewrap supervisor PID namespace identity changed")
-        except OSError as error:
-            raise IntegrityError("cannot safely pin the Bubblewrap-reported supervisor PID") from error
+            if process.stdin.write(frame) != len(frame):
+                raise IntegrityError("trusted supervisor challenge write was incomplete")
+            process.stdin.flush()
+        except (BrokenPipeError, OSError) as error:
+            raise IntegrityError("trusted supervisor challenge pipe closed") from error
+        challenge_sent = True
+        challenge_deadline = time.monotonic() + 5.0
 
     def send_pidfd_signal(signum: int) -> bool:
-        if pidfd is None:
+        if not identity_verified or pidfd is None:
             raise IntegrityError("trusted supervisor PID was not pinned")
         try:
-            signal.pidfd_send_signal(pidfd, signum)
+            if inner_descriptors is not None:
+                with inner_descriptors.lease(pidfd):
+                    signal.pidfd_send_signal(pidfd, signum)
+            else:
+                signal.pidfd_send_signal(pidfd, signum)
             return True
         except ProcessLookupError:
             return False
@@ -1536,33 +3034,14 @@ def run_supervised_bubblewrap(
             raise IntegrityError("cannot signal the pinned trusted supervisor") from error
 
     def signal_bubblewrap_group(signum: int) -> bool:
-        if process is None:
-            return False
-        try:
-            os.killpg(process.pid, signum)
-            return True
-        except ProcessLookupError:
-            return False
-        except OSError as error:
-            if error.errno == errno.ESRCH:
-                return False
-            raise IntegrityError("cannot signal the isolated Bubblewrap process group") from error
-
-    def bubblewrap_group_exists() -> bool:
-        if process is None:
-            return False
-        try:
-            os.killpg(process.pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except OSError as error:
-            if error.errno == errno.ESRCH:
-                return False
-            raise IntegrityError("cannot verify the isolated Bubblewrap process group") from error
+        if not gate_authenticated or leader_pidfd is None:
+            raise IntegrityError("trusted Bubblewrap group identity was not authenticated")
+        if isinstance(process, SlotAtomicPidfdProcess):
+            return process.owner.signal_group(signum)
+        return _signal_pinned_process_group(leader_pidfd, signum)
 
     def process_wrapper_lines() -> None:
-        nonlocal wrapper_offset, ready_seen, ack_seen
+        nonlocal wrapper_offset, ready_seen, ack_seen, identity_verified, pidfd, provisional_pidfd
         while b"\n" in wrapper_data[wrapper_offset:]:
             line_end = wrapper_data.index(b"\n", wrapper_offset)
             line = bytes(wrapper_data[wrapper_offset:line_end])
@@ -1579,8 +3058,21 @@ def run_supervised_bubblewrap(
                 if ready_seen or wrapper_records:
                     raise IntegrityError("trusted wrapper ready event is duplicated or misplaced")
                 mark_ready = True
+            elif record["event"] == "identity-proof":
+                if (not challenge_sent or identity_verified or provisional_pidfd is None
+                        or child_pid is None or pid_namespace is None or identity_nonce is None):
+                    raise IntegrityError("trusted supervisor identity proof is misplaced")
+                if inner_descriptors is not None:
+                    with inner_descriptors.lease(provisional_pidfd) as namespace_fd:
+                        _verify_inner_supervisor_identity(provisional_pidfd, child_pid, pid_namespace,
+                                                          identity_nonce, line, namespace_fd)
+                else:
+                    _verify_inner_supervisor_identity(provisional_pidfd, child_pid, pid_namespace, identity_nonce, line)
+                identity_verified = True
+                pidfd = provisional_pidfd
+                provisional_pidfd = None
             elif record["event"] in {"control-accepted", "control-aborted"}:
-                if not ready_seen or not control_sent or ack_seen:
+                if not identity_verified or not ready_seen or not control_sent or ack_seen:
                     raise IntegrityError("trusted wrapper control ACK is duplicated or misplaced")
                 expected = "control-aborted" if control_decision == "abort" else "control-accepted"
                 if record["event"] != expected:
@@ -1630,106 +3122,278 @@ def run_supervised_bubblewrap(
         )
 
     def terminate_after_error() -> None:
+        nonlocal process, leader_pidfd, gate_authenticated
+        if process is None and atomic_owner.child is not None:
+            process = atomic_owner.child
         if process is None:
             return
-        if process.poll() is None:
-            try:
-                signaled = pidfd is not None and send_pidfd_signal(signal.SIGTERM)
-            except IntegrityError:
-                signaled = False
-            if not signaled:
-                signal_bubblewrap_group(signal.SIGTERM)
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
-            except ChildProcessError as error:
-                if process.poll() is None:
-                    raise IntegrityError("Bubblewrap process could not be reaped") from error
-
-        if process.poll() is None:
-            try:
-                signaled = pidfd is not None and send_pidfd_signal(signal.SIGKILL)
-            except IntegrityError:
-                signaled = False
-            if not signaled:
-                signal_bubblewrap_group(signal.SIGKILL)
+        if isinstance(process, AtomicPidfdProcess):
+            if leader_pidfd is None:
+                leader_pidfd = process.pidfd
+            if isinstance(process, SlotAtomicPidfdProcess) and leader_pidfd < 0:
+                return
+            gate_authenticated = True
+        if not gate_authenticated or leader_pidfd is None:
+            if process.stdin is not None:
+                process.stdin.close()
+            if leader_pidfd is not None:
+                # A pinned pidfd exists, so never fall back to a numeric-PID wait.
+                try:
+                    _reap_pinned_supervisor(process, leader_pidfd, 5)
+                except _SupervisorReapTimeout:
+                    try:
+                        signal.pidfd_send_signal(leader_pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except OSError as error:
+                        raise IntegrityError("unreleased trusted launcher did not exit") from error
+                    try:
+                        _reap_pinned_supervisor(process, leader_pidfd, 5)
+                    except BaseException as error:
+                        raise IntegrityError("unreleased trusted launcher did not exit") from error
+                return
             try:
                 process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                signal_bubblewrap_group(signal.SIGKILL)
-                try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired as error:
-                    raise IntegrityError("Bubblewrap process did not exit after SIGKILL") from error
-            except ChildProcessError as error:
-                if process.poll() is None:
-                    raise IntegrityError("Bubblewrap process could not be reaped") from error
-
-        if bubblewrap_group_exists():
+            except subprocess.TimeoutExpired as error:
+                raise IntegrityError("unreleased trusted launcher did not exit") from error
+            return
+        if not gate_released:
+            cleanup_failures: list[BaseException] = []
             try:
-                extinguish_supervised_process_group(process)
-            except (IntegrityError, OSError) as error:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except BaseException as error:
+                cleanup_failures.append(error)
+            if isinstance(process, AtomicPidfdProcess) and process.gate_fd >= 0:
+                try:
+                    if isinstance(process, SlotAtomicPidfdProcess):
+                        process.owner.close(7)
+                    else:
+                        descriptor = process.gate_fd
+                        process.gate_fd = -1
+                        os.close(descriptor)
+                except BaseException as error:
+                    cleanup_failures.append(error)
+            try:
+                _reap_pinned_supervisor(process, leader_pidfd, 1)
+            except BaseException as initial_error:
+                if not isinstance(initial_error, _SupervisorReapTimeout):
+                    cleanup_failures.append(initial_error)
+                try:
+                    if isinstance(process, SlotAtomicPidfdProcess):
+                        process.owner.terminate_leader()
+                    else:
+                        signal.pidfd_send_signal(leader_pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except BaseException as error:
+                    cleanup_failures.append(error)
+                try:
+                    _reap_pinned_supervisor(process, leader_pidfd, 5)
+                except BaseException as error:
+                    if isinstance(initial_error, _SupervisorReapTimeout):
+                        cleanup_failures.append(initial_error)
+                    cleanup_failures.append(error)
+            if cleanup_failures:
+                failure = IntegrityError("unreleased trusted launcher cleanup failed")
+                for error in cleanup_failures[1:]:
+                    failure.add_note(f"additional launcher cleanup failure: {type(error).__name__}")
+                raise failure from cleanup_failures[0]
+            return
+        try:
+            if _observe_supervised_process(process, leader_pidfd) is None:
+                try:
+                    signaled = pidfd is not None and send_pidfd_signal(signal.SIGTERM)
+                except IntegrityError:
+                    signaled = False
+                if not signaled:
+                    signal_bubblewrap_group(signal.SIGTERM)
+                deadline = time.monotonic() + 1
+                while _observe_supervised_process(process, leader_pidfd) is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+
+            if _observe_supervised_process(process, leader_pidfd) is None:
+                try:
+                    signaled = pidfd is not None and send_pidfd_signal(signal.SIGKILL)
+                except IntegrityError:
+                    signaled = False
+                if not signaled:
+                    signal_bubblewrap_group(signal.SIGKILL)
+            extinguish_supervised_process_group(process, leader_pidfd)
+        except BaseException as error:
+            if process.returncode is None:
+                try:
+                    if isinstance(process, SlotAtomicPidfdProcess):
+                        process.owner.terminate_leader()
+                    else:
+                        signal.pidfd_send_signal(leader_pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except BaseException as fallback_error:
+                    error.add_note(f"pinned supervisor signal fallback failed: {type(fallback_error).__name__}")
+                try:
+                    _reap_pinned_supervisor(process, leader_pidfd, 5)
+                except BaseException as fallback_error:
+                    error.add_note(f"pinned supervisor reap fallback failed: {type(fallback_error).__name__}")
+            if isinstance(error, (IntegrityError, OSError)):
                 raise IntegrityError("cannot verify isolated Bubblewrap process-group cleanup") from error
-        if process.poll() is None:
-            raise IntegrityError("Bubblewrap process remains alive after cleanup")
+            raise
 
 
     try:
-        os.set_blocking(status_read_fd, False)
+        if inner_descriptors is not None:
+            _retain_atomic_owner(inner_descriptors)
+        if status_owner is None:
+            status_read_fd, status_write_fd = os.pipe()
+        else:
+            _retain_atomic_owner(status_owner)
+            status_owner.open_pair(11)
+            status_read_fd = status_owner.status_descriptor(11)
+            status_write_fd = status_owner.status_descriptor(12)
+        if status_owner is None:
+            os.set_blocking(status_read_fd, False)
+        else:
+            status_owner.set_nonblocking(11)
         sandbox_environment = dict(environment)
         if test_after_ack_marker is not None:
             sandbox_environment["VERJSON_CI_TEST_AFTER_ACK_MARKER"] = test_after_ack_marker
         else:
             sandbox_environment.pop("VERJSON_CI_TEST_AFTER_ACK_MARKER", None)
-        process = subprocess.Popen(
-            [arguments[0], "--json-status-fd", str(status_write_fd), *arguments[1:]],
-            env=sandbox_environment,
-            cwd=cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            start_new_session=True,
-            pass_fds=tuple([*pass_fds, status_write_fd]),
-        )
-        os.close(status_write_fd)
-        status_write_fd = -1
+        gate_deadline = time.monotonic() + 5.0
+        if execution_timeout_seconds is not None:
+            gate_deadline = min(gate_deadline, start_time + execution_timeout_seconds)
+        if _atomic_launcher is None:
+            gate_environment_fd = os.memfd_create("trusted-bwrap-environment", os.MFD_CLOEXEC)
+            environment_bytes = json.dumps(sandbox_environment, ensure_ascii=True).encode("ascii")
+            with os.fdopen(os.dup(gate_environment_fd), "wb") as environment_stream:
+                environment_stream.write(environment_bytes)
+            os.lseek(gate_environment_fd, 0, os.SEEK_SET)
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _BWRAP_LAUNCH_GATE,
+                 str(gate_environment_fd), arguments[0], "--json-status-fd", str(status_write_fd), *arguments[1:]],
+                env={}, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+                start_new_session=True,
+                pass_fds=tuple([*pass_fds, status_write_fd, gate_environment_fd]),
+            )
+            _supervised_process_group_id(process)
+            leader_pidfd = os.pidfd_open(process.pid)
+            _authenticate_bubblewrap_gate(process, leader_pidfd, signals, gate_deadline)
+            gate_authenticated = True
+            if not _signal_pinned_process_group(leader_pidfd, 0):
+                raise IntegrityError("trusted launcher exited before release")
+            # Set before writing: a release whose outcome is unknown must be cleaned up as
+            # released, which extinguishes the whole group instead of only the leader.
+            gate_released = True
+            if os.write(process.stdin.fileno(), b"\x01") != 1:
+                raise IntegrityError("trusted launcher release was incomplete")
+        else:
+            process = _spawn_slot_atomic_supervisor(
+                arguments, sandbox_environment, pass_fds, cwd, _atomic_launcher, status_owner, atomic_owner,
+                _mount_owner, _mount_slots,
+            )
+            leader_pidfd = process.pidfd
+            gate_authenticated = True
+            _await_atomic_launcher_ready(process, signals, gate_deadline)
+            if not status_owner.signal_group(0):
+                raise IntegrityError("trusted launcher exited before release")
+            gate_released = True
+            status_owner.release(signals)
+            status_owner.close(7)
+            _await_atomic_launcher_error_channel(process, signals, gate_deadline)
+        if status_owner is None:
+            descriptor, status_write_fd = status_write_fd, -1
+            os.close(descriptor)
+        else:
+            status_owner.close(12)
+            status_write_fd = -1
         if process.stdout is None or process.stdin is None:
             raise IntegrityError("trusted Bubblewrap pipes were not created")
-        os.set_blocking(process.stdout.fileno(), False)
+        if not isinstance(process, SlotAtomicPidfdProcess):
+            os.set_blocking(process.stdout.fileno(), False)
 
         while True:
-            signals.poll()
-            readable_fds = []
-            if not wrapper_eof:
-                readable_fds.append(process.stdout.fileno())
-            if not status_eof:
-                readable_fds.append(status_read_fd)
-            if readable_fds:
+            pending_signal = _read_host_cancellation(signals)
+            if pending_signal is not None and not identity_verified:
+                raise ScriptPlanInterrupted(pending_signal)
+            if (
+                execution_timeout_seconds is not None
+                and time.monotonic() - start_time >= execution_timeout_seconds
+            ):
+                if signals.host_cancel_signal is not None:
+                    candidate_outcome = authenticated_candidate_outcome()
+                    raise ScriptPlanInterrupted(
+                        signals.host_cancel_signal, candidate_started=authenticated_candidate_started(),
+                        candidate_exit_code=candidate_outcome['exitCode'] if candidate_outcome else None,
+                        candidate_signal=candidate_outcome['candidateSignal'] if candidate_outcome else None,
+                    )
+                raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
+            wait_seconds = 0.05
+            if execution_timeout_seconds is not None:
+                wait_seconds = max(0.0, min(wait_seconds, start_time + execution_timeout_seconds - time.monotonic()))
+            if isinstance(process, SlotAtomicPidfdProcess):
+                indices = tuple(index for index, eof in ((2, wrapper_eof), (11, status_eof)) if not eof)
                 try:
-                    readable, _writable, _exceptional = select.select(readable_fds, [], [], 0.05)
+                    readable = status_owner.wait_readable(indices, wait_seconds) if indices else ()
+                except InterruptedError:
+                    readable = ()
+                wrapper_readable, status_readable = 2 in readable, 11 in readable
+            else:
+                readable_fds = []
+                if not wrapper_eof:
+                    readable_fds.append(process.stdout.fileno())
+                if not status_eof:
+                    readable_fds.append(status_read_fd)
+                try:
+                    readable, _writable, _exceptional = select.select(readable_fds, [], [], wait_seconds) if readable_fds else ([], [], [])
                 except InterruptedError:
                     readable = []
-            else:
-                readable = []
-            if process.stdout.fileno() in readable:
+                wrapper_readable = not wrapper_eof and process.stdout.fileno() in readable
+                status_readable = status_read_fd in readable
+            if wrapper_readable:
                 wrapper_eof = drain_fd(
-                    process.stdout.fileno(), wrapper_data, MAX_TRUSTED_WRAPPER_STATUS_BYTES
+                    -1 if isinstance(process, SlotAtomicPidfdProcess) else process.stdout.fileno(),
+                    wrapper_data, MAX_TRUSTED_WRAPPER_STATUS_BYTES,
+                    2 if isinstance(process, SlotAtomicPidfdProcess) else None,
                 )
                 process_wrapper_lines()
-            if status_read_fd in readable:
-                status_eof = drain_fd(status_read_fd, status_data, MAX_BWRAP_STATUS_BYTES)
+            if status_readable:
+                status_eof = drain_fd(status_read_fd, status_data, MAX_BWRAP_STATUS_BYTES,
+                                      11 if isinstance(process, SlotAtomicPidfdProcess) else None)
 
             observed_pid, observed_namespace, bwrap_exited = _bubblewrap_child_identity(bytes(status_data))
             if observed_pid is not None:
                 child_pid = observed_pid
                 pid_namespace = observed_namespace
-            if ready_seen and not control_sent and child_pid is not None:
+            if ready_seen and not challenge_sent and child_pid is not None:
                 ready = wrapper_records[0]
                 if pid_namespace is None or ready["pidNamespace"] != pid_namespace:
                     raise IntegrityError("trusted wrapper ready identity mismatches Bubblewrap status")
                 pin_supervisor()
-                launch_signal = signals.launch_decision()
+                send_identity_challenge()
+            if challenge_sent and not identity_verified and challenge_deadline is not None and time.monotonic() > challenge_deadline:
+                raise IntegrityError("trusted supervisor identity challenge timed out")
+            if challenge_sent and not identity_verified and wrapper_eof:
+                raise IntegrityError("trusted supervisor ended before identity proof")
+            if identity_verified and not control_sent:
+                if pidfd is None:
+                    raise IntegrityError("trusted supervisor exited before control decision")
+                if inner_descriptors is not None:
+                    with inner_descriptors.lease(pidfd):
+                        supervisor_exited = bool(select.select([pidfd], [], [], 0)[0])
+                else:
+                    supervisor_exited = bool(select.select([pidfd], [], [], 0)[0])
+                if supervisor_exited:
+                    raise IntegrityError("trusted supervisor exited before control decision")
+                launch_signal = _read_host_cancellation(signals, launch=True)
+                if launch_signal is None and namespace_notifications is not None:
+                    if time.monotonic() - start_time >= execution_timeout_seconds:
+                        raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
+                    publish_namespace()
+                    launch_signal = _read_host_cancellation(signals, launch=True)
+                    if time.monotonic() - start_time >= execution_timeout_seconds:
+                        if launch_signal is not None:
+                            raise ScriptPlanInterrupted(launch_signal)
+                        raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
                 send_control(launch_signal)
             if (
                 control_sent
@@ -1737,9 +3401,9 @@ def run_supervised_bubblewrap(
                 and forwarded_signal is None
                 and not supervisor_pid_exited
             ):
-                signum = signals.poll()
+                signum = _read_host_cancellation(signals)
                 if signum is not None:
-                    if process.poll() is None:
+                    if _observe_supervised_process(process, leader_pidfd) is None:
                         if send_pidfd_signal(signum):
                             forwarded_signal = signum
                             escalation_deadline = time.monotonic() + 8.0
@@ -1751,7 +3415,7 @@ def run_supervised_bubblewrap(
                 forwarded_signal is not None
                 and escalation_deadline is not None
                 and time.monotonic() >= escalation_deadline
-                and process.poll() is None
+                and _observe_supervised_process(process, leader_pidfd) is None
             ):
                 if send_pidfd_signal(signal.SIGKILL):
                     escalation_deadline = None
@@ -1763,28 +3427,30 @@ def run_supervised_bubblewrap(
             if (
                 final_kill_deadline is not None
                 and time.monotonic() >= final_kill_deadline
-                and process.poll() is None
+                and _observe_supervised_process(process, leader_pidfd) is None
             ):
                 raise IntegrityError("trusted supervisor exceeded its independent exit deadline")
             if (
                 supervisor_pid_exited
                 and supervisor_exit_deadline is not None
-                and process.poll() is None
+                and _observe_supervised_process(process, leader_pidfd) is None
                 and time.monotonic() >= supervisor_exit_deadline
             ):
                 raise IntegrityError("Bubblewrap did not drain after its PID 1 supervisor exited")
-            if not ready_seen and time.monotonic() - start_time > 10.0 and process.poll() is None:
+            if not ready_seen and time.monotonic() - start_time > 10.0 and _observe_supervised_process(process, leader_pidfd) is None:
                 raise IntegrityError("trusted sandbox supervisor did not become ready")
             if control_sent and not ack_seen and control_deadline is not None and time.monotonic() > control_deadline:
                 raise IntegrityError("trusted sandbox supervisor did not ACK its control frame")
-            if process.poll() is not None and wrapper_eof and status_eof:
+            if _observe_supervised_process(process, leader_pidfd) is not None and wrapper_eof and status_eof:
                 break
-            if bwrap_exited and child_pid is None and process.poll() is not None and status_eof:
+            if bwrap_exited and child_pid is None and _observe_supervised_process(process, leader_pidfd) is not None and status_eof:
                 break
 
         if process is None:
             raise IntegrityError("trusted Bubblewrap process was not created")
-        process_returncode = process.wait()
+        process_returncode = _observe_supervised_process(process, leader_pidfd)
+        if process_returncode is None:
+            raise IntegrityError("trusted Bubblewrap process has not exited")
         if wrapper_data[wrapper_offset:]:
             raise IntegrityError("trusted wrapper status ended with a truncated record")
         parse_bubblewrap_json_status(
@@ -1797,16 +3463,33 @@ def run_supervised_bubblewrap(
             )
         if ready_seen and wrapper_records[0]["pidNamespace"] != pid_namespace:
             raise IntegrityError("trusted wrapper PID namespace identity changed")
-        host_signal = signals.poll()
+        host_signal = _read_host_cancellation(signals)
         status = _parse_trusted_candidate_status(
             bytes(wrapper_data),
             process_returncode,
             host_cancel_signal=host_signal,
             forwarded_signal=forwarded_signal,
             expected_pid_namespace=pid_namespace,
+            expected_identity_nonce=identity_nonce,
         )
         if status.state in {"bootstrap-failure", "exec-failure", "cleanup-failure", "supervisor-failure"}:
             raise _script_candidate_status_failure(status)
+        if execution_timeout_seconds is not None and host_signal is None:
+            late_signal = _read_host_cancellation(signals)
+            if late_signal is not None:
+                interruption = ScriptPlanInterrupted(
+                    late_signal, candidate_started=status.candidate_started,
+                    candidate_exit_code=status.return_code, candidate_signal=status.signum,
+                    supervisor_signal=status.supervisor_signal,
+                )
+                interruption.cleanup_status = "verified" if status.cleanup == "complete" else status.cleanup
+                raise interruption
+        if (
+            execution_timeout_seconds is not None
+            and host_signal is None
+            and time.monotonic() - start_time >= execution_timeout_seconds
+        ):
+            raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
         if status.state == "interrupted":
             interruption = ScriptPlanInterrupted(
                 status.host_cancellation_signal or signal.SIGTERM,
@@ -1839,7 +3522,6 @@ def run_supervised_bubblewrap(
                 cleanup_status="verified" if status.cleanup == "complete" else status.cleanup,
                 candidate_started=True,
             )
-        return status
     except ScriptPlanInterrupted:
         raise
     except BaseException as error:
@@ -1847,7 +3529,7 @@ def run_supervised_bubblewrap(
             raise
         candidate_outcome = authenticated_candidate_outcome()
         candidate_started = authenticated_candidate_started()
-        raise ScriptCandidateTerminal(
+        terminal_error = ScriptCandidateTerminal(
             f"trusted Bubblewrap boundary failed: {type(error).__name__}: {error}",
             return_code=(
                 candidate_outcome["exitCode"]
@@ -1862,44 +3544,288 @@ def run_supervised_bubblewrap(
             cleanup_status="unverified",
             candidate_started=candidate_started,
             host_cancellation_signal=signals.host_cancel_signal,
-        ) from error
+            infrastructure_failure=isinstance(error, _SupervisorDeadlineExpired),
+        )
+        if getattr(error, "cancellation_evidence_unavailable", False) is True:
+            terminal_error.cancellation_evidence_unavailable = True
+        raise terminal_error from error
     finally:
-        if process is not None:
+        interrupted_error = sys.exc_info()[1]
+        if process is None and atomic_owner.child is not None:
+            process = atomic_owner.child
+        namespace_revocation_error: BaseException | None = None
+        try:
             try:
-                terminate_after_error()
+                namespace_revoked = published_namespace is None or published_namespace._revoke()
+                if published_namespace is not None and published_namespace._native_launcher is not None and published_namespace.all_closed():
+                    _release_atomic_owner(published_namespace)
             except BaseException as error:
-                candidate_outcome = authenticated_candidate_outcome()
-                candidate_started = authenticated_candidate_started()
-                if candidate_started:
-                    raise ScriptCandidateTerminal(
-                        f"trusted Bubblewrap cleanup could not be verified: {type(error).__name__}: {error}",
-                        return_code=(
-                            candidate_outcome["exitCode"]
-                            if candidate_outcome is not None
-                            else None
-                        ),
-                        signum=(
-                            candidate_outcome["candidateSignal"]
-                            if candidate_outcome is not None
-                            else None
-                        ),
-                        cleanup_status="unverified",
-                        candidate_started=candidate_started,
-                        host_cancellation_signal=signals.host_cancel_signal,
-                        infrastructure_failure=True,
-                    ) from error
-                raise
-        if process is not None:
-            if process.stdin is not None:
-                process.stdin.close()
-            if process.stdout is not None:
-                process.stdout.close()
-        for descriptor in (status_read_fd, status_write_fd, pidfd):
-            if descriptor is not None and descriptor >= 0:
+                namespace_revoked = False
+                namespace_revocation_error = error
+                if published_namespace is not None and published_namespace._native_launcher is not None:
+                    if published_namespace.all_closed():
+                        try:
+                            _release_atomic_owner(published_namespace)
+                        except BaseException as release_error:
+                            error.add_note(f"namespace owner release failed: {type(release_error).__name__}")
+                    else:
+                        error.add_note("sandbox namespace owner remains retained in this process")
+            if process is not None:
                 try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+                    # Before identity verification the sandbox PID 1 may sit in its own session
+                    # (--new-session) and exit only through an unawaited PDEATHSIG, so an
+                    # interruption here keeps its default "unverified" cleanup status.
+                    terminate_after_error()
+                except BaseException as error:
+                    if namespace_revocation_error is not None:
+                        error.add_note(f"namespace revocation also failed: {type(namespace_revocation_error).__name__}")
+                    if namespace_revocation_error is not None and not isinstance(namespace_revocation_error, Exception):
+                        candidate_outcome = authenticated_candidate_outcome()
+                        namespace_revocation_error.candidate_started = authenticated_candidate_started()
+                        namespace_revocation_error.candidate_exit_code = candidate_outcome["exitCode"] if candidate_outcome else None
+                        namespace_revocation_error.candidate_signal = candidate_outcome["candidateSignal"] if candidate_outcome else None
+                        namespace_revocation_error.cleanup_status = "unverified"
+                        namespace_revocation_error.host_cancellation_signal = (
+                            interrupted_error.signum if isinstance(interrupted_error, ScriptPlanInterrupted)
+                            else signals.host_cancel_signal
+                        )
+                        if getattr(interrupted_error, "cancellation_evidence_unavailable", False) is True:
+                            namespace_revocation_error.cancellation_evidence_unavailable = True
+                        raise namespace_revocation_error from error
+                    cancellation_uncertain = getattr(interrupted_error, "cancellation_evidence_unavailable", False) is True
+                    if cancellation_uncertain:
+                        error.cancellation_evidence_unavailable = True
+                        error.add_note("host cancellation evidence was unavailable before cleanup")
+                    if isinstance(interrupted_error, ScriptPlanInterrupted):
+                        error.host_cancellation_signal = interrupted_error.signum
+                        error.cleanup_status = "unverified"
+                        error.infrastructure_failure = True
+                    candidate_outcome = authenticated_candidate_outcome()
+                    candidate_started = authenticated_candidate_started()
+                    if candidate_started:
+                        cleanup_error = ScriptCandidateTerminal(
+                            f"trusted Bubblewrap cleanup could not be verified: {type(error).__name__}: {error}",
+                            return_code=(
+                                candidate_outcome["exitCode"]
+                                if candidate_outcome is not None
+                                else None
+                            ),
+                            signum=(
+                                candidate_outcome["candidateSignal"]
+                                if candidate_outcome is not None
+                                else None
+                            ),
+                            cleanup_status="unverified",
+                            candidate_started=candidate_started,
+                            host_cancellation_signal=(
+                                interrupted_error.signum
+                                if isinstance(interrupted_error, ScriptPlanInterrupted)
+                                else signals.host_cancel_signal
+                            ),
+                            infrastructure_failure=True,
+                        )
+                        if cancellation_uncertain:
+                            cleanup_error.cancellation_evidence_unavailable = True
+                            cleanup_error.add_note("host cancellation evidence was unavailable before cleanup")
+                        raise cleanup_error from error
+                    raise
+        finally:
+            active_error = sys.exc_info()[1]
+            close_failure = None
+
+            def record_close_failure(error: BaseException) -> None:
+                nonlocal close_failure
+                if close_failure is None:
+                    close_failure = error
+                elif isinstance(close_failure, Exception) and not isinstance(error, Exception):
+                    error.add_note(f"additional descriptor cleanup failure: {type(close_failure).__name__}")
+                    close_failure = error
+                else:
+                    close_failure.add_note(f"additional descriptor cleanup failure: {type(error).__name__}")
+
+            def add_retention_notes(error: BaseException) -> None:
+                for owner, label in ((status_owner, "atomic supervisor"),
+                                     (inner_descriptors, "inner supervisor"),
+                                     (published_namespace, "sandbox namespace")):
+                    if owner is not None and not owner.all_closed():
+                        error.add_note(f"{label} descriptor owner remains retained in this process")
+
+            try:
+                if process is not None:
+                    for stream in (process.stdin, process.stdout):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except BaseException as error:
+                                record_close_failure(error)
+            finally:
+                atomic_descriptors = (
+                    (process.ready_fd, process.gate_fd, process.error_fd)
+                    if isinstance(process, AtomicPidfdProcess) and not isinstance(process, SlotAtomicPidfdProcess) else ()
+                )
+                closed_descriptors: set[int] = set()
+                inner_raw_descriptors = (pidfd, provisional_pidfd) if inner_descriptors is None else ()
+                status_raw_descriptors = (status_read_fd, status_write_fd) if status_owner is None else ()
+                raw_leader_pidfd = None if isinstance(process, SlotAtomicPidfdProcess) else leader_pidfd
+                for descriptor in (*status_raw_descriptors, *inner_raw_descriptors, raw_leader_pidfd, gate_environment_fd, *atomic_descriptors):
+                    if descriptor is not None and descriptor >= 0:
+                        if descriptor in closed_descriptors:
+                            continue
+                        closed_descriptors.add(descriptor)
+                        try:
+                            os.close(descriptor)
+                        except BaseException as error:
+                            record_close_failure(error)
+                if inner_descriptors is not None:
+                    try:
+                        inner_descriptors.close_all()
+                        _release_atomic_owner(inner_descriptors)
+                    except BaseException as error:
+                        if not inner_descriptors.all_closed():
+                            error.add_note("inner supervisor descriptor owner remains retained in this process")
+                        record_close_failure(error)
+                if status_owner is not None:
+                    try:
+                        status_owner.close_all()
+                        _release_atomic_owner(status_owner)
+                    except BaseException as error:
+                        if not status_owner.all_closed():
+                            error.add_note("atomic supervisor owner remains retained in this process for unresolved cleanup")
+                        record_close_failure(error)
+            if close_failure is not None:
+                primary_interruption = next(
+                    (error for error in (namespace_revocation_error, active_error, close_failure)
+                     if error is not None and not isinstance(error, Exception)), None,
+                )
+                if primary_interruption is not None:
+                    candidate_outcome = authenticated_candidate_outcome()
+                    primary_interruption.candidate_started = authenticated_candidate_started()
+                    primary_interruption.candidate_exit_code = candidate_outcome["exitCode"] if candidate_outcome else None
+                    primary_interruption.candidate_signal = candidate_outcome["candidateSignal"] if candidate_outcome else None
+                    primary_interruption.cleanup_status = "unverified"
+                    primary_interruption.host_cancellation_signal = (
+                        interrupted_error.signum if isinstance(interrupted_error, ScriptPlanInterrupted)
+                        else signals.host_cancel_signal
+                    )
+                    if getattr(interrupted_error, "cancellation_evidence_unavailable", False) is True:
+                        primary_interruption.cancellation_evidence_unavailable = True
+                    try:
+                        late_signal = _read_host_cancellation(signals)
+                    except Exception as error:
+                        primary_interruption.cancellation_evidence_unavailable = True
+                        primary_interruption.add_note(f"host cancellation evidence unavailable: {type(error).__name__}")
+                    else:
+                        if late_signal is not None:
+                            primary_interruption.host_cancellation_signal = late_signal
+                    for error in (namespace_revocation_error, active_error, close_failure):
+                        if error is not None and error is not primary_interruption:
+                            primary_interruption.add_note(f"additional supervisor cleanup failure: {type(error).__name__}")
+                    add_retention_notes(primary_interruption)
+                    raise primary_interruption
+                cancellation_failure = None
+                try:
+                    late_signal = _read_host_cancellation(signals)
+                except Exception as error:
+                    cancellation_failure = error
+                    late_signal = signals.host_cancel_signal
+
+                def mark_cancellation_uncertainty(error):
+                    if (cancellation_failure is not None
+                            or getattr(interrupted_error, "cancellation_evidence_unavailable", False) is True):
+                        error.cancellation_evidence_unavailable = True
+                    if cancellation_failure is not None:
+                        error.add_note(f"host cancellation evidence unavailable: {type(cancellation_failure).__name__}")
+                    if namespace_revocation_error is not None:
+                        error.add_note(f"namespace revocation also failed: {type(namespace_revocation_error).__name__}")
+                    add_retention_notes(error)
+                    return error
+
+                if active_error is not None:
+                    active_error.add_note(f"supervisor descriptor cleanup also failed: {type(close_failure).__name__}")
+                    add_retention_notes(active_error)
+                    if isinstance(active_error, ScriptCandidateTerminal):
+                        if active_error.cleanup_status != "failed":
+                            active_error.cleanup_status = "unverified"
+                        active_error.infrastructure_failure = True
+                        active_error.host_cancellation_signal = late_signal or active_error.host_cancellation_signal
+                        mark_cancellation_uncertainty(active_error)
+                    elif isinstance(active_error, ScriptPlanInterrupted):
+                        candidate_outcome = authenticated_candidate_outcome()
+                        terminal_error = ScriptCandidateTerminal(
+                            "supervisor descriptor cleanup failed during interruption",
+                            return_code=(candidate_outcome["exitCode"] if candidate_outcome
+                                         else active_error.candidate_exit_code),
+                            signum=(candidate_outcome["candidateSignal"] if candidate_outcome
+                                    else active_error.candidate_signal),
+                            cleanup_status="failed" if active_error.cleanup_status == "failed" else "unverified",
+                            candidate_started=authenticated_candidate_started() or active_error.candidate_started,
+                            supervisor_signal=active_error.supervisor_signal,
+                            host_cancellation_signal=late_signal or active_error.signum,
+                            infrastructure_failure=True,
+                        )
+                        raise mark_cancellation_uncertainty(terminal_error) from active_error
+                    else:
+                        mark_cancellation_uncertainty(active_error)
+                else:
+                    terminal_error = ScriptCandidateTerminal(
+                        "supervisor descriptor cleanup failed",
+                        return_code=status.return_code,
+                        signum=status.signum,
+                        cleanup_status="unverified",
+                        candidate_started=status.candidate_started,
+                        supervisor_signal=status.supervisor_signal,
+                        host_cancellation_signal=late_signal,
+                        infrastructure_failure=True,
+                    )
+                    raise mark_cancellation_uncertainty(terminal_error) from close_failure
+        if not namespace_revoked:
+            candidate_outcome = authenticated_candidate_outcome()
+            failure = ScriptCandidateTerminal(
+                "trusted sandbox namespace notification cleanup failed",
+                return_code=candidate_outcome["exitCode"] if candidate_outcome else None,
+                signum=candidate_outcome["candidateSignal"] if candidate_outcome else None,
+                cleanup_status="unverified", candidate_started=authenticated_candidate_started(),
+                host_cancellation_signal=(interrupted_error.signum if isinstance(interrupted_error, ScriptPlanInterrupted)
+                                          else signals.host_cancel_signal), infrastructure_failure=True,
+            )
+            if getattr(interrupted_error, "cancellation_evidence_unavailable", False) is True:
+                failure.cancellation_evidence_unavailable = True
+            add_retention_notes(failure)
+            if namespace_revocation_error is not None and not isinstance(namespace_revocation_error, Exception):
+                namespace_revocation_error.candidate_started = failure.candidate_started
+                namespace_revocation_error.candidate_exit_code = failure.return_code
+                namespace_revocation_error.candidate_signal = failure.signum
+                namespace_revocation_error.cleanup_status = failure.cleanup_status
+                namespace_revocation_error.host_cancellation_signal = failure.host_cancellation_signal
+                if getattr(failure, "cancellation_evidence_unavailable", False) is True:
+                    namespace_revocation_error.cancellation_evidence_unavailable = True
+                raise namespace_revocation_error from failure
+            raise failure from namespace_revocation_error
+        pending_error = sys.exc_info()[1]
+        if (
+            execution_timeout_seconds is not None
+            and isinstance(pending_error, ScriptCandidateTerminal)
+            and isinstance(pending_error.__cause__, _SupervisorDeadlineExpired)
+        ):
+            pending_error.host_cancellation_signal = _read_host_cancellation(signals)
+
+    if execution_timeout_seconds is not None:
+        late_signal = _read_host_cancellation(signals)
+        if late_signal is not None:
+            interruption = ScriptPlanInterrupted(
+                late_signal, candidate_started=status.candidate_started,
+                candidate_exit_code=status.return_code, candidate_signal=status.signum,
+                supervisor_signal=status.supervisor_signal,
+            )
+            interruption.cleanup_status = "verified" if status.cleanup == "complete" else status.cleanup
+            raise interruption
+        if time.monotonic() - start_time >= execution_timeout_seconds:
+            raise ScriptCandidateTerminal(
+                "trusted sandbox execution deadline expired", return_code=status.return_code,
+                signum=status.signum, cleanup_status="unverified",
+                candidate_started=status.candidate_started, infrastructure_failure=True,
+            )
+    return status
 
 def _validate_script_entry_identity(identity: Any) -> dict[str, str]:
     if not isinstance(identity, dict) or set(identity) != _SCRIPT_ENTRY_IDENTITY_FIELDS:
@@ -2640,7 +4566,7 @@ def run_script_plan_with_receipts(
             test_hook(name)
 
     def current_signal() -> int | None:
-        return signals.poll()
+        return _read_host_cancellation(signals)
 
     def write_entry(
         ordinal: int,
@@ -2797,10 +4723,17 @@ def run_script_plan_with_receipts(
                         candidate_started=True,
                     )
             except BaseException as error:
+                if getattr(error, "cancellation_evidence_unavailable", False) is True:
+                    raise ScriptPlanExecutionError(ordinal, receipt_directory, error) from error
                 error_host_signal = getattr(error, "host_cancellation_signal", None)
                 if isinstance(error, ScriptPlanInterrupted):
                     error_host_signal = error.signum
-                latched_signal = current_signal()
+                try:
+                    latched_signal = current_signal()
+                except Exception as signal_error:
+                    error.cancellation_evidence_unavailable = True
+                    error.add_note(f"host cancellation evidence unavailable: {type(signal_error).__name__}")
+                    raise ScriptPlanExecutionError(ordinal, receipt_directory, error) from error
                 if (
                     error_host_signal is None
                     and getattr(error, "cleanup_status", None) in {"failed", "unverified"}
@@ -2808,7 +4741,7 @@ def run_script_plan_with_receipts(
                     error_host_signal = latched_signal
                 if (
                     isinstance(error, ScriptPlanInterrupted)
-                    and error.cleanup_status != "failed"
+                    and error.cleanup_status not in {"failed", "unverified"}
                 ):
                     if (
                         latched_signal is None
@@ -2963,7 +4896,16 @@ def run_script_plan_with_receipts(
             checkpoint=checkpoint,
         )
         checkpoint("before-acceptance")
-        acceptance_signal = signals.acceptance_cutoff()
+        try:
+            acceptance_signal = signals.acceptance_cutoff()
+        except Exception as signal_error:
+            if terminal_error is None:
+                terminal_error = IntegrityError("host cancellation evidence unavailable at acceptance")
+            terminal_error.cancellation_evidence_unavailable = True
+            terminal_error.add_note(f"host cancellation evidence unavailable: {type(signal_error).__name__}")
+            if terminal_ordinal is None:
+                terminal_ordinal = max(0, len(normalized_entries) - 1)
+            raise ScriptPlanExecutionError(terminal_ordinal, receipt_directory, terminal_error) from terminal_error
         if acceptance_signal is not None and plan_state != "infrastructure-failure":
             if (
                 plan_state == "candidate-failure"
@@ -3014,29 +4956,142 @@ def run_script_plan_with_receipts(
                 pass
         os.close(directory_fd)
 
-def extinguish_supervised_process_group(process: subprocess.Popen[Any]) -> None:
+def _signal_pinned_process_group(pidfd: int, signum: int) -> bool:
+    if type(pidfd) is not int or pidfd < 0:
+        raise IntegrityError("trusted supervisor group pidfd is invalid")
+    if type(signum) not in (int, signal.Signals) or signum not in {0, signal.SIGINT, signal.SIGTERM, signal.SIGKILL}:
+        raise IntegrityError("trusted supervisor group signal is invalid")
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        signal.pidfd_send_signal(pidfd, signum, None, PIDFD_SIGNAL_PROCESS_GROUP)
     except ProcessLookupError:
-        return
-    graceful_deadline = time.monotonic() + 1
-    while time.monotonic() < graceful_deadline:
-        process.poll()
+        return False
+    except OSError as error:
+        if error.errno == errno.ESRCH:
+            return False
+        if error.errno == errno.EINVAL:
+            raise IntegrityError(
+                "cannot signal the pinned supervisor process group: kernel lacks "
+                "PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9 or later is required)"
+            ) from error
+        raise IntegrityError("cannot signal the pinned supervisor process group") from error
+    return True
+
+
+def _authenticate_bubblewrap_gate(
+    process: subprocess.Popen[Any], pidfd: int, signals: HostSignalQueue | _CallableHostSignalQueue,
+    deadline: float,
+) -> None:
+    if process.stdin is None or process.stdout is None:
+        raise IntegrityError("trusted launcher gate pipes are unavailable")
+    challenge = os.urandom(32)
+    if os.write(process.stdin.fileno(), challenge) != len(challenge):
+        raise IntegrityError("trusted launcher gate challenge was incomplete")
+    response = bytearray()
+    while len(response) < len(challenge):
+        signum = signals.poll()
+        if signum is not None:
+            raise ScriptPlanInterrupted(signum)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise IntegrityError("trusted launcher gate timed out")
+        readable, _, _ = select.select([process.stdout.fileno()], [], [], min(remaining, 0.05))
+        if readable:
+            chunk = os.read(process.stdout.fileno(), len(challenge) - len(response))
+            if not chunk:
+                raise IntegrityError("trusted launcher gate closed before authentication")
+            response.extend(chunk)
+    if bytes(response) != challenge:
+        raise IntegrityError("trusted launcher gate authentication failed")
+    try:
+        status = os.waitid(os.P_PIDFD, pidfd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError as error:
+        raise IntegrityError("trusted launcher reaping ownership was lost") from error
+    if status is not None:
+        raise IntegrityError("trusted launcher exited before release")
+
+
+def _supervised_process_group_id(process: subprocess.Popen[Any]) -> int:
+    # Mocks implement __index__ and can otherwise turn into process group 1.
+    pid = process.pid
+    if type(pid) is not int or pid <= 1 or pid == os.getpgrp():
+        raise IntegrityError("trusted supervisor process group is invalid")
+    _observe_supervised_process(process)
+    try:
+        actual_group = os.getpgid(pid)
+    except ProcessLookupError as error:
+        raise IntegrityError("trusted supervisor process group identity was lost") from error
+    if actual_group != pid:
+        raise IntegrityError("trusted supervisor process group is not isolated")
+    return pid
+
+
+def _observe_supervised_process(process: subprocess.Popen[Any], pidfd: int | None = None) -> int | None:
+    def observe() -> Any:
+        if process.returncode is not None:
+            raise IntegrityError("trusted supervisor was already reaped")
         try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.05)
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+            kind, identity = (os.P_PIDFD, pidfd) if pidfd is not None else (os.P_PID, process.pid)
+            return os.waitid(kind, identity, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError as error:
+            raise IntegrityError("trusted supervisor reaping ownership was lost") from error
+
+    if isinstance(process, SlotAtomicPidfdProcess):
+        with process.owner.lease():
+            if pidfd is None or pidfd != process.pidfd or pidfd < 0:
+                raise IntegrityError("atomic supervisor pidfd identity changed")
+            result = observe()
+    else:
+        result = observe()
+    if result is None:
+        return None
+    if result.si_code == os.CLD_EXITED:
+        return result.si_status
+    if result.si_code in (os.CLD_KILLED, os.CLD_DUMPED):
+        return -result.si_status
+    raise IntegrityError("trusted supervisor has an unexpected wait status")
+
+
+def _reap_pinned_supervisor(process: subprocess.Popen[Any], pidfd: int, timeout: float) -> None:
+    if isinstance(process, SlotAtomicPidfdProcess):
+        process.returncode = process.owner.reap(timeout, expected_pidfd=pidfd)
         return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            result = os.waitid(os.P_PIDFD, pidfd, os.WEXITED | os.WNOHANG)
+        except ChildProcessError as error:
+            raise IntegrityError("trusted supervisor reaping ownership was lost") from error
+        if result is not None:
+            if result.si_code == os.CLD_EXITED:
+                process.returncode = result.si_status
+                return
+            if result.si_code in (os.CLD_KILLED, os.CLD_DUMPED):
+                process.returncode = -result.si_status
+                return
+            raise IntegrityError("trusted supervisor has an unexpected wait status")
+        if time.monotonic() >= deadline:
+            raise _SupervisorReapTimeout("trusted supervisor could not be reaped after cleanup")
+        time.sleep(0.05)
+
+
+def extinguish_supervised_process_group(process: subprocess.Popen[Any], leader_pidfd: int) -> None:
+    def signal_group(signum: int) -> bool:
+        if isinstance(process, SlotAtomicPidfdProcess):
+            return process.owner.signal_group(signum)
+        return _signal_pinned_process_group(leader_pidfd, signum)
+
+    _observe_supervised_process(process, leader_pidfd)
+    if not signal_group(signal.SIGTERM):
+        raise IntegrityError("trusted supervisor process group disappeared before cleanup")
+    graceful_deadline = time.monotonic() + 1
+    while _observe_supervised_process(process, leader_pidfd) is None and time.monotonic() < graceful_deadline:
+        time.sleep(0.05)
+    if not signal_group(signal.SIGKILL):
+        raise IntegrityError("trusted supervisor process group disappeared before final cleanup")
+    _reap_pinned_supervisor(process, leader_pidfd, 5)
     deadline = time.monotonic() + 5
     while True:
-        process.poll()
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
+        if not signal_group(0):
             return
         if time.monotonic() >= deadline:
             raise IntegrityError("candidate process group survived bounded SIGKILL cleanup")
@@ -4922,6 +6977,23 @@ def _authorize_role_from_environment() -> None:
 
 
 
+def prisma_schema_engine_candidate_mount(
+    candidate_environment: dict[str, str],
+    engine_available: bool,
+    host_path: str | None,
+    sandbox_path: Path,
+) -> tuple[list[str], tuple[Path, ...]]:
+    candidate_environment.pop("PRISMA_SCHEMA_ENGINE_BINARY", None)
+    if not engine_available:
+        return [], ()
+    if host_path is None:
+        raise ValueError("available Prisma schema engine requires a host path")
+    candidate_environment["PRISMA_SCHEMA_ENGINE_BINARY"] = str(
+        sandbox_path
+    )
+    return ["--ro-bind", host_path, str(sandbox_path)], (sandbox_path.parent,)
+
+
 def run_protected_candidate_plan() -> None:
     import hashlib
     import hashlib
@@ -4943,6 +7015,24 @@ def run_protected_candidate_plan() -> None:
     env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+    prisma_engine_available_value = os.environ.get("PRISMA_SCHEMA_ENGINE_AVAILABLE", "")
+    if prisma_engine_available_value not in {"true", "false"}:
+        sys.exit("trusted Prisma schema engine availability output is invalid")
+    prisma_engine_available = prisma_engine_available_value == "true"
+    prisma_engine_host_path = os.environ.get("PRISMA_SCHEMA_ENGINE_HOST_PATH", "")
+    prisma_engine_target = Path("/run/verjson-prisma/schema-engine")
+    if prisma_engine_available:
+        expected_prisma_engine = (
+            runner_temp
+            / f"verjson-prisma-schema-engine-{os.environ.get('RUN_ID', '')}-{os.environ.get('RUN_ATTEMPT', '')}"
+            / "schema-engine"
+        )
+        if (
+            Path(prisma_engine_host_path) != expected_prisma_engine
+            or Path(prisma_engine_host_path).is_symlink()
+            or not Path(prisma_engine_host_path).is_file()
+        ):
+            sys.exit("trusted Prisma schema engine is not at its run-scoped staging path")
     if str(runner_temp) not in sys.path:
         sys.path.insert(0, str(runner_temp))
     import normalized_entries as normalized_script_plan
@@ -6027,6 +8117,14 @@ def run_protected_candidate_plan() -> None:
                 )
             for env_name in unset_env:
                 script_env.pop(env_name, None)
+            prisma_engine_mount_args, prisma_engine_mount_targets = (
+                ci_build_artifacts.prisma_schema_engine_candidate_mount(
+                    script_env,
+                    prisma_engine_available,
+                    prisma_engine_host_path or None,
+                    prisma_engine_target,
+                )
+            )
             script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
             script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"
             script_env["npm_config_script_shell"] = "/bin/sh"
@@ -6045,6 +8143,7 @@ def run_protected_candidate_plan() -> None:
                 cache_root,
                 changelog_cache_root,
                 *isolated_paths,
+                *prisma_engine_mount_targets,
                 *tool_prefixes,
                 *((browser_cache,) if browser_cache is not None else ()),
             )
@@ -6172,6 +8271,7 @@ def run_protected_candidate_plan() -> None:
                               "--ro-bind", "/etc/passwd", "/etc/passwd",
                               "--ro-bind", "/etc/group", "/etc/group",
                               *tool_mount_args,
+                              *prisma_engine_mount_args,
                               "--bind", str(workspace), str(workspace),
                               *artifact_mount_args,
                               *git_mount_args,

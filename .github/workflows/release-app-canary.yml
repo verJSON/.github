@@ -109,7 +109,7 @@ jobs:
           mkdir -p "$canary_root/NEXT"
           git -C "$canary_root" init -q -b canary
           git -C "$canary_root" config user.name verjson-release-canary
-          git -C "$canary_root" config user.email release-canary@verjson.dev
+          git -C "$canary_root" config user.email release-canary@verjson.com
           fragment_date="$(date -u +%F)"
           fragment_id="$(date -u +%Y%m%dT%H%M%SZ)"
           fragment="NEXT/${fragment_date}-issue-${fragment_id}-release-app-canary.md"

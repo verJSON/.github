@@ -181,6 +181,12 @@ awk '$0=="      - name: Complete exact head authorization"{f=1;next} f&&$0=="   
 awk '$0=="      - name: Fail authorization if completion did not run"{f=1;next} f&&$0=="        run: |"{r=1;next} r{if($0~/^      - name:/ || $0~/^  [A-Za-z0-9_-]+:/)exit;sub(/^          /,"");print}' \
   "$workflow" >"$tmp/finalize.sh"
 [ -s "$tmp/complete.sh" ] || { echo "FAIL - completion block missing"; exit 1; }
+# A truncated block exits 2 on its syntax error, which the refusal cases below
+# would take for a refusal, and an empty one exits 0 having done nothing.
+[ -s "$tmp/finalize.sh" ] || { echo "FAIL - finalizer block missing"; exit 1; }
+for extracted in complete finalize; do
+  bash -n "$tmp/$extracted.sh" || { echo "FAIL - extracted $extracted block does not parse"; exit 1; }
+done
 
 mkdir -p "$tmp/run/.gate-trust/scripts/ci-gate" "$tmp/bin"
 cat >"$tmp/run/.gate-trust/scripts/ci-gate/verify-arm-receipt.sh" <<'SH'
@@ -437,6 +443,7 @@ for forged_url in "https://github.com/Verjson/example/actions/runs/$ARM_RUN_ID" 
                    "https://github.com/Verjson/example/runs/9002"; do
   : >"$CALLS"
   if ! FORGED_DETAILS_URL="$forged_url" run_finalizer >"$tmp/out" 2>&1 \
+    && grep -Fq 'refusing to modify a check outside this exact arm run' "$tmp/out" \
     && ! grep -q 'api --method PATCH' "$CALLS" \
     && ! grep -q 'api --method POST' "$CALLS"; then
     pass "a check with a forged details_url ($forged_url) is outside the finalizer contract"
@@ -467,6 +474,7 @@ fi
 
 : >"$CALLS"
 if ! CHECK_APP_ID=4242 CHECK_APP_SLUG=verjson-ai-review run_finalizer >"$tmp/out" 2>&1 \
+  && grep -Fq 'refusing to modify a check outside this exact arm run' "$tmp/out" \
   && ! grep -q 'api --method PATCH' "$CALLS" \
   && ! grep -q 'api --method POST' "$CALLS"; then
   pass "legacy review-App-owned authorization check is outside the finalizer contract"
