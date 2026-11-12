@@ -113,6 +113,14 @@ class CancellationTests(unittest.TestCase):
     def test_a_push_to_main_never_cancels_publication(self):
         self.assertFalse(cancels("push"), "a later main push would cancel an earlier commit's publication")
 
+    def test_only_pull_request_runs_share_a_group_and_every_other_run_gets_its_own(self):
+        self.assertEqual(
+            CALLER.get("concurrency", {}).get("group"),
+            "container-candidate-caller-${{ github.workflow }}-${{ github.event_name == 'pull_request'"
+            " && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+            "a group shared across main pushes would let a later push replace a queued publication",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

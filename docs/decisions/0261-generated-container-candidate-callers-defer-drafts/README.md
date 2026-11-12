@@ -82,8 +82,14 @@ multi-level callers does not arise here.
 
 The bare `validate` context exists only as a skip, as the bare `publish` context
 already does on every pull request. Neither may be a required context. As of
-2026-11-12, `verjson-git-runners` requires only `changelog / validate` and
-`shell-tests` on `main`, so no adopter requires a candidate context yet.
+2026-11-12, five repositories run the generated caller: catalog-api, catalog-worker,
+marketing-studio, verjson-ci and verjson-git-runners. None of them requires `validate`,
+`publish`, or any `validate / …` context, by org or repository ruleset (read through
+`gh api` on each repository's `rules/branches/main`). marketing-studio requires
+`docker · api` and `docker · web`, which its own `docker-build.yml` produces, not this
+caller. The organization rulesets require only `changelog / validate`, `shell-tests`,
+`ci / build-test`, `ci / eligibility`, `changelog-contract`, `ci-node22 / *` and
+`admission`. So no adopter requires a candidate context yet.
 
 ## Consequences
 
