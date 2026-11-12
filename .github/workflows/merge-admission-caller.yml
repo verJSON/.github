@@ -37,6 +37,17 @@ on:
   # A sweep on demand, after a ruleset edit (no event reports one to a workflow).
   workflow_dispatch: {}
 
+# Bounds the fan-out (ADR 0260, 2026-11-12 fan-out amendment): one running and one pending
+# run per group, and a newer pending run replaces an older one. The key repeats the plan
+# job's EVENT_HEAD choice: a completed pull-request or review run names its head, so its
+# group is that head and the replacing run evaluates the same head with later state; every
+# other trigger plans a sweep, so it joins the single sweep group and the replacing sweep
+# covers every head. A running run is never cancelled. The `-caller-` prefix keeps these
+# groups distinct from the evaluate job's per-head groups.
+concurrency:
+  group: merge-admission-caller-${{ contains(fromJSON('["pull_request","pull_request_target","pull_request_review"]'), github.event.workflow_run.event) && github.event.workflow_run.head_sha || 'sweep' }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
