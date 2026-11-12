@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0261](0261-generated-container-candidate-callers-defer-drafts/README.md) | 2026-11-12 | Generated container-candidate callers skip drafts and cancel only on new commits |
 | [0260](0260-native-merge-admission-through-a-producer-posted-check/README.md) | 2026-11-12 | Native merge admission through a producer-posted `merge-admission` check |
 | [0259](0259-stage-locked-prisma-engine-outside-offline-sandbox/README.md) | 2026-11-10 | Stage the locked Prisma schema engine outside the offline candidate sandbox |
 | [0258](0258-gitlab-estate-migration/README.md) | 2026-11-05 | Migrate the repository estate to GitLab CE in owner-approved waves behind a verified one-way mirror from GitHub |

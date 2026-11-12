@@ -64,10 +64,15 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: container-candidate-caller-\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: \${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   validate:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     permissions:
       actions: read
       contents: read
@@ -165,6 +170,10 @@ grep -qx '# Contract: $ref' "\$destination_helper" || fail "destination helper c
 [ "\$(grep -c '^      packages: write$' "\$caller")" -eq 1 ] || fail "only publication may write candidate images"
 [ "\$(grep -c '^      id-token: write$' "\$caller")" -eq 1 ] || fail "only publication may mint attestation identity"
 grep -q "if: github.event_name == 'pull_request'" "\$caller" || fail "validation is not restricted to pull requests"
+grep -qxF "    if: github.event_name == 'pull_request' && !github.event.pull_request.draft" "\$caller" || fail "pull-request validation must skip drafts"
+grep -qxF '    types: [opened, synchronize, reopened, ready_for_review]' "\$caller" || fail "pull-request validation must run when a draft becomes ready"
+grep -qxF "  cancel-in-progress: \\\${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}" "\$caller" || fail "only a new commit may cancel pull-request validation"
+grep -qxF "  group: container-candidate-caller-\\\${{ github.workflow }}-\\\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}" "\$caller" || fail "every non-pull-request run must keep its own concurrency group"
 grep -q "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" "\$caller" || fail "publication is not restricted to trusted main pushes"
 [ "\$(sha256sum "\$caller" | cut -d' ' -f1)" = "$workflow_digest" ] || fail "generated caller was edited"
 [ "\$(sha256sum "\$validator" | cut -d' ' -f1)" = "$validator_digest" ] || fail "generated validator was edited"
