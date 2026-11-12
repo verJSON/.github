@@ -7050,8 +7050,9 @@ if [ "$status" -eq 0 ]; then
 else
   fail "emitted suite rejects a generated release-snapshot caller: $(tail -2 "$ADOPTER_LOG")"
 fi
-# The check is exercised directly in the generator-only block; this shows the
-# emitted suite actually runs it on a discovered release caller (#1906).
+# The check runs only inside the emitted suite's release-shape check; the
+# release-snapshot rejection cases below exercise its refusals, and this shows
+# it runs, and accepts, a discovered generated release caller (#1906).
 if grep -qE '^ok - .*/\.github/workflows/release\.yml gives a package-less verification hook the configured Node 24 \(#1906\)$' "$ADOPTER_LOG"; then
   pass "emitted suite runs the package-less Node verification check on the release caller"
 else
@@ -7166,6 +7167,17 @@ verify_on_fixed_system_path() {
 expect_release_mode_rejection release-snapshot \
   "release-snapshot verifying on a fixed system PATH (#1906)" verify_on_fixed_system_path \
   'does not give a package-less verification hook the configured Node 24 (#1906)'
+# An env expression the check does not know is refused, never resolved to empty.
+verify_with_an_unknown_expression() {
+  mutate_snapshot_release "$1" \
+    '          PACKAGE_VERSION: ${{ steps.release-version.outputs.package-version }}
+          RELEASE_VERIFICATION_PATH:' \
+    '          PACKAGE_VERSION: ${{ inputs.version }}
+          RELEASE_VERIFICATION_PATH:'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot verifying with an env expression the check cannot evaluate (#1906)" verify_with_an_unknown_expression \
+  'has a release verification suite env value the package-less check cannot evaluate: PACKAGE_VERSION'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
 grep -Fqx "$expected_release_fallback" "$emitted" \
