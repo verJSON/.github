@@ -651,11 +651,11 @@ def _package_key_for_name(profile: dict[str, Any], package: str, architecture: s
 
 def create_receipt(profile_id: str, package_versions: dict[tuple[str, str], str]) -> dict[str, Any]:
     profile = resolve_profile(profile_id)
-    expected = {
-        (package, record["architecture"]): record["version"]
+    expected_keys = {(package, record["architecture"]) for package, record in profile["packages"].items()}
+    if set(package_versions) != expected_keys or any(
+        compare_debian_versions(package_versions[(package, record["architecture"])], record["version"]) < 0
         for package, record in profile["packages"].items()
-    }
-    if package_versions != expected:
+    ):
         raise PlaywrightProfileError("Playwright receipt differs from its complete pinned package closure")
     packages = [
         {"package": package, "architecture": architecture, "version": version}
@@ -851,18 +851,109 @@ def _installed_package_state(env: dict[str, str] | None = None) -> dict[tuple[st
     return state
 
 
+_DEBIAN_VERSION = re.compile(
+    r"(?:(?P<epoch>[0-9]{1,9}):)?(?P<upstream>[0-9][A-Za-z0-9.+~:-]*?)(?:-(?P<revision>[A-Za-z0-9.+~]+))?"
+)
+
+
+def _debian_character_order(character: str) -> int:
+    if "0" <= character <= "9":
+        return 0
+    if character.isascii() and character.isalpha():
+        return ord(character)
+    if character == "~":
+        return -1
+    return ord(character) + 256
+
+
+def _compare_debian_fragments(left: str, right: str) -> int:
+    """Compare one upstream or revision fragment with dpkg's verrevcmp ordering."""
+    left_index = right_index = 0
+    while left_index < len(left) or right_index < len(right):
+        while (left_index < len(left) and not "0" <= left[left_index] <= "9") or (
+            right_index < len(right) and not "0" <= right[right_index] <= "9"
+        ):
+            left_order = _debian_character_order(left[left_index]) if left_index < len(left) else 0
+            right_order = _debian_character_order(right[right_index]) if right_index < len(right) else 0
+            if left_order != right_order:
+                return left_order - right_order
+            left_index += 1
+            right_index += 1
+        while left_index < len(left) and left[left_index] == "0":
+            left_index += 1
+        while right_index < len(right) and right[right_index] == "0":
+            right_index += 1
+        first_difference = 0
+        while (
+            left_index < len(left)
+            and right_index < len(right)
+            and "0" <= left[left_index] <= "9"
+            and "0" <= right[right_index] <= "9"
+        ):
+            if not first_difference:
+                first_difference = ord(left[left_index]) - ord(right[right_index])
+            left_index += 1
+            right_index += 1
+        if left_index < len(left) and "0" <= left[left_index] <= "9":
+            return 1
+        if right_index < len(right) and "0" <= right[right_index] <= "9":
+            return -1
+        if first_difference:
+            return first_difference
+    return 0
+
+
+def compare_debian_versions(left: str, right: str) -> int:
+    """Return <0, 0, or >0 as left sorts before, equal to, or after right under dpkg rules."""
+    parsed = []
+    for version in (left, right):
+        match = _DEBIAN_VERSION.fullmatch(version)
+        if match is None:
+            raise PlaywrightProfileError("Playwright package version is not a valid Debian version")
+        parsed.append((int(match.group("epoch") or 0), match.group("upstream"), match.group("revision") or ""))
+    (left_epoch, left_upstream, left_revision), (right_epoch, right_upstream, right_revision) = parsed
+    if left_epoch != right_epoch:
+        return left_epoch - right_epoch
+    return _compare_debian_fragments(left_upstream, right_upstream) or _compare_debian_fragments(
+        left_revision, right_revision
+    )
+
+
+def _closure_install_requests(
+    profile: dict[str, Any],
+    installed: dict[tuple[str, str], tuple[str, str]],
+) -> list[str]:
+    """Pin only closure packages the image lacks or ships below their reviewed version.
+
+    A package the image already provides at or above its pin is left alone, so
+    provisioning never requests a downgrade of a newer runner-image package.
+    """
+    requests: list[str] = []
+    for package, record in sorted(profile["packages"].items()):
+        state = installed.get((package, record["architecture"]))
+        if (
+            state is None
+            or not state[0].startswith("ii ")
+            or compare_debian_versions(state[1], record["version"]) < 0
+        ):
+            requests.append(_package_spec(package, record))
+    return requests
+
+
 def _installed_profile_closure(
     profile: dict[str, Any],
     installed: dict[tuple[str, str], tuple[str, str]],
 ) -> dict[tuple[str, str], str]:
+    """Return the installed closure; each package must be at or above its reviewed pin."""
     package_versions: dict[tuple[str, str], str] = {}
     for package, record in profile["packages"].items():
         key = (package, record["architecture"])
-        version = record["version"]
         state = installed.get(key)
-        if state is None or not state[0].startswith("ii ") or state[1] != version:
-            raise PlaywrightProfileError("installed Playwright package closure differs from its pinned manifest")
-        package_versions[key] = version
+        if state is None or not state[0].startswith("ii "):
+            raise PlaywrightProfileError("installed Playwright package closure is missing a pinned package")
+        if compare_debian_versions(state[1], record["version"]) < 0:
+            raise PlaywrightProfileError("installed Playwright package is older than its reviewed pin")
+        package_versions[key] = state[1]
     return package_versions
 
 
@@ -1852,53 +1943,29 @@ def provision(
         _assert_dpkg_healthy(apt_environment)
         before = _installed_package_state(apt_environment)
         _run(("/usr/bin/apt-get", *options, "update"), timeout=600, env=apt_environment)
-        closure_specs = [
-            _package_spec(name, record)
-            for name, record in sorted(profile["packages"].items())
-        ]
-        plan_output = _run(
-            (
-                "/usr/bin/apt-get",
-                *options,
-                "--simulate",
-                "--no-install-recommends",
-                "--no-remove",
-                "--yes",
-                "install",
-                *closure_specs,
-            ),
-            timeout=180,
-            env=apt_environment,
-        ).decode("utf-8", "strict")
+        requested_specs = _closure_install_requests(profile, before)
+        plan_output = ""
+        if requested_specs:
+            plan_output = _run(
+                (
+                    "/usr/bin/apt-get",
+                    *options,
+                    "--simulate",
+                    "--no-install-recommends",
+                    "--no-remove",
+                    "--yes",
+                    "install",
+                    *requested_specs,
+                ),
+                timeout=180,
+                env=apt_environment,
+            ).decode("utf-8", "strict")
         planned = parse_install_plan(plan_output, profile)
         _reject_dpkg_install_plan(planned)
         if require_nonempty_plan and not planned:
             raise PlaywrightProfileError("hosted acceptance requires a nonempty exact package-install plan")
-        clean_plan_output = _run(
-            (
-                "/usr/bin/apt-get",
-                *options,
-                "-o",
-                "Dir::State::status=/dev/null",
-                "--simulate",
-                "--no-install-recommends",
-                "--no-remove",
-                "--yes",
-                "install",
-                *closure_specs,
-            ),
-            timeout=180,
-            env=apt_environment,
-        ).decode("utf-8", "strict")
-        complete_closure = parse_install_plan(clean_plan_output, profile)
-        expected_closure = {
-            (name, record["architecture"]): record["version"]
-            for name, record in profile["packages"].items()
-        }
-        if complete_closure != expected_closure or not set(planned) <= set(complete_closure):
-            raise PlaywrightProfileError("Playwright apt plan differs from its complete pinned dependency closure")
         indexes = _read_package_indexes(paths)
-        _validate_signed_metadata(indexes, complete_closure, profile)
+        _validate_signed_metadata(indexes, planned, profile)
         needrestart = snapshot["fragments"].get("needrestart")
         if needrestart is not None:
             _authenticate_needrestart_fragment(root, needrestart, indexes, options, apt_environment)
@@ -1915,7 +1982,7 @@ def provision(
                     "--no-remove",
                     "--yes",
                     "install",
-                    *closure_specs,
+                    *requested_specs,
                 ),
                 timeout=600,
                 env=apt_environment,

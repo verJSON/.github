@@ -35,6 +35,14 @@ import ci_playwright_system_libraries as playwright_profile
 PROFILE_ID = "playwright-chromium-1.63.0-ubuntu-24.04-amd64"
 
 
+def pinned_installed_state(profile: dict[str, Any]) -> dict[tuple[str, str], tuple[str, str]]:
+    """Arrange a dpkg state in which every closure package is installed at its pin."""
+    return {
+        (name, record["architecture"]): ("ii ", record["version"])
+        for name, record in profile["packages"].items()
+    }
+
+
 class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
     def test_only_the_reviewed_profile_id_resolves(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
@@ -610,53 +618,148 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                         ),
                     )
 
-    def test_receipt_covers_the_complete_closure_and_rejects_transitive_drift(self) -> None:
+    def test_receipt_records_an_image_package_newer_than_its_pin(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
-        package_versions = {
-            (name, record["architecture"]): record["version"]
-            for name, record in profile["packages"].items()
-        }
+        package_versions = {key: state[1] for key, state in pinned_installed_state(profile).items()}
+        package_versions[("libc6", "amd64")] = "2.39-0ubuntu8.12"
+
         receipt = playwright_profile.create_receipt(PROFILE_ID, package_versions)
 
         self.assertEqual(len(receipt["packages"]), len(profile["packages"]))
+        self.assertIn(
+            {"package": "libc6", "architecture": "amd64", "version": "2.39-0ubuntu8.12"},
+            receipt["packages"],
+        )
         playwright_profile.verify_receipt(receipt, PROFILE_ID, package_versions)
 
-        transitive_package = next(
-            name for name in profile["packages"] if name not in profile["directPackages"]
-        )
-        transitive = profile["packages"][transitive_package]
-        changed = dict(package_versions)
-        changed[(transitive_package, transitive["architecture"])] = "0:changed"
-        with self.assertRaises(playwright_profile.PlaywrightProfileError):
-            playwright_profile.create_receipt(PROFILE_ID, changed)
-
+    def test_receipt_rejects_an_incomplete_or_below_pin_closure(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        package_versions = {key: state[1] for key, state in pinned_installed_state(profile).items()}
+        below_pin = dict(package_versions)
+        below_pin[("libnss3", "amd64")] = "2:3.98-1ubuntu0.2"
         direct_only = {
             key: version
             for key, version in package_versions.items()
             if key[0] in profile["directPackages"]
         }
-        with self.assertRaises(playwright_profile.PlaywrightProfileError):
-            playwright_profile.create_receipt(PROFILE_ID, direct_only)
+        for name, versions in (("below-pin", below_pin), ("direct-only", direct_only)):
+            with self.subTest(name):
+                with self.assertRaisesRegex(
+                    playwright_profile.PlaywrightProfileError,
+                    "^Playwright receipt differs from its complete pinned package closure$",
+                ):
+                    playwright_profile.create_receipt(PROFILE_ID, versions)
 
-    def test_installed_state_requires_every_transitive_package_at_its_pinned_version(self) -> None:
+    def test_installed_closure_refuses_a_package_older_than_its_pin(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
-        installed = {
-            (name, record["architecture"]): ("ii ", record["version"])
-            for name, record in profile["packages"].items()
-        }
-        expected = {
-            (name, record["architecture"]): record["version"]
-            for name, record in profile["packages"].items()
-        }
-        self.assertEqual(playwright_profile._installed_profile_closure(profile, installed), expected)
+        installed = pinned_installed_state(profile)
+        self.assertEqual(profile["packages"]["libnss3"]["version"], "2:3.98-1ubuntu0.3")
+        installed[("libnss3", "amd64")] = ("ii ", "2:3.98-1ubuntu0.2")
 
-        transitive_package = next(
-            name for name in profile["packages"] if name not in profile["directPackages"]
-        )
-        transitive = profile["packages"][transitive_package]
-        installed[(transitive_package, transitive["architecture"])] = ("ii ", "0:changed")
-        with self.assertRaises(playwright_profile.PlaywrightProfileError):
+        with self.assertRaisesRegex(
+            playwright_profile.PlaywrightProfileError,
+            "^installed Playwright package is older than its reviewed pin$",
+        ):
             playwright_profile._installed_profile_closure(profile, installed)
+
+    def test_installed_closure_accepts_an_image_package_newer_than_its_pin(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        installed = pinned_installed_state(profile)
+        self.assertEqual(profile["packages"]["libc6"]["version"], "2.39-0ubuntu8.9")
+        installed[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.12")
+
+        closure = playwright_profile._installed_profile_closure(profile, installed)
+
+        self.assertEqual(closure[("libc6", "amd64")], "2.39-0ubuntu8.12")
+
+    def test_installed_closure_refuses_a_missing_closure_package(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        installed = pinned_installed_state(profile)
+        del installed[("libxshmfence1", "amd64")]
+
+        with self.assertRaisesRegex(
+            playwright_profile.PlaywrightProfileError,
+            "^installed Playwright package closure is missing a pinned package$",
+        ):
+            playwright_profile._installed_profile_closure(profile, installed)
+
+    def test_install_request_pins_only_packages_the_image_does_not_satisfy(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        installed = pinned_installed_state(profile)
+        installed[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.12")
+        installed[("libnss3", "amd64")] = ("ii ", "2:3.98-1ubuntu0.2")
+        del installed[("xvfb", "amd64")]
+
+        requested = playwright_profile._closure_install_requests(profile, installed)
+
+        self.assertEqual(requested, ["libnss3:amd64=2:3.98-1ubuntu0.3", "xvfb:amd64=2:21.1.12-1ubuntu1.5"])
+
+    def test_provisioning_installs_only_unsatisfied_pins_and_keeps_newer_image_packages(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        before = pinned_installed_state(profile)
+        before[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.12")
+        before[("libnss3", "amd64")] = ("ii ", "2:3.98-1ubuntu0.2")
+        del before[("xvfb", "amd64")]
+        after = dict(before)
+        after[("libnss3", "amd64")] = ("ii ", "2:3.98-1ubuntu0.3")
+        after[("xvfb", "amd64")] = ("ii ", "2:21.1.12-1ubuntu1.5")
+        plan = (
+            "Inst libnss3 [2:3.98-1ubuntu0.2] (2:3.98-1ubuntu0.3 Ubuntu:24.04/noble-updates [amd64])\n"
+            "Inst xvfb (2:21.1.12-1ubuntu1.5 Ubuntu:24.04/noble-updates [amd64])\n"
+        )
+        indexes = {
+            (name, record["architecture"], record["version"]): record
+            for name, record in profile["packages"].items()
+        }
+        apt_calls: list[tuple[str, ...]] = []
+
+        def run(argv: tuple[str, ...], **_kwargs: Any) -> bytes:
+            apt_calls.append(tuple(argv))
+            return plan.encode("utf-8") if "--simulate" in argv else b""
+
+        with tempfile.TemporaryDirectory() as temporary_directory, contextlib.ExitStack() as stack:
+            private_root = Path(temporary_directory) / "private"
+            private_root.mkdir()
+            for name, value in {
+                "_require_root": None,
+                "_read_os_release": {"ID": "ubuntu", "VERSION_ID": "24.04"},
+                "_exact_output": b"amd64\n",
+                "_create_private_temp_root": private_root,
+                "_publish_safe_key_snapshot": private_root / "key",
+                "_make_apt_environment": {},
+                "_apt_options": [],
+                "_apt_environment": {},
+                "_scan_global_dpkg_config": {"fragments": {}},
+                "_validate_global_dpkg_config": False,
+                "_assert_dpkg_healthy": None,
+                "_read_package_indexes": indexes,
+                "_make_dpkg_config_view": private_root / "dpkg-view",
+                "_validate_archive_cache": None,
+            }.items():
+                stack.enter_context(patch.object(playwright_profile, name, return_value=value))
+            stack.enter_context(patch.object(playwright_profile, "_run", side_effect=run))
+            stack.enter_context(
+                patch.object(playwright_profile, "_installed_package_state", side_effect=[before, after])
+            )
+            install = stack.enter_context(patch.object(playwright_profile, "_run_dpkg_install_in_namespace"))
+            write_receipt = stack.enter_context(patch.object(playwright_profile, "_write_receipt"))
+
+            playwright_profile.provision(
+                PROFILE_ID,
+                "/run/verjson-playwright-1-1-ci.json",
+                "github-hosted",
+                "Linux",
+            )
+
+        expected_specs = ["libnss3:amd64=2:3.98-1ubuntu0.3", "xvfb:amd64=2:21.1.12-1ubuntu1.5"]
+        install_requests = [call[call.index("install") + 1 :] for call in apt_calls if "install" in call]
+        self.assertEqual(install_requests, [tuple(expected_specs), tuple(expected_specs)])
+        self.assertEqual(list(install.call_args.args[0][-2:]), expected_specs)
+        receipt = write_receipt.call_args.args[1]
+        self.assertIn(
+            {"package": "libc6", "architecture": "amd64", "version": "2.39-0ubuntu8.12"},
+            receipt["packages"],
+        )
 
     def test_dpkg_deb_control_fields_parse_labeled_output(self) -> None:
         output = "Package: libexample1\nVersion: 1:2.3-4\nArchitecture: amd64\n"
