@@ -20,6 +20,14 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # Events whose runs belong to the pull request's head, and so to the inventory the
 # assertion reads (ADR 0229 rule 2, Gate C).
 HEAD_EVENTS = {"pull_request", "pull_request_target", "pull_request_review", "pull_request_review_comment", "merge_group"}
+# Of those, the events that start a run on a pull request's head; a merge-group run belongs
+# to the merge-group ref instead.
+PULL_REQUEST_HEAD_EVENTS = HEAD_EVENTS - {"merge_group"}
+# The producer, its trigger, and its caller: never derived as completion triggers of their own.
+MERGE_ADMISSION_FILES = {"merge-admission.yml", "merge-admission-trigger.yml", "merge-admission-caller.yml"}
+# Workflows that no pull-request event starts, yet that complete a check on the head: the AI
+# review gate is dispatched and patches its authorization check run there.
+DISPATCHED_HEAD_REPORTERS = {"AI review + auto-merge"}
 
 
 def workflow(name: str) -> dict:
@@ -28,6 +36,24 @@ def workflow(name: str) -> dict:
 
 def triggers(doc: dict) -> dict:
     return doc.get("on", doc.get(True))
+
+
+def event_specs(doc: dict) -> dict:
+    on = triggers(doc)
+    if isinstance(on, str):
+        return {on: None}
+    if isinstance(on, list):
+        return dict.fromkeys(on)
+    return on
+
+
+def reports_on_a_pull_request_head(doc: dict) -> bool:
+    # A workflow that runs only when a pull request closes reports nothing a merge waits on.
+    specs = {event: spec for event, spec in event_specs(doc).items() if event in PULL_REQUEST_HEAD_EVENTS}
+    close_only = all(
+        isinstance(spec, dict) and spec.get("types") and set(spec["types"]) <= {"closed"} for spec in specs.values()
+    )
+    return bool(specs) and not close_only
 
 
 class CallerTriggerTests(unittest.TestCase):
@@ -44,6 +70,20 @@ class CallerTriggerTests(unittest.TestCase):
         minute, *rest = schedules[0]["cron"].split()
         self.assertEqual(rest, ["*", "*", "*", "*"])
         self.assertRegex(minute, r"^\*/([1-9]|1[0-5])$")
+
+    def test_every_workflow_that_reports_on_a_pull_request_head_is_a_completion_trigger(self):
+        # ADR 0260 action 5: re-evaluate on completion of each workflow that reports a check
+        # on the head. Derived from the workflows themselves, so a new one cannot be missed.
+        expected = {workflow("merge-admission-trigger")["name"]} | DISPATCHED_HEAD_REPORTERS
+        for path in sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]):
+            if path.name in MERGE_ADMISSION_FILES:
+                continue
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if reports_on_a_pull_request_head(doc):
+                expected.add(doc["name"])
+        listed = triggers(workflow("merge-admission-caller"))["workflow_run"]["workflows"]
+        self.assertEqual(len(listed), len(set(listed)), "a completion trigger is listed twice")
+        self.assertEqual(set(listed), expected)
 
     def test_the_producer_is_not_started_by_its_own_completion(self):
         # ADR 0260 action 5 excludes the producer's own path: listing it would start a new

@@ -8,6 +8,8 @@ name: Merge admission
 on:
   # Completion of each workflow that reports a check on a pull-request head, and of the
   # trigger (ADR 0260, action 5). The producer's own path is not listed.
+  # scripts/ci-gate/merge-admission-workflow.test.py derives this list from every workflow
+  # here that a pull-request or review event starts and requires an exact match.
   workflow_run:
     workflows:
       - Merge admission trigger
@@ -20,6 +22,8 @@ on:
       - AI review label re-arm
       - AI review lifecycle re-arm
       - AI review + auto-merge
+      - Authn required type surface
+      - CLI projects required package surface
     types: [completed]
   # The periodic sweep, at most 15 minutes apart. It is also the completion trigger for
   # checks from Apps other than GitHub Actions: `check_suite` is not yet classified by the

@@ -171,7 +171,11 @@ as the event-driven evaluations.
 
 **Triggers (item 5).** This repository's caller (`merge-admission-caller.yml`) lists
 every workflow that reports a check on a pull-request head here, plus the trigger, under
-`workflow_run`. The sweep runs every 15 minutes. **The completion trigger for checks from
+`workflow_run`. The workflow contract test derives that list from every workflow a
+pull-request or review event starts (excluding the producer's own three files and
+close-only workflows), adds the dispatched `AI review + auto-merge` gate, which patches its
+authorization check on the head, and requires an exact match, so a new pull-request
+workflow cannot be left out. The sweep runs every 15 minutes. **The completion trigger for checks from
 Apps other than GitHub Actions is deferred, and that window is documented here** (the
 serialization bullet's alternative): `check_suite: completed` is the event that reports
 them, but the ADR 0235 runner-isolation checker classifies `check_suite` as undetermined
@@ -252,7 +256,8 @@ kept rather than a third behaviorally matched copy.
   assertion bind the same App id.
 - `scripts/ci-gate/merge-admission-plan.test.sh` (merge-gate) and
   `scripts/ci-gate/merge-admission-workflow.test.py` (merge-gate) pin the plan and the
-  workflow contract: one plan entry per head with every open pull request at it (drafts
+  workflow contract: the caller's completion triggers equal the derived set of pull-request
+  workflows, one plan entry per head with every open pull request at it (drafts
   included, a head with an unevaluable pull request dropped), default-branch-only triggers, a sweep at most 15 minutes apart, the
   trigger's events and its lack of credentials, per-head serialization without
   cancellation, the pinned canonical checkout, the App token's single permission, the
