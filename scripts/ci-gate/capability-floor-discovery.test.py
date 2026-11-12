@@ -197,25 +197,35 @@ def run_absent_summary(document: dict, tmp: pathlib.Path, receipts) -> tuple[sub
     return result, summary.read_text(encoding="utf-8")
 
 
-def assert_label_rearm_callers_are_in_catalog() -> None:
+# Re-arm callers whose pinned form a consumer carries on its default branch.
+# The lifecycle caller is listed only where it is pinned: discovery rejects
+# the `--local` form, which verjson-cli-cloud still uses (#2000).
+REARM_CALLERS = (
+    ("ai-review-label-rearm", ("Verjson/verjson-cli-cloud", "Verjson/AiB")),
+    ("ai-review-lifecycle-rearm", ("Verjson/verjson-authn",)),
+)
+
+
+def assert_rearm_callers_are_in_catalog() -> None:
     catalog_path = ROOT / "config/capability-floor-consumers.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     consumers = {
         consumer["repository"]: consumer["callers"] for consumer in catalog["consumers"]
     }
-    expected_caller = {
-        "path": ".github/workflows/ai-review-label-rearm.yml",
-        "generator": "scripts/gen-ai-review-label-rearm-caller.sh",
-        "canonical_workflows": ["gate-rearm.yml"],
-    }
-    for repository in ("Verjson/verjson-cli-cloud", "Verjson/AiB"):
-        assert consumers.get(repository, []).count(expected_caller) == 1, (
-            f"missing or duplicate re-arm caller: {repository}"
-        )
+    for caller, repositories in REARM_CALLERS:
+        expected_caller = {
+            "path": f".github/workflows/{caller}.yml",
+            "generator": f"scripts/gen-{caller}-caller.sh",
+            "canonical_workflows": ["gate-rearm.yml"],
+        }
+        for repository in repositories:
+            assert consumers.get(repository, []).count(expected_caller) == 1, (
+                f"missing or duplicate re-arm caller {caller}: {repository}"
+            )
 
 
 def main() -> None:
-    assert_label_rearm_callers_are_in_catalog()
+    assert_rearm_callers_are_in_catalog()
     raw = WORKFLOW.read_text(encoding="utf-8")
     document = yaml.safe_load(raw)
     problems = workflow_problems(document, raw)
