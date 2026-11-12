@@ -156,7 +156,8 @@ class ReviewCheckoutCredentialTest(unittest.TestCase):
 
 
 def run_isolation(root, workspace, extra_env=None):
-    env = {'PATH': os.defpath, 'HOME': str(root), 'GIT_CONFIG_NOSYSTEM': '1', 'GITHUB_WORKSPACE': str(workspace),
+    # LC_ALL=C: tests assert git and coreutils wording, which a locale would translate.
+    env = {'PATH': os.defpath, 'LC_ALL': 'C', 'HOME': str(root), 'GIT_CONFIG_NOSYSTEM': '1', 'GITHUB_WORKSPACE': str(workspace),
            'RUNNER_TEMP': str(root / 'runner-temp'), 'GITHUB_RUN_ID': '4242', 'GITHUB_RUN_ATTEMPT': '3'}
     env.update(extra_env or {})
     return subprocess.run(['bash', '-e', '-c', STEPS[ISOLATION_ID]['run']], env=env, cwd='/',
@@ -185,9 +186,11 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         # The pinned action's configureGitAuth runs exactly this, inside a try/catch.
         set_url = subprocess.run(['git', 'remote', 'set-url', 'origin', 'https://x-access-token:mock-job-token@github.com/Verjson/target.git'],
-                                 cwd=self.workspace, env={'PATH': os.defpath, 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1'},
+                                 cwd=self.workspace, env={'PATH': os.defpath, 'LC_ALL': 'C', 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1'},
                                  text=True, capture_output=True)
         self.assertNotEqual(set_url.returncode, 0)
+        # Refused because isolation removed the remote, not for any other reason.
+        self.assertIn("No such remote 'origin'", set_url.stderr)
         self.assertNotIn('mock-job-token', (self.workspace / '.git/config').read_text())
 
     @unittest.skipIf(os.geteuid() == 0, 'root ignores directory write permission')
@@ -197,6 +200,7 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         self.addCleanup(git_dir.chmod, 0o755)
         result = run_isolation(self.root, self.workspace)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not remove config section 'remote.origin'", result.stderr)
         self.assertIn('url = https://github.com/Verjson/target.git', (git_dir / 'config').read_text())
 
     def claude_config_dir(self):
@@ -218,12 +222,17 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         # The action writes these inputs to ~/.claude, which the review no longer reads.
         self.assertFalse({'settings', 'plugins', 'plugin_marketplaces'} & set(STEPS['claude']['with']))
 
+    def assert_config_directory_refused(self, result, config_dir):
+        # The exclusive mkdir is the guard; an earlier failure would also exit nonzero.
+        self.assertIn(f"cannot create directory '{config_dir}': File exists", result.stderr)
+
     def test_isolation_refuses_a_config_directory_that_already_exists(self):
         config_dir = self.claude_config_dir()
         config_dir.mkdir()
         (config_dir / 'settings.json').write_text('{"hooks": {}}\n')
         result = run_isolation(self.root, self.workspace)
         self.assertNotEqual(result.returncode, 0)
+        self.assert_config_directory_refused(result, config_dir)
 
     def test_isolation_refuses_a_planted_link_at_the_config_directory(self):
         config_dir = self.claude_config_dir()
@@ -232,6 +241,7 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         config_dir.symlink_to(planted)
         result = run_isolation(self.root, self.workspace)
         self.assertNotEqual(result.returncode, 0)
+        self.assert_config_directory_refused(result, config_dir)
         self.assertEqual(list(planted.iterdir()), [])
 
 
@@ -543,6 +553,7 @@ class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
         attributes.symlink_to(outside)
         result = self.run_step(ATTRIBUTES_ID)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn('::error::.git/info/attributes or its directory is a symlink', result.stdout)
         self.assertEqual(outside.read_text(), 'runner\n')
         self.assertTrue(attributes.is_symlink())
 
@@ -554,6 +565,7 @@ class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
         info.symlink_to(outside)
         result = self.run_step(ATTRIBUTES_ID)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn('::error::.git/info/attributes or its directory is a symlink', result.stdout)
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_neutralizing_rewrites_its_own_previous_override(self):
@@ -914,7 +926,7 @@ def plant_agent_config(workspace):
 
 def run_removal(workspace):
     step = STEPS[REMOVAL_ID]
-    env = {'PATH': os.defpath, 'GITHUB_WORKSPACE': str(workspace)}
+    env = {'PATH': os.defpath, 'LC_ALL': 'C', 'GITHUB_WORKSPACE': str(workspace)}
     # Run from elsewhere: the step must act on the workspace, not on whatever cwd it inherits.
     return subprocess.run(['bash', '-e', '-c', step['run']], env=env, cwd='/', text=True, capture_output=True)
 
@@ -973,13 +985,15 @@ class PullRequestAgentConfigRemovalTest(unittest.TestCase):
         self.addCleanup(self.workspace.chmod, 0o755)
         result = run_removal(self.workspace)
         self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stderr, r"rm: cannot remove '[^']+': Permission denied")
 
     def test_removal_fails_closed_without_a_workspace(self):
         plant_agent_config(self.workspace)
         step = STEPS[REMOVAL_ID]
-        result = subprocess.run(['bash', '-e', '-c', step['run']], env={'PATH': os.defpath},
+        result = subprocess.run(['bash', '-e', '-c', step['run']], env={'PATH': os.defpath, 'LC_ALL': 'C'},
                                 cwd=self.workspace, text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn('GITHUB_WORKSPACE: unbound variable', result.stderr)
         self.assertTrue((self.workspace / '.mcp.json').exists())
 
 

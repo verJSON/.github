@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from datetime import datetime, timezone
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -14,10 +15,17 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import same_organization, same_repository, strip_repository_url_prefix  # noqa: E402
 import required_workflow_revision as revision  # noqa: E402
+import shared_checkout_fetch  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/authn-type-surface-ruleset.json"
+# ADR 0252's paused state is read only through the drift check that owns it.
+_PAUSED_SPEC = importlib.util.spec_from_file_location(
+    "actions_paused_drift", ROOT / "scripts/actions-paused-drift.py"
+)
+PAUSED = importlib.util.module_from_spec(_PAUSED_SPEC)
+_PAUSED_SPEC.loader.exec_module(PAUSED)
 WORKFLOW = ROOT / ".github/workflows/authn-type-surface-required.yml"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 NODE_CI_SHA = "576707fe0be0dabe43ea57c504575f8cda88b0d2"
@@ -134,23 +142,16 @@ def read_contract(path=CONTRACT):
 def read_pinned_node_ci_workflow(pin, repo_root=ROOT):
     require(SHA_PATTERN.fullmatch(pin) is not None,
             "node-ci pin must be an immutable commit SHA")
-    present = subprocess.run(
-        ["git", "cat-file", "-e", f"{pin}^{{commit}}"],
-        cwd=repo_root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if present.returncode != 0:
-        fetched = subprocess.run(
-            ["git", "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", pin],
-            cwd=repo_root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+    # Other actions-ci rows fetch into the same checkout concurrently, and git
+    # aborts a shallow update another one raced (#2003); the helper serializes
+    # the fetch and re-checks presence under its lock.
+    try:
+        present = shared_checkout_fetch.ensure_commit(
+            repo_root, pin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        require(fetched.returncode == 0,
-                "node-ci pin does not resolve from the canonical repository")
+    except shared_checkout_fetch.SharedCheckoutError as error:
+        raise ContractError(str(error)) from None
+    require(present, "node-ci pin does not resolve from the canonical repository")
     resolved = subprocess.run(
         ["git", "show", f"{pin}:{NODE_CI_WORKFLOW}"],
         cwd=repo_root,
@@ -470,6 +471,21 @@ def live_predecessor(contract, live, expected):
     return previous_sha, previous
 
 
+def paused_image(ruleset_id, live, expected):
+    """ADR 0252: the recorded relaxation differs from its reviewed image only by `evaluate`."""
+    if not isinstance(live, dict) or live.get("enforcement") != "evaluate":
+        return expected, ""
+    try:
+        acceptance = PAUSED.accept_paused_evaluate(
+            ruleset_id, expected["conditions"]["repository_id"]["repository_ids"]
+        )
+    except PAUSED.PausedRelaxationRefused as refusal:
+        raise ContractError(str(refusal)) from None
+    except PAUSED.PausedStateUnreadable as error:
+        raise ContractError(f"cannot establish ADR 0252 paused state: {error}") from None
+    return {**expected, "enforcement": "evaluate"}, f"; {acceptance}"
+
+
 def audit(contract):
     named = list_named_rulesets(contract)
     require(len(named) == 1, "canonical organization ruleset is not uniquely present")
@@ -478,10 +494,11 @@ def audit(contract):
             "canonical organization ruleset id is invalid")
     live = gh_json(f"orgs/Verjson/rulesets/{ruleset_id}")
     live_sha = revision.bound_workflow_sha(live, require)
-    validate_live_ruleset(live, render_payload(contract, live_sha))
+    expected, acceptance = paused_image(ruleset_id, live, render_payload(contract, live_sha))
+    validate_live_ruleset(live, expected)
     audit_live_revision(live_sha)
     print(f"verified: organization ruleset {ruleset_id} runs {live_sha}, "
-          "the reviewed required workflow on protected main")
+          f"the reviewed required workflow on protected main{acceptance}")
     return 0
 
 

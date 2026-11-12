@@ -52,8 +52,13 @@ def decode(envelope):
     try:
         raw = base64.b64decode(envelope + padding, altchars=b"-_", validate=True)
         text = raw.decode("utf-8")
+    except (UnicodeError, ValueError) as error:
+        raise ValueError("policy envelope cannot be decoded") from error
+    try:
         policy = json.loads(text, object_pairs_hook=reject_duplicates)
-    except (UnicodeError, ValueError, json.JSONDecodeError) as error:
+    except json.JSONDecodeError as error:
+        # A duplicate field is reported by reject_duplicates itself, not masked
+        # as undecodable.
         raise ValueError("policy envelope cannot be decoded") from error
     expected = canonical(policy)
     if raw != expected or encode(expected) != envelope:

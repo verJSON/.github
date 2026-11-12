@@ -231,7 +231,11 @@ exit 0
         for artifact_id in ("", "0", "-1", "abc", "1 2"):
             with self.subTest(artifact_id=artifact_id):
                 result, github_output = self.run_export(artifact_id)
-                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(
+                    "::error::confirmed terminal merge lacks a valid arm receipt artifact ID",
+                    result.stdout,
+                )
                 self.assertEqual(github_output, "")
 
     def test_export_persists_cleanup_outputs_before_later_failures(self) -> None:

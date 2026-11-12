@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import sys
@@ -18,6 +19,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("promotion", ROOT / "scripts/container_release_promotion.py")
 promotion = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(promotion)
+
+
+def exactly(reason):
+    return "^" + re.escape(reason) + "$"
 
 
 class PromotionTest(unittest.TestCase):
@@ -100,14 +105,16 @@ class PromotionTest(unittest.TestCase):
                         self.release(candidate, config, self.state, "1.2.3")
 
     def test_release_rejects_every_unpinned_contract_publisher_end_to_end(self):
-        for signer in (
-            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-            "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-            "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40,
+        differs = "candidate signer workflow differs from expected publisher"
+        for signer, reason in (
+            ("verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+             "candidate workflow is outside the contract repository"),
+            ("Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main", differs),
+            ("Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40, differs),
         ):
             with self.subTest(signer=signer):
                 candidate, config = self.contract_repository_candidate(signer)
-                with self.assertRaises(promotion.ManifestError):
+                with self.assertRaisesRegex(promotion.ManifestError, exactly(reason)):
                     self.release(candidate, config, self.state, "1.2.3")
 
     def test_new_release_rejects_candidate_from_another_source_commit(self):
@@ -244,30 +251,34 @@ class PromotionTest(unittest.TestCase):
     def test_divergent_partial_alias_is_rejected(self):
         image = self.candidate["images"][0]
         state = copy.deepcopy(self.state); state["aliases"] = {f"{image['repository']}:1.2.3": "sha256:" + "f" * 64}
-        with self.assertRaisesRegex(Exception, "different digest"):
+        with self.assertRaisesRegex(promotion.ManifestError, "different digest"):
             self.release(self.candidate, self.config, state, "1.2.3")
 
     def test_repeat_and_downgrade_are_rejected(self):
         for extra in ({"gitTag": True}, {"githubRelease": True}, {"changelogSnapshot": True}):
             state = self.state | extra
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(
+                promotion.ManifestError, exactly("stable Git, changelog, or GitHub Release identity already exists")
+            ):
                 self.release(self.candidate, self.config, state, "1.2.3")
-        with self.assertRaisesRegex(Exception, "reviewed next stable"):
+        with self.assertRaisesRegex(promotion.ManifestError, "reviewed next stable"):
             self.release(self.candidate, self.config, self.state, "1.2.2")
 
     def test_stable_line_cannot_overwrite_or_move_backward(self):
         state = copy.deepcopy(self.state)
         state["previousRelease"] = {"releaseVersion": "1.2.3", "manifestDigest": "sha256:" + "6" * 64}
-        with self.assertRaisesRegex(Exception, "advance"):
+        with self.assertRaisesRegex(promotion.ManifestError, "advance"):
             self.release(self.candidate, self.config, state, "1.2.3")
 
     def test_tampered_candidate_is_rejected_before_plan(self):
         self.candidate["images"][0]["indexDigest"] = "sha256:" + "0" * 64
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(
+            promotion.ManifestError, exactly("candidate destination digest or expiry differs for variant 'default'")
+        ):
             self.release(self.candidate, self.config, self.state, "1.2.3")
 
     def test_expired_candidate_fails_closed_without_rebuilding_or_substituting(self):
-        with self.assertRaisesRegex(Exception, "rebuilding or substituting is forbidden"):
+        with self.assertRaisesRegex(promotion.ManifestError, "rebuilding or substituting is forbidden"):
             self.release(
                 self.candidate,
                 self.config,

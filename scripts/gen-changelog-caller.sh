@@ -103,39 +103,65 @@ pr_gate_untrusted_runner_set=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --scope)
-      [ "$#" -ge 2 ] && [ "$release_scope_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_scope_set" = false ] || {
+        echo "$(basename "$0"): --scope was repeated" >&2
+        usage
+      }
       release_scope="$2"
       release_scope_set=true
       shift 2
       ;;
     --node-version)
-      [ "$#" -ge 2 ] && [ "$release_node_version_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_node_version_set" = false ] || {
+        echo "$(basename "$0"): --node-version was repeated" >&2
+        usage
+      }
       release_node_version="$2"
       release_node_version_set=true
       shift 2
       ;;
     --default-prefix)
-      [ "$#" -ge 2 ] && [ "$release_default_prefix_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_default_prefix_set" = false ] || {
+        echo "$(basename "$0"): --default-prefix was repeated" >&2
+        usage
+      }
       release_default_prefix="$2"
       release_default_prefix_set=true
       shift 2
       ;;
     --default-component)
-      [ "$#" -ge 2 ] && [ "$release_default_component_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_default_component_set" = false ] || {
+        echo "$(basename "$0"): --default-component was repeated" >&2
+        usage
+      }
       release_default_component="$2"
       release_default_component_set=true
       shift 2
       ;;
     --package-dir)
-      [ "$#" -ge 2 ] && [ "$release_package_dirs_exact" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_package_dirs_exact" = false ] || {
+        echo "$(basename "$0"): --package-dir cannot follow --only-package-dir" >&2
+        usage
+      }
       release_package_dirs+=("$2")
       release_package_dirs_set=true
       shift 2
       ;;
     --only-package-dir)
-      [ "$#" -ge 2 ] || usage
+      [ "$#" -ge 2 ] || {
+        echo "$(basename "$0"): --only-package-dir requires a repository-relative directory" >&2
+        usage
+      }
       if [ "$release_package_dirs_exact" = false ]; then
-        [ "$release_package_dirs_set" = false ] || usage
+        [ "$release_package_dirs_set" = false ] || {
+          echo "$(basename "$0"): --only-package-dir cannot follow --package-dir" >&2
+          usage
+        }
         release_package_dirs=()
         release_package_dirs_exact=true
       fi
@@ -6300,8 +6326,8 @@ PY
     local job="$1" consumer_pattern="$2" stamp_line consumer_line
     stamp_line="$(grep -n -m1 \
       'npm version .*--no-git-tag-version --ignore-scripts --allow-same-version' \
-      <<<"$job" | cut -d: -f1)"
-    consumer_line="$(grep -n -m1 -E "$consumer_pattern" <<<"$job" | cut -d: -f1)"
+      <<<"$job" | cut -d: -f1 || true)"
+    consumer_line="$(grep -n -m1 -E "$consumer_pattern" <<<"$job" | cut -d: -f1 || true)"
     [ -n "$stamp_line" ] && [ -n "$consumer_line" ] && [ "$stamp_line" -lt "$consumer_line" ]
   }
   stamp_before "$verify_job" 'scripts/release-verify\.sh|npm run build|npm run typecheck|npm run lint|npm test' \
@@ -6309,10 +6335,10 @@ PY
   grep -qF "package_dirs=($workflow_package_dirs_shell)" <<<"$verify_job" \
     || fail "$release_workflow does not stamp every package directory selected for publication (#557)"
   prepare_line="$(grep -n -m1 'scripts/release-prepare-packages\.sh "\$PACKAGE_VERSION"' \
-    <<<"$verify_job" | cut -d: -f1)"
+    <<<"$verify_job" | cut -d: -f1 || true)"
   stamp_line="$(grep -n -m1 \
     'npm version .*--no-git-tag-version --ignore-scripts --allow-same-version' \
-    <<<"$verify_job" | cut -d: -f1)"
+    <<<"$verify_job" | cut -d: -f1 || true)"
   [ -n "$prepare_line" ] && [ -n "$stamp_line" ] && [ "$prepare_line" -lt "$stamp_line" ] \
     || fail "$release_workflow does not prepare package metadata before stamping and verifying the release tree (#550)"
   if [ "$release_mode" = release-node ]; then
@@ -6596,12 +6622,12 @@ PY
         && grep -qF 'fail-on-cache-miss: true' <<<"$build_job" \
         && grep -qF "NODE_AUTH_TOKEN: ''" <<<"$build_job" \
         || fail "$release_workflow private build does not restore dependencies with credentials blanked"
-      acquisition_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
-      build_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$build_job" | sed 's/^[[:space:]]*//')"
+      acquisition_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//' || true)"
+      build_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$build_job" | sed 's/^[[:space:]]*//' || true)"
       [ "$acquisition_selectors" = "$build_selectors" ] \
         || fail "$release_workflow private acquisition and credentialless build runner matrices differ"
-      acquisition_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
-      build_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$build_job" | sed 's/^[[:space:]]*//')"
+      acquisition_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//' || true)"
+      build_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$build_job" | sed 's/^[[:space:]]*//' || true)"
       [ "$acquisition_indices" = "$build_indices" ] \
         || fail "$release_workflow private acquisition and credentialless build dependency indices differ"
       expected_index=0
@@ -7629,6 +7655,7 @@ for job in doc["jobs"].values():
     rm -f "$syntax_input"
     ;;
   *)
+    echo "$(basename "$0"): unknown mode; the usage line lists every mode" >&2
     usage
     ;;
 esac

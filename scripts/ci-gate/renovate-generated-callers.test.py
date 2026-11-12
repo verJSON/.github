@@ -742,7 +742,8 @@ class GeneratedCallerFence(unittest.TestCase):
         for unmodeled in ("!.github/workflows/release.yml", "/release/", ".github/workflows/release**.yml", "{a,b}.yml"):
             with self.subTest(pattern=unmodeled):
                 self.assertFalse(fence_pattern_is_modeled(unmodeled))
-                with self.assertRaises(AssertionError):
+                with self.assertRaisesRegex(
+                        AssertionError, "^" + re.escape(f"fence pattern {unmodeled!r} is outside the modeled glob subset") + "$"):
                     glob_matches(unmodeled, ".github/workflows/release.yml")
 
     def test_every_other_generator_emits_nothing_renovate_reads(self) -> None:

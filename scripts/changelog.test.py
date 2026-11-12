@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -341,10 +342,11 @@ class ChangelogContractTests(unittest.TestCase):
         self.assertIn("_Date: 2026-07-30; id:20260730T090000Z; refs #13_", rendered)
 
     def test_refs_is_validated_at_validate_time_not_only_at_release(self) -> None:
-        fragment(
+        path = fragment(
             self.root, "2026-07-30-issue-249-late.md", issue="249", refs="nope"
         )
-        with self.assertRaises(changelog.ChangelogError):
+        reason = f"{path}: refs must be a comma-separated list of positive issue numbers"
+        with self.assertRaisesRegex(changelog.ChangelogError, "^" + re.escape(reason) + "$"):
             list(changelog.fragments(self.root))
 
     def test_filename_and_metadata_must_match(self) -> None:
@@ -2714,7 +2716,12 @@ class ChangelogContractTests(unittest.TestCase):
         self.root.joinpath("README.md").write_text("base\n", encoding="utf-8")
         self.commit_all("base")
 
-        with self.assertRaises(changelog.ChangelogError):
+        # Git's own refusal, read in the C locale, proves the revision reached git
+        # and was refused there rather than by an earlier check.
+        with mock.patch.dict(os.environ, {"LC_ALL": "C"}), self.assertRaisesRegex(
+            changelog.ChangelogError,
+            r"^fatal: ambiguous argument 'not-an-api-sha\.\.\.HEAD': unknown revision or path not in the working tree\.",
+        ):
             changelog.check_pr(self.root, "not-an-api-sha", "HEAD")
 
     def test_released_snapshots_use_natural_version_order(self) -> None:

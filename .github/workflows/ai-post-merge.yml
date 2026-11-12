@@ -72,7 +72,10 @@ jobs:
             .name == "AI review authorization" and .head_sha == $head
             and .status == "completed" and .conclusion == "success"
             and .app.id == 15368 and .app.slug == "github-actions"
-          ' <<<"$authorization" >/dev/null
+          ' <<<"$authorization" >/dev/null || {
+            echo '::error::AI authorization check is not a successful exact-head GitHub Actions check'
+            exit 1
+          }
           ai_approve_marker="<!-- ai-review-authorized:v1:${check_id}:${MERGED_HEAD_SHA}:ai-approve -->"
           ai_merge_marker="<!-- ai-review-authorized:v1:${check_id}:${MERGED_HEAD_SHA}:ai-merge -->"
           legacy_marker="<!-- ai-review-authorized:v1:${check_id}:${MERGED_HEAD_SHA} -->"
@@ -106,7 +109,10 @@ jobs:
           --arg legacy_workflow_path "$AI_REVIEW_LEGACY_DISPATCH_WORKFLOW" '
             (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and .head_branch == $default_branch and .event == "workflow_dispatch"
             and .status == "completed" and .conclusion == "success"
-          and (.path == $workflow_path or ($legacy_workflow_path != "" and .path == ".github/workflows/" + $legacy_workflow_path))' <<<"$run" >/dev/null
+          and (.path == $workflow_path or ($legacy_workflow_path != "" and .path == ".github/workflows/" + $legacy_workflow_path))' <<<"$run" >/dev/null || {
+            echo '::error::review run is not a successful default-branch dispatch of the trusted review workflow'
+            exit 1
+          }
           if [ "$legacy_authorization" = true ]; then
             dispatch_merge="$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/jobs?per_page=100" | jq -cer '
               [.jobs[] | select(.name == "dispatch-merge")]

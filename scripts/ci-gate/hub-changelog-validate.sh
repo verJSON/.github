@@ -47,20 +47,25 @@ base_branch="${GITHUB_BASE_REF:-main}"
 # cannot be shadowed, which closes the class rather than the instance.
 base="refs/remotes/origin/$base_branch"
 
+# Other rows of the same actions-ci group fetch into this checkout concurrently,
+# and git aborts a shallow update another process raced (#2003). Every fetch here
+# therefore goes through the serializing helper rather than `git fetch`.
+shared_fetch() { python3 "$here/../shared_checkout_fetch.py" "$@"; }
+
 fetch_base_branch() {
-  git_repo fetch --no-tags --quiet origin \
-    "+refs/heads/$base_branch:refs/remotes/origin/$base_branch"
+  shared_fetch fetch-branch "$repo_root" "$base_branch"
 }
 
 # actions-ci checks out with `fetch-depth: 1`, so neither the base ref nor any
 # common ancestor is present. Deepening is therefore the normal path here, not an
 # error path. `--unshallow` rather than a fixed `--deepen=<n>`: the distance from
 # HEAD to the merge base is the pull request's length, and a gate that guessed it
-# would pass vacuously on exactly the large pull requests that most need it.
-if git_repo rev-parse --is-shallow-repository | grep '^true$' >/dev/null; then
-  git_repo fetch --no-tags --quiet --unshallow origin \
-    || die "cannot deepen the shallow checkout from origin to reach $base"
-fi
+# would pass vacuously on exactly the large pull requests that most need it. The
+# helper decides under its lock whether the checkout is still shallow, since
+# another row may have completed it meanwhile; on a complete checkout it does
+# nothing.
+shared_fetch unshallow "$repo_root" \
+  || die "cannot deepen the shallow checkout from origin to reach $base"
 
 git_repo rev-parse --verify --quiet "$base^{commit}" >/dev/null \
   || fetch_base_branch \

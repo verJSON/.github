@@ -72,6 +72,7 @@ class ReviewPolicyClassificationTest(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("each file requires non-empty filename and status strings", result.stderr)
 
 
 if __name__ == "__main__":

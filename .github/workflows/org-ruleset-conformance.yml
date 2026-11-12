@@ -45,6 +45,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: python3 -I scripts/required-reviewer-ruleset.py check
+      # ADR 0252: a repository left verjson-actions-state=paused after its Actions
+      # are re-enabled keeps running without required checks, and a paused-only
+      # relaxation left in the wrong state either strands or unprotects it. Any
+      # unreadable or unexpected API state fails. It only reads, and runs even
+      # when an earlier audit failed, so that finding cannot mask it.
+      - name: Verify Actions-paused repository drift
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+        run: python3 -I scripts/actions-paused-drift.py
       - name: Remove the isolated ruleset-conformance checkout
         if: ${{ always() }}
         working-directory: ${{ github.workspace }}

@@ -22,43 +22,47 @@ else
   fail "trusted review SHA does not fall back when contract ref is empty"
 fi
 
+# Names the first violated predicate on stderr so a mutation proof can require
+# the guard it targets, not any rejection.
+contract_reject() { printf 'contract: %s\n' "$1" >&2; return 1; }
+
 check_contract() {
   local candidate=$1 verdict reservation_token reserve_one reserve_two exact_head_line check_lookup_line
-  [ "$(grep -c 'id: deepseek_primary' "$candidate")" -eq 1 ] || return 1
-  [ "$(grep -c 'id: deepseek_fallback' "$candidate")" -eq 1 ] || return 1
-  ! grep -Eq 'id: (deepseek_third|verdict_3)' "$candidate" || return 1
-  [ "$(grep -c 'name: Reserve cumulative AI review pass' "$candidate")" -eq 2 ] || return 1
-  [ "$(grep -c '\[ "$consumed" -ge 2 \]' "$candidate")" -eq 2 ] || return 1
-  grep -qF '[ "${EXPLICIT_REREVIEW:-false}" != true ] && [ "$consumed" -ge 2 ]' "$candidate" || return 1
-  [ "$(grep -c 'current_head=.*pulls/\$PR_NUMBER.*\.head\.sha' "$candidate")" -ge 2 ] || return 1
-  grep -qF -- '--head-sha "$EXPECTED_HEAD_SHA"' "$candidate" || return 1
-  grep -qF 'superseded=true' "$candidate" || return 1
-  grep -qF 'cap_exhausted=true' "$candidate" || return 1
-  grep -qF "steps.reserve_1.outputs.allowed == 'true'" "$candidate" || return 1
-  grep -qF "steps.reserve_2.outputs.allowed == 'true'" "$candidate" || return 1
+  [ "$(grep -c 'id: deepseek_primary' "$candidate")" -eq 1 ] || contract_reject 'one primary DeepSeek pass' || return
+  [ "$(grep -c 'id: deepseek_fallback' "$candidate")" -eq 1 ] || contract_reject 'one fallback DeepSeek pass' || return
+  ! grep -Eq 'id: (deepseek_third|verdict_3)' "$candidate" || contract_reject 'no third model pass' || return
+  [ "$(grep -c 'name: Reserve cumulative AI review pass' "$candidate")" -eq 2 ] || contract_reject 'two cumulative pass reservations' || return
+  [ "$(grep -c '\[ "$consumed" -ge 2 \]' "$candidate")" -eq 2 ] || contract_reject 'both reservations cap at two passes' || return
+  grep -qF '[ "${EXPLICIT_REREVIEW:-false}" != true ] && [ "$consumed" -ge 2 ]' "$candidate" || contract_reject 'explicit re-review bypasses only the automatic cap' || return
+  [ "$(grep -c 'current_head=.*pulls/\$PR_NUMBER.*\.head\.sha' "$candidate")" -ge 2 ] || contract_reject 'reservations re-read the live head' || return
+  grep -qF -- '--head-sha "$EXPECTED_HEAD_SHA"' "$candidate" || contract_reject 'reservation markers bind the expected head' || return
+  grep -qF 'superseded=true' "$candidate" || contract_reject 'superseded heads are reported' || return
+  grep -qF 'cap_exhausted=true' "$candidate" || contract_reject 'cap exhaustion is reported' || return
+  grep -qF "steps.reserve_1.outputs.allowed == 'true'" "$candidate" || contract_reject 'pass 1 requires its reservation' || return
+  grep -qF "steps.reserve_2.outputs.allowed == 'true'" "$candidate" || contract_reject 'pass 2 requires its reservation' || return
   reservation_token=$(awk '/id: reservation-app-token$/{found=1} found&&/^      - name:/{exit} found{print}' "$candidate")
-  printf '%s' "$reservation_token" | grep -F 'uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' >/dev/null || return 1
-  printf '%s' "$reservation_token" | grep -F 'permission-pull-requests: write' >/dev/null || return 1
-  printf '%s' "$reservation_token" | grep -E 'permission-(contents|actions|checks|issues):' >/dev/null && return 1
-  grep -qF 'GH_TOKEN: ${{ steps.reservation-app-token.outputs.token }}' "$candidate" || return 1
-  grep -qF 'ai-review-pass:v2:${next}/2 pr:${PR_NUMBER} check:${AUTHORIZATION_CHECK_ID} head:${EXPECTED_HEAD_SHA}' "$candidate" || return 1
-  grep -qF 'ai-review-explicit:v1 pr:${PR_NUMBER} check:${AUTHORIZATION_CHECK_ID} head:${EXPECTED_HEAD_SHA}' "$candidate" || return 1
-  grep -qF '[ "$marker_check" = "$AUTHORIZATION_CHECK_ID" ]' "$candidate" || return 1
-  grep -qF '[ "$explicit_receipt_consumed" = true ]' "$candidate" || return 1
-  grep -qF '.app.id == 15368 and .app.slug == "github-actions"' "$candidate" || return 1
+  printf '%s' "$reservation_token" | grep -F 'uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' >/dev/null || contract_reject 'reservation App token action is pinned' || return
+  printf '%s' "$reservation_token" | grep -F 'permission-pull-requests: write' >/dev/null || contract_reject 'reservation App token writes pull requests' || return
+  printf '%s' "$reservation_token" | grep -E 'permission-(contents|actions|checks|issues):' >/dev/null && { contract_reject 'reservation App token holds no wider permission'; return; }
+  grep -qF 'GH_TOKEN: ${{ steps.reservation-app-token.outputs.token }}' "$candidate" || contract_reject 'reservations use the reservation App token' || return
+  grep -qF 'ai-review-pass:v2:${next}/2 pr:${PR_NUMBER} check:${AUTHORIZATION_CHECK_ID} head:${EXPECTED_HEAD_SHA}' "$candidate" || contract_reject 'pass marker binds pr, check, and head' || return
+  grep -qF 'ai-review-explicit:v1 pr:${PR_NUMBER} check:${AUTHORIZATION_CHECK_ID} head:${EXPECTED_HEAD_SHA}' "$candidate" || contract_reject 'explicit marker binds pr, check, and head' || return
+  grep -qF '[ "$marker_check" = "$AUTHORIZATION_CHECK_ID" ]' "$candidate" || contract_reject 'marker check matches the authorization check' || return
+  grep -qF '[ "$explicit_receipt_consumed" = true ]' "$candidate" || contract_reject 'an explicit receipt reserves one pass' || return
+  grep -qF '.app.id == 15368 and .app.slug == "github-actions"' "$candidate" || contract_reject 'authorization check owner is the Actions App' || return
   reserve_one=$(awk '/id: reserve_1$/{found=1} found{print} found&&/^      - name: Prepare bounded review context/{exit}' "$candidate")
   exact_head_line=$(grep -nF '[ "$marker_head" = "$EXPECTED_HEAD_SHA" ] || continue' <<<"$reserve_one" | cut -d: -f1)
   check_lookup_line=$(grep -nF 'check-runs/$marker_check' <<<"$reserve_one" | cut -d: -f1)
-  [[ "$exact_head_line" =~ ^[1-9][0-9]*$ && "$check_lookup_line" =~ ^[1-9][0-9]*$ && "$exact_head_line" -lt "$check_lookup_line" ]] || return 1
+  [[ "$exact_head_line" =~ ^[1-9][0-9]*$ && "$check_lookup_line" =~ ^[1-9][0-9]*$ && "$exact_head_line" -lt "$check_lookup_line" ]] || contract_reject 'exact-head filter precedes the check lookup' || return
   reserve_two=$(awk '/id: reserve_2$/{found=1} found{print} found&&/^      - name: DeepSeek review pass 2/{exit}' "$candidate")
-  printf '%s' "$reserve_two" | grep -F 'consumed="${{ steps.reserve_1.outputs.count }}"' >/dev/null || return 1
-  ! printf '%s' "$reserve_two" | grep -F 'pulls/$PR_NUMBER/reviews?per_page=100' >/dev/null || return 1
-  grep -qF "steps.verdict_1.outputs.usable != 'true'" "$candidate" || return 1
-  grep -qF 'MODEL: ${{ needs.preflight.outputs.fallback_model }}' "$candidate" || return 1
-  grep -qF 'BUDGET_USD: ${{ needs.preflight.outputs.fallback_budget_usd }}' "$candidate" || return 1
+  printf '%s' "$reserve_two" | grep -F 'consumed="${{ steps.reserve_1.outputs.count }}"' >/dev/null || contract_reject 'pass 2 reuses the pass 1 count' || return
+  ! printf '%s' "$reserve_two" | grep -F 'pulls/$PR_NUMBER/reviews?per_page=100' >/dev/null || contract_reject 'pass 2 does not re-read reviews' || return
+  grep -qF "steps.verdict_1.outputs.usable != 'true'" "$candidate" || contract_reject 'fallback requires an unusable primary verdict' || return
+  grep -qF 'MODEL: ${{ needs.preflight.outputs.fallback_model }}' "$candidate" || contract_reject 'fallback uses the fallback model' || return
+  grep -qF 'BUDGET_USD: ${{ needs.preflight.outputs.fallback_budget_usd }}' "$candidate" || contract_reject 'fallback uses the fallback budget' || return
   verdict=$(awk '/id: submit$/{found=1} found&&/VERDICT:/{print; exit}' "$candidate")
-  printf '%s' "$verdict" | grep 'steps.verdict_1.outputs.verdict' >/dev/null || return 1
-  printf '%s' "$verdict" | grep 'steps.verdict_2.outputs.verdict' >/dev/null || return 1
+  printf '%s' "$verdict" | grep 'steps.verdict_1.outputs.verdict' >/dev/null || contract_reject 'verdict reads pass 1' || return
+  printf '%s' "$verdict" | grep 'steps.verdict_2.outputs.verdict' >/dev/null || contract_reject 'verdict reads pass 2' || return
 }
 
 check_contract "$workflow" \
@@ -188,18 +192,33 @@ grep -q "event.label.name == 're-review'" "$workflow" \
   && pass "a later same-head attempt still requires consumed maintainer re-review authorization" \
   || fail "explicit later re-review authorization is not wired"
 
+expect_contract_rejects() {
+  local survived="$1" rejected="$2" reason="$3"
+  if check_contract "$tmp/workflow.yml" 2>"$tmp/contract.err"; then
+    fail "mutation survived: $survived"
+  elif grep -qxF "contract: $reason" "$tmp/contract.err"; then
+    pass "mutation rejected: $rejected"
+  else
+    fail "mutation rejected for another reason ($(cat "$tmp/contract.err")); expected: $reason"
+  fi
+}
+
 cp "$workflow" "$tmp/workflow.yml"
 printf '\n      - id: deepseek_third\n        run: python3 "$RUNNER_TEMP/deepseek-review.py"\n' >>"$tmp/workflow.yml"
-if check_contract "$tmp/workflow.yml"; then fail "mutation survived: an unbounded third model pass was admitted"; else pass "mutation rejected: the cascade cannot grow a third paid pass"; fi
+expect_contract_rejects "an unbounded third model pass was admitted" \
+  "the cascade cannot grow a third paid pass" 'no third model pass'
 
 sed "s/steps.verdict_1.outputs.usable != 'true'/steps.verdict_1.outputs.usable == 'true'/" "$workflow" >"$tmp/workflow.yml"
-if check_contract "$tmp/workflow.yml"; then fail "mutation survived: fallback can run after a usable primary verdict"; else pass "mutation rejected: usable primary verdict terminates the cascade"; fi
+expect_contract_rejects "fallback can run after a usable primary verdict" \
+  "usable primary verdict terminates the cascade" 'fallback requires an unusable primary verdict'
 
 sed 's/\[ "$consumed" -ge 2 \]/[ "$consumed" -ge 3 ]/g' "$workflow" >"$tmp/workflow.yml"
-if check_contract "$tmp/workflow.yml"; then fail "mutation survived: a third exact-head pass was admitted"; else pass "mutation rejected: the exact-head pass cap cannot exceed two"; fi
+expect_contract_rejects "a third exact-head pass was admitted" \
+  "the exact-head pass cap cannot exceed two" 'both reservations cap at two passes'
 
 sed 's/\[ "$explicit_receipt_consumed" = true \]/[ "$explicit_receipt_consumed" = false ]/' "$workflow" >"$tmp/workflow.yml"
-if check_contract "$tmp/workflow.yml"; then fail "mutation survived: a fresh dispatch replayed an explicit authorization check"; else pass "mutation rejected: each explicit authorization check reserves at most one diagnostic pass"; fi
+expect_contract_rejects "a fresh dispatch replayed an explicit authorization check" \
+  "each explicit authorization check reserves at most one diagnostic pass" 'an explicit receipt reserves one pass'
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }
 echo "$fails test(s) failed."
