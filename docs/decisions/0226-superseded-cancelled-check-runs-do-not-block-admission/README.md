@@ -550,6 +550,7 @@ section headed "F-1R: a guard-yielded local run is no family participant":
 | guard `FAILURE` / `CANCELLED` | exit `5`, `rearm / event-policy=CANCELLED` |
 | an extra `audit` check | exit `5`, same reason |
 | rearm ran (`rearm / event-policy`, `rearm / arm` skipped); `rearm` `FAILURE` | exit `5`, same reason |
+| `guard` `SUCCESS` plus a skipped `rearm / arm` (two checks, calling job not among them) | exit `5`, same reason |
 | no check in the suite; a skipped `rearm` alone | exit `5`, same reason |
 | yield-shaped run that concluded `failure`, in the required run's second | exit `5`, same reason |
 | `AI review label re-arm` with `guard`/`rearm` checks | exit `5`, same reason |
@@ -572,6 +573,8 @@ Each condition was mutated out and a suite failed for its asserted reason:
 | drop the guard `SUCCESS` condition | guard `FAILURE`; guard `CANCELLED` |
 | drop the two-check count | extra `audit` check |
 | drop the calling job `SKIPPED` condition | `rearm` `FAILURE` |
+| match the calling job by any `SKIPPED` check (drop its name) | `guard` `SUCCESS` plus a skipped `rearm / arm` |
+| match the calling job by name prefix, keeping the two-check count | `guard` `SUCCESS` plus a skipped `rearm / arm` |
 | drop the run-level `success` condition | yield-shaped run that concluded `failure` |
 | match the yield by job names for any caller | `AI review label re-arm` with `guard`/`rearm` |
 | count a guard-yielded run in the same-second tie | yielding run in the required run's second |

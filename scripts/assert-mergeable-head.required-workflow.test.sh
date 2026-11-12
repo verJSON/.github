@@ -243,6 +243,13 @@ for shape in "$(check_run 51 'guard' success 705),$(check_run 52 'rearm / event-
     "rearm / event-policy=CANCELLED"
 done
 
+# The calling job is matched by its exact name: a two-check suite of guard SUCCESS and a
+# SKIPPED check that is not `rearm` itself (here the called arm, after rearm entered the
+# group) is not a yield.
+f1r_env "$(check_run 51 'guard' success 705),$(check_run 52 'rearm / arm' skipped 705)"; run
+expect "a local run whose skipped check is not the calling job itself is still the newest family run, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
 # Missing evidence is never a yield: a suite the inventory reports no check of, or a
 # skipped rearm with no guard. (A guard alone is SUCCESS-only, which already displaces.)
 for shape in '' "$(check_run 52 'rearm' skipped 705)"; do

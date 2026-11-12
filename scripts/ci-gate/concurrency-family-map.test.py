@@ -170,7 +170,7 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
                                              f"{source} must leave its yield jobs named by their ids, as their checks are")
                         entry["yield"] = {"guard": guard_id, "arm": arm_id}
                     key = (entry["name"], entry["path"])
-                    self.assertIn(callers.get(key, entry), (entry,), f"{source} disagrees with another source on {key}")
+                    self.assertEqual(callers.get(key, entry), entry, f"{source} disagrees with another source on {key}")
                     callers[key] = entry
             families.append({
                 "group_prefix": prefix,
