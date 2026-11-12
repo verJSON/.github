@@ -138,11 +138,10 @@ for invalid_client_id in '' 4583107 'Iv23liIrniWY27YJKYDP ' 'Ivabcdefgh$()' 'Iv2
     fail "the release workflow refused App client ID '${invalid_client_id:-<empty>}' for another reason (exit $client_id_status): $(cat "$client_id_err")"
   fi
 done
-grep -qF 'git push --atomic origin \' "$workflow" \
-  && grep -qF '"$release_commit:refs/heads/$DEFAULT_BRANCH" \' "$workflow" \
-  && grep -qF '"refs/tags/$VERSION"' "$workflow" \
-  && pass "the release still publishes commit and exact tag atomically" \
-  || fail "the atomic commit+tag push shape changed"
+grep -qF 'bash .changelog-contract/scripts/release-push-guard.sh \' "$workflow" \
+  && grep -qF '"$DEFAULT_BRANCH" "$GITHUB_REF" "$GITHUB_SHA" "$release_commit" "$VERSION"' "$workflow" \
+  && pass "the release invokes the pinned atomic expected-head push guard" \
+  || fail "the atomic expected-head push guard is missing"
 
 # Release commits and tags are authored under the organization's own domain;
 # a lookalike domain would publish immutable history under an identity the
