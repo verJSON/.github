@@ -86,6 +86,18 @@ def workflow(name):
     return yaml.safe_load((ROOT / f".github/workflows/{name}.yml").read_text())
 
 
+# Reusable workflows whose jobs consume an App key: the role environment input each one
+# requires, and the key-bearing jobs that environment binds.
+KEY_CONSUMERS = {
+    "changelog-release": ("release_environment", ["release"]),
+    "container-release": ("release_environment", ["promote"]),
+    "ai-privileged-merge": ("merge_environment", ["privileged_merge"]),
+    "ai-review-merge": ("ai_review_environment", ["gate", "complete-authorization"]),
+    "gate-rearm": ("ai_review_environment", ["arm"]),
+    "merge-admission": ("ai_review_environment", ["evaluate"]),
+}
+
+
 def metadata():
     result = {"repos/Verjson/example": [{"default_branch": "main", "owner": {"type": "Organization"}}],
               "repos/Verjson/example/actions/secrets?per_page=100": [{"total_count": 0, "secrets": []}],
@@ -206,14 +218,7 @@ class StorageAuditTests(unittest.TestCase):
 
 class WorkflowBoundaryTests(unittest.TestCase):
     def test_key_consumers_declare_required_environment_and_depend_on_keyless_policy(self):
-        consumers = {
-            "changelog-release": ("release_environment", ["release"]),
-            "container-release": ("release_environment", ["promote"]),
-            "ai-privileged-merge": ("merge_environment", ["privileged_merge"]),
-            "ai-review-merge": ("ai_review_environment", ["gate", "complete-authorization"]),
-            "gate-rearm": ("ai_review_environment", ["arm"]),
-        }
-        for name, (field, jobs) in consumers.items():
+        for name, (field, jobs) in KEY_CONSUMERS.items():
             with self.subTest(name=name):
                 doc = workflow(name)
                 trigger = doc.get("on", doc.get(True))
@@ -247,9 +252,9 @@ class WorkflowBoundaryTests(unittest.TestCase):
                         {"actions": "read", "contents": "read"},
                         f"{name}: app-key policy must retain explicit read-only permissions",
                     )
-                    if name == "ai-review-merge":
-                        # The reusable edge carries only the one named secret
-                        # consumed by its environment-bound validator.
+                    if policy["with"]["role"] == "ai-review":
+                        # The policy's environment-bound key validator is key-bearing (ADR
+                        # 0171, 2026-09-27), so the edge carries only that one named secret.
                         self.assertEqual(
                             policy.get("secrets"),
                             {"AI_REVIEW_APP_PRIVATE_KEY": "${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}"},
@@ -273,6 +278,24 @@ class WorkflowBoundaryTests(unittest.TestCase):
                         self.assertIn("needs.app-key-policy.result == 'success'", app_token["if"])
                     elif "always()" in value.get("if", ""):
                         self.assertIn("needs.app-key-policy.result == 'success'", value["if"])
+
+    def test_every_relative_edge_into_a_key_consumer_inherits_the_callers_secrets(self):
+        # ADR 0171: an environment binding alone resolves no secret inside a reusable
+        # workflow; only caller inheritance does. Derived from the workflows, so a new caller
+        # cannot omit it, as the merge-admission caller did (#2031).
+        targets = {f"./.github/workflows/{name}.yml" for name in KEY_CONSUMERS}
+        edges = {
+            (path.name, name): job.get("secrets")
+            for path in sorted(p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern))
+            for name, job in (yaml.safe_load(path.read_text()).get("jobs") or {}).items()
+            if job.get("uses") in targets
+        }
+        self.assertLessEqual(
+            {("ai-review-merge-dispatch.yml", "review"), ("merge-admission-caller.yml", "admit")}, set(edges),
+        )
+        for edge, secrets in edges.items():
+            with self.subTest(edge=edge):
+                self.assertEqual(secrets, "inherit", f"{edge} does not inherit the caller's secrets")
 
     def test_ai_review_key_policy_validates_the_resolved_environment_secret(self):
         policy = workflow("app-key-environment")

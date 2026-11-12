@@ -82,6 +82,8 @@ jobs:
       actions: read
       contents: read
     uses: ./.github/workflows/app-key-environment.yml
+    secrets:
+      AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
     with:
       role: ai-review
       environment: ${{ inputs.ai_review_environment }}

@@ -9,7 +9,9 @@ events and completes before the producer starts.
 
 from __future__ import annotations
 
+import json
 import pathlib
+import re
 import unittest
 
 import yaml
@@ -29,6 +31,111 @@ MERGE_ADMISSION_FILES = {"merge-admission.yml", "merge-admission-trigger.yml", "
 # review gate patches its authorization check run there. It is dispatched on the default
 # branch, so its completed run names no pull-request head, and the producer sweeps instead.
 DISPATCHED_HEAD_REPORTERS = {"AI review + auto-merge"}
+# The caller's concurrency group: the head a narrowed plan evaluates, or one sweep key. It
+# must not equal the evaluate job's per-head group, or a run would wait on itself.
+CALLER_CONCURRENCY_GROUP = (
+    "merge-admission-caller-${{ contains(fromJSON('[\"pull_request\",\"pull_request_target\",\"pull_request_review\"]'), "
+    "github.event.workflow_run.event) && github.event.workflow_run.head_sha || 'sweep' }}"
+)
+
+
+EXPRESSION_TOKEN = re.compile(r"\s*(\|\||&&|\(|\)|,|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.-]*)")
+
+
+def evaluate(expression: str, context: dict) -> object:
+    """Evaluate the GitHub expression subset the caller's concurrency key uses.
+
+    Models the documented semantics that matter here: a missing property is null, `||` and
+    `&&` return an operand, `fromJSON` parses its string, and `contains` on an array is a
+    case-insensitive element match. Any other construct is rejected rather than guessed.
+    """
+    tokens, position = [], 0
+    while position < len(expression):
+        match = EXPRESSION_TOKEN.match(expression, position)
+        assert match and match.end() > position, f"unmodelled expression syntax at {expression[position:]!r}"
+        tokens.append(match[1])
+        position = match.end()
+        if not expression[position:].strip():
+            break
+    cursor = [0]
+
+    def peek():
+        return tokens[cursor[0]] if cursor[0] < len(tokens) else None
+
+    def take(expected=None):
+        token = peek()
+        assert expected is None or token == expected, (expected, token, expression)
+        cursor[0] += 1
+        return token
+
+    def truthy(value):
+        return value not in ("", None, False, 0)
+
+    def same(left, right):
+        if isinstance(left, str) and isinstance(right, str):
+            return left.lower() == right.lower()
+        return left == right
+
+    def call(name, arguments):
+        if name == "fromJSON":
+            (text,) = arguments
+            return json.loads(text)
+        assert name == "contains", f"unmodelled function {name}"
+        haystack, needle = arguments
+        assert isinstance(haystack, list), f"unmodelled contains() over {type(haystack).__name__}"
+        return any(same(item, needle) for item in haystack)
+
+    def primary():
+        token = take()
+        if token == "(":
+            value = disjunction()
+            take(")")
+            return value
+        if token.startswith("'"):
+            return token[1:-1].replace("''", "'")
+        if peek() == "(":
+            take("(")
+            arguments = [disjunction()]
+            while peek() == ",":
+                take(",")
+                arguments.append(disjunction())
+            take(")")
+            return call(token, arguments)
+        root, *path = token.split(".")
+        assert root in context, f"unmodelled context {root}"
+        value = context[root]
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        return value
+
+    def conjunction():
+        value = primary()
+        while peek() == "&&":
+            take("&&")
+            other = primary()
+            value = other if truthy(value) else value
+        return value
+
+    def disjunction():
+        value = conjunction()
+        while peek() == "||":
+            take("||")
+            other = conjunction()
+            value = value if truthy(value) else other
+        return value
+
+    result = disjunction()
+    assert cursor[0] == len(tokens), f"trailing expression tokens in {expression!r}"
+    return result
+
+
+def interpolate(template: str, context: dict) -> str:
+    # GitHub renders each `${{ }}` and concatenates; null renders as the empty string.
+    def render(match):
+        value = evaluate(match[1], context)
+        return "" if value is None else str(value)
+
+    return re.sub(r"\$\{\{\s*(.+?)\s*\}\}", render, template)
 
 
 def workflow(name: str) -> dict:
@@ -93,6 +200,42 @@ class CallerTriggerTests(unittest.TestCase):
         own_names = {doc["name"], workflow("merge-admission")["name"]}
         self.assertFalse(own_names & set(triggers(doc)["workflow_run"]["workflows"]))
 
+    def test_producer_runs_are_bounded_per_planned_head_without_cancelling_a_running_one(self):
+        # ADR 0260, 2026-11-12 fan-out amendment: one running and one pending run per group.
+        # The group is keyed exactly as the planner chooses between a narrowed head and a sweep.
+        doc = workflow("merge-admission-caller")
+        self.assertIn("concurrency", doc, "the caller declares no run-level concurrency")
+        concurrency = doc["concurrency"]
+        self.assertEqual(concurrency["group"], CALLER_CONCURRENCY_GROUP)
+        self.assertIs(concurrency["cancel-in-progress"], False)
+
+    def test_the_concurrency_key_is_the_head_the_plan_narrows_to_or_the_sweep(self):
+        # A run whose pending successor is cancelled loses nothing only if both plan the same
+        # work: the same head, or a sweep of every head. Evaluated against the plan job's own
+        # EVENT_HEAD over the same events, so the key cannot drift from the planner.
+        group = workflow("merge-admission-caller")["concurrency"]["group"]
+        plan = workflow("merge-admission")["jobs"]["plan"]["steps"]
+        event_head = next(step for step in plan if step.get("name") == "Plan the heads this run evaluates")["env"]["EVENT_HEAD"]
+        head = "0123456789abcdef0123456789abcdef01234567"
+
+        def completed(event):
+            return {"github": {"event_name": "workflow_run", "sha": "f" * 40,
+                               "event": {"workflow_run": {"event": event, "head_sha": head}}}}
+
+        cases = {f"completed {event} run": (completed(event), head)
+                 for event in ("pull_request", "pull_request_target", "pull_request_review")}
+        cases |= {f"completed {event} run": (completed(event), "sweep")
+                  for event in ("push", "workflow_dispatch", "schedule", "merge_group",
+                                "pull_request_review_comment", "issue_comment", "dynamic")}
+        cases |= {f"{event} event": ({"github": {"event_name": event, "sha": "f" * 40, "event": {}}}, "sweep")
+                  for event in ("schedule", "workflow_dispatch")}
+        empty_head = completed("pull_request")
+        empty_head["github"]["event"]["workflow_run"]["head_sha"] = ""
+        cases["completed pull_request run with an empty head"] = (empty_head, "sweep")
+        for name, (context, key) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(interpolate(group, context), f"merge-admission-caller-{key}")
+                self.assertEqual(interpolate(event_head, context) or "sweep", key)
 
 
 class TriggerWorkflowTests(unittest.TestCase):

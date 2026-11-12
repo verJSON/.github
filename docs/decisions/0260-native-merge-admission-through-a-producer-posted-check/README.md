@@ -328,3 +328,135 @@ third behaviorally matched copy.
 
 Each guard that held when written was proven by a mutant that fails it for its asserted
 reason, recorded in the pull request.
+
+## 2026-11-12 amendment: the producer never evaluated live (key delivery)
+
+After #2055 merged at `6ba5b189`, no `Merge admission` run evaluated a head. By
+2026-11-12T13:31Z, 107 runs had failed. In each, the plan found work and
+`admit / app-key-policy / validate-ai-review-key` stopped with
+`AI_REVIEW_APP_PRIVATE_KEY is empty or unavailable` (for example
+[run 43226371916](https://github.com/Verjson/.github/actions/runs/43226371916)), so
+`evaluate` was skipped. The other 89 runs succeeded only because their plan was empty.
+`evaluate` and the key validator were skipped in every one of them. No
+`merge-admission` check was ever posted by this producer.
+
+The cause was key transport, not policy. This repository holds the key only as an
+`ai-review-app` environment secret. In a reusable workflow, an environment binding
+alone resolves no secret: it needs caller inheritance
+([ADR 0171](../0171-inherited-reusable-environment-context/README.md), live control
+run 34433194313). The key validator also needs the narrow named grant on its policy edge
+(ADR 0171, 2026-09-27 amendment). `merge-admission-caller.yml` called the producer
+without `secrets: inherit`, and the producer's `app-key-policy` edge carried no grant.
+Both the validator and `evaluate`'s token mint therefore saw an empty key. The
+`ai-review-merge-dispatch.yml` → `ai-review-merge.yml` chain uses both transports and
+resolves the same environment-only key; its run 43223952797 passed
+`validate-ai-review-key` on the same day.
+
+The fix adopts that transport. The caller's `admit` job inherits the caller's secrets.
+That widens what the producer can read to every secret the caller can reach, including
+the model provider keys, not only the App key. ADR 0171 accepts the widening on the
+condition that each secret is referenced only where it is required: the producer
+references `AI_REVIEW_APP_PRIVATE_KEY` alone, at the grant and in `evaluate`.
+The producer's `app-key-policy` edge carries only
+`AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}`. `evaluate` keeps
+its `ai-review-app` environment binding, and the main-only policy and its
+`needs`/`if` dependency are unchanged. Permissions and triggers are unchanged. The
+producer does not declare the key under `on.workflow_call.secrets`: ADR 0171 records the
+optional declaration as a transport that failed the live control, and the key-consumer
+contract forbids declaring a role key.
+
+`scripts/ci-gate/app-key-environment.test.py` (platform) now enrolls `merge-admission`
+as an App-key consumer, with `evaluate` as its key-bearing job. It requires the named
+grant on every `app-key-policy` edge whose role is `ai-review`, instead of on
+`ai-review-merge` alone. It also derives every relative reusable edge into an App-key
+consumer from the workflows and requires `secrets: inherit` on each, so a new caller
+cannot omit it. Removing either transport line fails its test for that reason. The
+pull request records the mutants. A live receipt is the first `Merge admission` run
+after merge that reaches `evaluate`.
+
+### Bounded producer fan-out
+
+Delivering the key turns every run that plans a head into an `evaluate` matrix
+(`max-parallel: 4`, up to 15 minutes per leg). The caller had no concurrency, so the run
+count is the bill. Measured on 2026-11-12 from 08:17 to 14:17 UTC: 246 `Merge admission`
+runs, 121 of them in the 12:00 hour (118 `workflow_run`, 3 `schedule`). The completions of
+one head's workflows arrive 6-8 per head, and each completion that a pull-request or review
+event did not start plans a full sweep.
+
+**The bound.** The caller declares run-level concurrency with `cancel-in-progress: false`.
+Its group is `merge-admission-caller-` followed by the plan job's own `EVENT_HEAD` choice,
+with `sweep` in place of the empty head: a completed run that a `pull_request`,
+`pull_request_target`, or `pull_request_review` event started keys on its `head_sha`, and
+every other trigger (any other completed run, the schedule, a manual dispatch) keys on
+`sweep`. The empty-head edge maps to a sweep in both, so the key and the planner cannot
+disagree. The `-caller-` prefix keeps these groups apart from the evaluate job's
+`merge-admission-<repository>-<head>` groups, so a run never waits on a group it holds.
+
+**Why a cancelled run loses no evaluation.** GitHub keeps at most one running and one
+pending run per concurrency group. When a run queues into a group that already holds a
+pending run, the older pending run is cancelled and the newer one waits. With
+`cancel-in-progress: false`, the running run is never cancelled. In a head group, the
+replacing run plans the same head, and its planner reads the open pull requests at that
+head when it starts, which is later than the cancelled run would have read. In the sweep
+group, the replacing run is a sweep, which plans every open head. The groups are disjoint,
+so a narrowed run is never replaced by a sweep, and it does not need to be. A running run
+always finishes, so the pending slot always runs next.
+
+**The trigger needs no bound of its own.** `merge-admission-trigger.yml` reaches the
+producer only through this caller's `workflow_run`, so its completions are bounded here.
+Its own runs hold no credential, read nothing, and finish in seconds. A review event runs
+the head's copy of that file, so a concurrency declared there is not under the default
+branch's control in any case.
+
+**Who can influence the key.** A pull-request author chooses the head SHA, so an author can
+open a pull request at another pull request's head and share its group. That cannot starve
+the other pull request: every run in a head group plans every open pull request at that
+head, so whichever run executes evaluates both. Events on one's own head cost at most one
+running and one pending run for that head. The sweep group is reached by default-branch
+pushes, dispatches, the schedule, and completions of the AI review gate, which
+`gate-rearm.yml` dispatches on pull-request events. A burst there produces sweeps one
+after another, never overlapping, and each covers every head.
+
+**Expected rate.** Per head, at most one producer run executes and at most one waits. A
+burst of completions that arrives within one producer run's duration therefore executes
+at most 2 runs for that head; a longer burst executes at most one run per producer-run
+duration, plus one. Sweeps never overlap. The schedule targets one every 15 minutes, and
+gate dispatches and default-branch pushes can raise that to back-to-back sweeps, never
+higher. Displaced pending runs still appear in the run list as `cancelled` on the
+default-branch commit, so the count of created runs does not fall; executed runs and
+`evaluate` jobs do. Those cancellations add the same default-branch noise as the
+evaluate job's cancelled legs, which narrowed precondition (a) above already accepts.
+The bound is per head and per sweep, not global: concurrent producer runs grow with
+the number of open pull-request heads, so a contributor with K open heads holds K head
+groups. The post-merge measurement on #2031 is therefore read per head, not as one
+hourly total.
+
+**Budget ownership.** `docs/ci-workflow-tiers.md` excludes `pull_request_target`
+authorization and merge-gate workflows from the tier policy, so no document states a
+runs-per-hour budget for this producer. The rate above is this ADR's own budget.
+
+**Post-merge measurement.** For the first hour after this change merges, count
+`Merge admission` runs by conclusion (success, failure, cancelled) and `evaluate` jobs, and
+record both on #2031 beside the baseline above. An executed-run rate above the stated
+bound reopens this design.
+
+**Item 5 deviation, recorded.** Item 5 names completion of each workflow that reports a
+*required* context, while the caller lists every workflow that reports any check on a
+pull-request head. The caller keeps that list, for two reasons. First, no configuration in
+this repository names this repository's required contexts. They come from live
+organization rulesets selected by repository properties, which Gate A reads at evaluation
+time. `config/org-ruleset-conformance-policy.json` binds required workflows for other
+repositories, and `config/required-check-bindings/` holds snapshots of property-scoped
+rulesets, not this repository's set. Deriving the list would need new configuration.
+Second, the assertion's verdict depends on more than the required contexts. Gate C refuses
+while any other check on the head is pending or non-passing. Narrowing the list would leave
+a head refused, after an unrequired check completes, until the next sweep. The concurrency
+bound limits the cost of the wider list instead.
+
+`scripts/ci-gate/merge-admission-workflow.test.py` (merge-gate) pins the caller's group
+and `cancel-in-progress: false`. It also evaluates the group and the plan job's
+`EVENT_HEAD` over the same events, and requires the head for the three pull-request
+events and `sweep` for every other completed run, the schedule, and a manual dispatch.
+Dropping the concurrency, setting `cancel-in-progress: true`, keying on `github.sha`, or
+keying on `head_sha` for every event fails it, and so does narrowing the planner's event
+list alone.
