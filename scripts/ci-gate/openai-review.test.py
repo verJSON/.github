@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,8 +36,13 @@ class OpenAIReviewTest(unittest.TestCase):
     def test_unknown_model_and_insufficient_or_invalid_budget_fail_before_request(self):
         with self.assertRaisesRegex(ValueError, "unsupported"):
             review.request_body("gpt-cheap", [], 256, review.SCHEMA)
-        for budget in ("nope", "0", "0.001", "0.01"):
-            with self.subTest(budget=budget), self.assertRaises(ValueError):
+        for budget, reason in (
+            ("nope", "budget must be a decimal dollar amount"),
+            ("0", "budget must be positive with at most two decimal places"),
+            ("0.001", "budget must be positive with at most two decimal places"),
+            ("0.01", "budget cannot cover the complete input and minimum structured output"),
+        ):
+            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.output_cap("x" * 1_000_000, budget)
 
     def test_request_is_tool_free_and_strict(self):
@@ -74,8 +80,12 @@ class OpenAIReviewTest(unittest.TestCase):
         missing = self.response(); missing.pop("usage")
         over_input = self.response(); over_input["usage"] = {"input_tokens": 11, "output_tokens": 1}
         over_output = self.response(); over_output["usage"] = {"input_tokens": 1, "output_tokens": 11}
-        for response in (missing, over_input, over_output):
-            with self.subTest(response=response), self.assertRaises(ValueError):
+        for response, reason in (
+            (missing, "response has no usage evidence"),
+            (over_input, "reported usage exceeds the preflight envelope"),
+            (over_output, "reported usage exceeds the preflight envelope"),
+        ):
+            with self.subTest(response=response), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.extract(response, 10, 10, "1.00")
         for field in ("input_tokens", "output_tokens"):
             response = self.response(); response["usage"][field] = True
@@ -84,13 +94,17 @@ class OpenAIReviewTest(unittest.TestCase):
 
     def test_incomplete_wrong_model_refusal_and_multiple_outputs_fail_closed(self):
         mutations = []
-        response = self.response(); response["status"] = "incomplete"; mutations.append(response)
-        response = self.response(); response["model"] = "gpt-other"; mutations.append(response)
-        response = self.response(); response["output"][0]["content"][0]["refusal"] = "no"; mutations.append(response)
-        response = self.response(); response["output"].append(response["output"][0]); mutations.append(response)
-        response = self.response(); response["output"][0]["status"] = "incomplete"; mutations.append(response)
-        for response in mutations:
-            with self.subTest(response=response), self.assertRaises(ValueError):
+        not_completed = "response is not completed for the requested model"
+        response = self.response(); response["status"] = "incomplete"; mutations.append((response, not_completed))
+        response = self.response(); response["model"] = "gpt-other"; mutations.append((response, not_completed))
+        response = self.response(); response["output"][0]["content"][0]["refusal"] = "no"
+        mutations.append((response, "response contains refusal, error, or incomplete evidence"))
+        response = self.response(); response["output"].append(response["output"][0])
+        mutations.append((response, "response does not contain exactly one assistant message"))
+        response = self.response(); response["output"][0]["status"] = "incomplete"
+        mutations.append((response, "response output is not one completed assistant message"))
+        for response, reason in mutations:
+            with self.subTest(response=response), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.extract(response, 100, 100, "1.00")
 
     def test_documented_reasoning_item_is_allowed_before_or_after_the_message(self):
@@ -104,35 +118,43 @@ class OpenAIReviewTest(unittest.TestCase):
 
     def test_multiple_messages_and_unknown_or_tool_items_fail_closed(self):
         mutations = []
-        response = self.response(); response["output"].append(response["output"][0].copy()); mutations.append(response)
+        response = self.response(); response["output"].append(response["output"][0].copy())
+        mutations.append((response, "response does not contain exactly one assistant message"))
         for item in ({"id": "x", "type": "future_item"},
                      {"id": "fc_1", "type": "function_call", "name": "shell", "arguments": "{}", "call_id": "c_1"}):
-            response = self.response(); response["output"].insert(0, item); mutations.append(response)
-        for response in mutations:
-            with self.subTest(response=response), self.assertRaises(ValueError):
+            response = self.response(); response["output"].insert(0, item)
+            mutations.append((response, "response contains an unsupported output item"))
+        for response, reason in mutations:
+            with self.subTest(response=response), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.extract(response, 100, 100, "1.00")
 
     def test_malformed_reasoning_and_refusal_or_error_evidence_fail_closed(self):
         malformed = []
-        for mutation in (
-            {"summary": "not-an-array"},
-            {"summary": [{"type": "summary_text", "text": 1}]},
-            {"summary": [{"type": "other", "text": "x"}]},
-            {"content": [{"type": "reasoning_text", "text": 1}]},
-            {"content": [{"type": "other", "text": "x"}]},
-            {"encrypted_content": 7},
-            {"status": "incomplete"},
-            {"error": "hidden failure"},
+        evidence = "response contains refusal, error, or incomplete evidence"
+        invalid_fields = "response reasoning item has invalid fields"
+        for mutation, reason in (
+            ({"summary": "not-an-array"}, "response reasoning summary is malformed"),
+            ({"summary": [{"type": "summary_text", "text": 1}]}, "response reasoning summary item is malformed"),
+            ({"summary": [{"type": "other", "text": "x"}]}, "response reasoning summary item is malformed"),
+            ({"content": [{"type": "reasoning_text", "text": 1}]}, "response reasoning content item is malformed"),
+            ({"content": [{"type": "other", "text": "x"}]}, "response reasoning content item is malformed"),
+            ({"encrypted_content": 7}, "response reasoning encrypted content is malformed"),
+            ({"status": "incomplete"}, "response reasoning item is not completed"),
+            ({"error": "hidden failure"}, invalid_fields),
         ):
-            response = self.response(); item = self.reasoning(); item.update(mutation); response["output"].insert(0, item); malformed.append(response)
-        response = self.response(); response["error"] = {"message": "failed"}; malformed.append(response)
-        response = self.response(); response["output"][0]["content"][0]["refusal"] = "cannot comply"; malformed.append(response)
+            response = self.response(); item = self.reasoning(); item.update(mutation); response["output"].insert(0, item)
+            malformed.append((response, reason))
+        response = self.response(); response["error"] = {"message": "failed"}
+        malformed.append((response, "response reports an error or incomplete result"))
+        response = self.response(); response["output"][0]["content"][0]["refusal"] = "cannot comply"; malformed.append((response, evidence))
         for marker, value in (("refusal", ""), ("error", {}), ("incomplete_details", False)):
-            response = self.response(); response["output"][0]["content"][0][marker] = value; malformed.append(response)
-        response = self.response(); item = self.reasoning(); item.pop("id"); response["output"].insert(0, item); malformed.append(response)
-        response = self.response(); item = self.reasoning(); item["extra"] = "unknown"; response["output"].insert(0, item); malformed.append(response)
-        for response in malformed:
-            with self.subTest(response=response), self.assertRaises(ValueError):
+            response = self.response(); response["output"][0]["content"][0][marker] = value; malformed.append((response, evidence))
+        response = self.response(); item = self.reasoning(); item.pop("id"); response["output"].insert(0, item)
+        malformed.append((response, invalid_fields))
+        response = self.response(); item = self.reasoning(); item["extra"] = "unknown"; response["output"].insert(0, item)
+        malformed.append((response, invalid_fields))
+        for response, reason in malformed:
+            with self.subTest(response=response), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.extract(response, 100, 100, "1.00")
 
     def test_reasoning_item_does_not_bypass_usage_envelope(self):

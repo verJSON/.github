@@ -353,6 +353,14 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(manifest_contract.ManifestError, "not verified before expiry"):
             manifest_contract.validate_manifest(candidate, multi_registry_config())
 
+    def test_rejects_destination_receipt_for_another_digest(self):
+        # indexDigest, and so the provenance subject, still match; only the
+        # receipt names another digest (#1995).
+        candidate = manifest()
+        candidate["images"][0]["destinations"][0]["digest"] = "sha256:" + "9" * 64
+
+        self.assert_rejected(candidate, "candidate destination digest or expiry differs")
+
     def test_rejects_gar_provenance_referrer_digest_mismatch(self):
         candidate = manifest()
         receipt = gar_receipt()

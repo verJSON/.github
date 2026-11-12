@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -13,6 +15,19 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("package_type_surface_ruleset", ROOT / "scripts/package-type-surface-ruleset.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def actions_state_pages(name, repository_id, state):
+    """The ADR 0252 paused-state reads for one repository, as gh --paginate --slurp pages."""
+    return {
+        "orgs/Verjson/repos?type=all&per_page=100": [[
+            {"id": repository_id, "name": name, "default_branch": "main"},
+        ]],
+        "orgs/Verjson/properties/values?per_page=100": [[{
+            "repository_name": name,
+            "properties": [{"property_name": "verjson-actions-state", "value": state}],
+        }]],
+    }
 
 
 class PackageTypeSurfaceRulesetTest(unittest.TestCase):
@@ -196,6 +211,103 @@ class PackageTypeSurfaceRulesetTest(unittest.TestCase):
                 ).stdout
                 self.assertRegex(usage, r"\{[^}]*\baudit\b[^}]*\}")
                 self.assertIn(f"run: python3 -I {tool} audit\n", schedule)
+
+    def audit_identity_lifecycle_at_evaluate(self, *, state="paused", mutate=lambda live: None, unreadable=None):
+        return self.audit_at_evaluate(
+            "identity-lifecycle-type-surface-required", state=state, mutate=mutate, unreadable=unreadable
+        )
+
+    def audit_at_evaluate(self, name, *, state="paused", mutate=lambda live: None, unreadable=None,
+                          mutate_entry=lambda entry: None):
+        organization, _, entries = MODULE.read_policy()
+        entry = json.loads(json.dumps(next(item for item in entries if item["name"] == name)))
+        mutate_entry(entry)
+        repository = entry["repository"].split("/", 1)[1]
+        scope = {"repository": ("Repository", entry["repository"]), "organization": ("Organization", "Verjson")}
+        source_type, source = scope[entry["scope"]]
+        live = {
+            "id": entry["ruleset_id"], "name": entry["name"], "source_type": source_type,
+            "source": source, **json.loads(json.dumps(entry["desired"])),
+        }
+        for index, position in MODULE.delegated_revisions(live):
+            live["rules"][index]["parameters"]["workflows"][position]["sha"] = "a" * 40
+        live["enforcement"] = "evaluate"
+        mutate(live)
+        pages = actions_state_pages(repository, entry["repository_id"], state)
+
+        def read_pages(path):
+            if path == unreadable:
+                raise RuntimeError(f"GitHub API read failed for {path}")
+            return pages[path]
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=read_pages),
+            contextlib.redirect_stdout(output),
+        ):
+            MODULE.audit(organization, [entry])
+        return output.getvalue()
+
+    def test_audit_accepts_a_recorded_relaxation_at_evaluate_while_its_repository_is_paused(self):
+        output = self.audit_identity_lifecycle_at_evaluate()
+
+        self.assertIn(
+            "conformant Verjson/verjson-identity-lifecycle identity-lifecycle-type-surface-required "
+            "id=21569694 enforcement=evaluate while verjson-identity-lifecycle is "
+            "verjson-actions-state=paused (ADR 0252)",
+            output,
+        )
+
+    def test_audit_refuses_a_recorded_relaxation_at_evaluate_once_its_repository_is_enabled(self):
+        with self.assertRaisesRegex(
+            MODULE.ContractError,
+            r"identity-lifecycle-type-surface-required: enforcement is evaluate but "
+            r"verjson-identity-lifecycle is verjson-actions-state=enabled; "
+            r"restore enforcement to active \(ADR 0252\)",
+        ):
+            self.audit_identity_lifecycle_at_evaluate(state="enabled")
+
+    def test_audit_refuses_a_relaxation_at_evaluate_with_any_other_drift(self):
+        def widen(live):
+            live["bypass_actors"].append({"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"})
+
+        with self.assertRaisesRegex(
+            MODULE.ContractError, r"^identity-lifecycle-type-surface-required: live image drifted$"
+        ):
+            self.audit_identity_lifecycle_at_evaluate(mutate=widen)
+
+    def test_audit_cannot_establish_a_relaxation_at_evaluate_when_the_adr_0252_policy_is_unreadable(self):
+        with (
+            mock.patch.object(MODULE.PAUSED, "read_policy", side_effect=OSError("policy missing")),
+            self.assertRaisesRegex(
+                MODULE.ContractError,
+                r"^identity-lifecycle-type-surface-required: cannot establish ADR 0252 paused state: "
+                r"enforcement is evaluate but the ADR 0252 policy cannot be read \(policy missing\)$",
+            ),
+        ):
+            self.audit_identity_lifecycle_at_evaluate()
+
+    def test_audit_cannot_establish_a_relaxation_at_evaluate_when_its_repository_state_is_unreadable(self):
+        # An outage is not drift, so the audit gives no restore advice.
+        with self.assertRaisesRegex(
+            MODULE.ContractError,
+            r"^identity-lifecycle-type-surface-required: cannot establish ADR 0252 paused state: "
+            r"enforcement is evaluate but verjson-actions-state of verjson-identity-lifecycle "
+            r"cannot be read \(GitHub API read failed for orgs/Verjson/properties/values\?per_page=100\)$",
+        ):
+            self.audit_identity_lifecycle_at_evaluate(unreadable="orgs/Verjson/properties/values?per_page=100")
+
+    def test_audit_checks_an_organization_relaxation_against_the_repository_its_image_targets(self):
+        def retarget(entry):
+            entry["desired"]["conditions"]["repository_id"]["repository_ids"] = [5]
+
+        with self.assertRaisesRegex(
+            MODULE.ContractError,
+            r"^authn-type-surface-required-workflow: enforcement is evaluate but it targets \[5\], "
+            r"not exactly verjson-authn \(1302124584\); restore enforcement to active \(ADR 0252\)$",
+        ):
+            self.audit_at_evaluate("authn-type-surface-required-workflow", mutate_entry=retarget)
 
     def test_validate_live_rejects_a_ruleset_id_reused_by_another_name(self):
         _, _, entries = MODULE.read_policy()

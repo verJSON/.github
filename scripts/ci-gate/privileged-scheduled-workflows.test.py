@@ -453,7 +453,7 @@ def validate_ruleset_conformance(document: object) -> None:
         "ruleset-conformance runner route changed",
     )
     require(job["timeout-minutes"] == 10, "ruleset-conformance timeout changed")
-    require(len(steps) == 5, "ruleset-conformance audit must have exactly five steps")
+    require(len(steps) == 6, "ruleset-conformance audit must have exactly six steps")
     require(
         steps[0].get("name") == "Check out the ruleset conformance audit",
         "ruleset-conformance checkout name changed",
@@ -522,8 +522,33 @@ def validate_ruleset_conformance(document: object) -> None:
         reviewer_audit["run"] == "python3 -I scripts/required-reviewer-ruleset.py check",
         "required-reviewer ruleset audit must remain the read-only check command",
     )
+    # ADR 0252: a repository left Actions-paused after re-enabling, or a paused-only
+    # relaxation left in the wrong state, fails here. It runs even when an earlier
+    # audit failed, so that finding cannot mask it.
+    drift_audit = require_keys(
+        steps[4], {"name", "if", "env", "run"}, "Actions-paused drift audit"
+    )
+    require(
+        drift_audit["name"] == "Verify Actions-paused repository drift",
+        "Actions-paused drift audit name changed",
+    )
+    require(
+        drift_audit["if"] == "${{ !cancelled() }}",
+        "Actions-paused drift audit must not be masked by an earlier audit",
+    )
+    drift_env = require_keys(
+        drift_audit["env"], {"GH_TOKEN"}, "Actions-paused drift audit env"
+    )
+    require(
+        drift_env["GH_TOKEN"] == "${{ secrets.ORG_ADMIN_TOKEN }}",
+        "Actions-paused drift audit token binding changed",
+    )
+    require(
+        drift_audit["run"] == "python3 -I scripts/actions-paused-drift.py",
+        "Actions-paused drift audit must remain the read-only committed-policy command",
+    )
     validate_cleanup(
-        steps[4], "ruleset-conformance cleanup", RULESET_CONFORMANCE_SOURCE
+        steps[5], "ruleset-conformance cleanup", RULESET_CONFORMANCE_SOURCE
     )
 
 
@@ -741,7 +766,7 @@ def main() -> int:
         ),
         "required-reviewer audit dropped": re.sub(
             r"      - name: Verify sensitive-path required-reviewer rulesets\n(?:        .*\n)+?"
-            r"(?=      - name: Remove)",
+            r"(?=      [-#] )",
             "",
             ruleset_conformance_text,
             count=1,
@@ -750,6 +775,41 @@ def main() -> int:
             "        run: python3 -I scripts/required-reviewer-ruleset.py check",
             "          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}\n"
             "        run: python3 -I scripts/required-reviewer-ruleset.py check",
+            1,
+        ),
+        "Actions-paused drift audit masked by an earlier audit": ruleset_conformance_text.replace(
+            "      - name: Verify Actions-paused repository drift\n"
+            "        if: ${{ !cancelled() }}\n",
+            "      - name: Verify Actions-paused repository drift\n",
+            1,
+        ),
+        "Actions-paused drift audit failure swallowed": ruleset_conformance_text.replace(
+            "      - name: Verify Actions-paused repository drift\n",
+            "      - name: Verify Actions-paused repository drift\n"
+            "        continue-on-error: true\n",
+            1,
+        ),
+        "Actions-paused drift audit exit masked": ruleset_conformance_text.replace(
+            "run: python3 -I scripts/actions-paused-drift.py",
+            "run: python3 -I scripts/actions-paused-drift.py || true",
+            1,
+        ),
+        "Actions-paused drift audit test policy": ruleset_conformance_text.replace(
+            "run: python3 -I scripts/actions-paused-drift.py",
+            "run: python3 -I scripts/actions-paused-drift.py --test-policy /tmp/untrusted.json",
+            1,
+        ),
+        "Actions-paused drift audit dropped": re.sub(
+            r"      - name: Verify Actions-paused repository drift\n(?:        .*\n)+?"
+            r"(?=      - name: Remove)",
+            "",
+            ruleset_conformance_text,
+            count=1,
+        ),
+        "Actions-paused drift audit extra token": ruleset_conformance_text.replace(
+            "        run: python3 -I scripts/actions-paused-drift.py",
+            "          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}\n"
+            "        run: python3 -I scripts/actions-paused-drift.py",
             1,
         ),
         "required-workflow audit dropped": ruleset_conformance_text.replace(

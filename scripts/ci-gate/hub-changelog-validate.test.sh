@@ -113,6 +113,26 @@ else
   fail "the gate exited $status in the shallow checkout; output: $output"
 fi
 
+# (b2) The unshallow need not leave the base ref behind: with no configured
+# fetch refspec it deepens history into FETCH_HEAD only, and `actions/checkout`
+# does not promise one. The gate must then fetch the base branch by name rather
+# than give up on a base it could have obtained.
+unmapped="$tmp/shallow-unmapped"
+mkdir -p "$unmapped"
+git -C "$unmapped" init -q -b main
+git -C "$unmapped" remote add origin "$shallow_origin"
+git -C "$unmapped" config --unset-all remote.origin.fetch
+git -C "$unmapped" fetch -q --depth 1 origin "$branch_sha"
+git -C "$unmapped" checkout -q --detach "$branch_sha"
+
+status=0
+output="$(cd "$unmapped" && GITHUB_BASE_REF=main bash "$gate" . 2>&1)" || status=$?
+if [ "$status" -ne 0 ] && printf '%s\n' "$output" | grep 'impact is required' >/dev/null; then
+  pass "the gate fetches its base branch when the unshallow leaves no base ref"
+else
+  fail "the gate exited $status when the unshallow left no base ref; output: $output"
+fi
+
 # (c) A second fragment claiming an identity another fragment already holds.
 # `check-pr` exits 0 on this — it only covers the dependency-manifest/fragment
 # pairing — so on a hub pull request it was previously invisible, and two

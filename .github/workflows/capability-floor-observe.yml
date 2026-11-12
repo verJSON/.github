@@ -34,6 +34,7 @@ jobs:
             scripts/capability-floor-discovery.py
             scripts/capability-floor-audit.py
             scripts/github_identity.py
+            scripts/shared_checkout_fetch.py
             config/capability-floor-consumers.json
             config/capability-floors.json
             scripts/gen-ai-review-caller.sh

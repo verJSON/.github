@@ -42,6 +42,21 @@ run_deprecate() {
     bash "$work/deprecate.sh"
 }
 
+# Every refusal is an Error the step's node parser throws, so its stderr line is
+# what names the guard; a crash or a different guard is nonzero too.
+refuses_with() { # refuses_with <reason> <deprecates JSON>
+  local reason="$1" status=0
+  run_deprecate "$2" 2>"$work/state/stderr" || status=$?
+  if [ "$status" -eq 0 ]; then
+    return 1
+  fi
+  if ! grep -qF -- "Error: $reason" "$work/state/stderr"; then
+    echo "FAIL - refused (exit $status) without the reason: $reason" >&2
+    sed 's/^/diag - /' "$work/state/stderr" >&2
+    exit 1
+  fi
+}
+
 rm -rf "$work/state"; mkdir -p "$work/state"
 run_deprecate '[{"name":"uploads","message":"renamed to @verjson/object-storage; see https://github.com/Verjson/verjson-object-storage"}]'
 [ -f "$work/state/npm-calls" ] || { echo "FAIL - a single rename entry did not call npm deprecate"; exit 1; }
@@ -62,27 +77,27 @@ run_deprecate '[]'
 echo "ok - an empty deprecates array is a no-op"
 
 rm -rf "$work/state"; mkdir -p "$work/state"
-if run_deprecate '[{"name":"uploads"}]' 2>"$work/state/stderr"; then
+if ! refuses_with "each deprecates entry needs a non-empty basename 'name' and 'message'" '[{"name":"uploads"}]'; then
   echo "FAIL - an entry missing 'message' must fail closed"; exit 1
 fi
 [ ! -f "$work/state/npm-calls" ] || { echo "FAIL - npm was called despite a malformed entry"; exit 1; }
 echo "ok - an entry missing a required field fails closed before any npm deprecate call"
 
 rm -rf "$work/state"; mkdir -p "$work/state"
-if run_deprecate '[{"name":"uploads","message":"a"},{"name":"uploads","message":"b"}]' 2>"$work/state/stderr"; then
+if ! refuses_with 'duplicate deprecates entry: uploads' '[{"name":"uploads","message":"a"},{"name":"uploads","message":"b"}]'; then
   echo "FAIL - a duplicate old-name entry must fail closed"; exit 1
 fi
 [ ! -f "$work/state/npm-calls" ] || { echo "FAIL - npm was called despite a duplicate entry"; exit 1; }
 echo "ok - a duplicate old-name entry fails closed instead of deprecating twice"
 
 rm -rf "$work/state"; mkdir -p "$work/state"
-if run_deprecate 'not-json' 2>"$work/state/stderr"; then
+if ! refuses_with 'deprecates is not valid JSON: ' 'not-json'; then
   echo "FAIL - invalid JSON must fail closed"; exit 1
 fi
 echo "ok - invalid JSON input fails closed"
 
 rm -rf "$work/state"; mkdir -p "$work/state"
-if run_deprecate '[{"name":"uploads","message":"--force renamed"}]' 2>"$work/state/stderr"; then
+if ! refuses_with "deprecates entry 'uploads' has a message starting with '-'" '[{"name":"uploads","message":"--force renamed"}]'; then
   echo "FAIL - a message starting with '-' must fail closed"; exit 1
 fi
 [ ! -f "$work/state/npm-calls" ] || { echo "FAIL - npm was called despite a message starting with '-'"; exit 1; }

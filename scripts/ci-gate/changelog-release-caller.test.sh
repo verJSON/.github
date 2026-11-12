@@ -304,8 +304,10 @@ snapshot_with = snapshot.get("with") or {}
 if snapshot_with.get("release_app_client_id") != "${{ vars.RELEASE_APP_CLIENT_ID }}":
     bad("`snapshot` does not pass vars.RELEASE_APP_CLIENT_ID")
 snapshot_secrets = snapshot.get("secrets")
-if snapshot_secrets != "inherit" or snapshot_with.get("release_environment") != "release-app":
-    bad("`snapshot` must inherit context and select release-app")
+if snapshot_secrets != "inherit":
+    bad("`snapshot` does not inherit its caller's environment context (ADR 0171)")
+if snapshot_with.get("release_environment") != "release-app":
+    bad("`snapshot` does not select the release-app environment (ADR 0166)")
 if "ORG_ADMIN_TOKEN" in raw or "push_token:" in raw:
     bad("release caller retains the temporary broad push credential")
 
@@ -405,7 +407,7 @@ if problems:
 print("shape ok")
 PY
 
-check_shape() { python3 "$tmp/check_shape.py" "$1" >"$tmp/shape.out" 2>&1; }
+check_shape() { LC_ALL=C python3 "$tmp/check_shape.py" "$1" >"$tmp/shape.out" 2>&1; }
 
 if check_shape "$release"; then
   pass "the generated release caller satisfies every #463/#464/#465 invariant"
@@ -415,10 +417,13 @@ fi
 
 # Each mutation breaks exactly one invariant in a copy of the generated file.
 # A mutation the checker survives is a guard that cannot fail.
+# The checker reports every invariant it finds broken and exits 1; a crash also
+# exits 1, so the case passes only when the mutated invariant's own report is
+# among the lines printed.
 mutate_seq=0
 expect_shape_rejection() {
-  # expect_shape_rejection <label> <sed-or-fn>
-  local label="$1" mutator="$2" copy
+  # expect_shape_rejection <label> <sed-or-fn> <report of the broken invariant>
+  local label="$1" mutator="$2" reason="$3" copy shape_rc=0
   mutate_seq=$((mutate_seq + 1))
   copy="$tmp/mutant-$mutate_seq.yml"
   cp "$release" "$copy"
@@ -427,10 +432,13 @@ expect_shape_rejection() {
     fail "mutation '$label' changed nothing; the case is vacuous"
     return
   fi
-  if check_shape "$copy"; then
+  check_shape "$copy" || shape_rc=$?
+  if [ "$shape_rc" -eq 0 ]; then
     fail "shape check accepted $label"
-  else
+  elif [ "$shape_rc" -eq 1 ] && grep -qxF -- "$reason" "$tmp/shape.out"; then
     pass "shape check rejects $label"
+  else
+    fail "shape check rejected $label for another reason (exit $shape_rc): $(cat "$tmp/shape.out")"
   fi
 }
 
@@ -443,9 +451,16 @@ drop_resume_snapshot_checkout() {
   sed -i "/^      - name: Check out the existing snapshot for resumed verification$/,+6d" "$1"
 }
 install_with_github_token() {
-  # Only the install wiring, never the publish wiring: publishing with
-  # GITHUB_TOKEN is correct and must stay accepted.
-  sed -i 's|NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}|NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}|g' "$1"
+  # Only the verify job's acquisition wiring. node-release.yml publishes with
+  # its own internal GITHUB_TOKEN, which this caller never passes; the caller's
+  # publish job passes the same NODE_AUTH_TOKEN line as its private-dependency
+  # read token, which drop_publish_token_for_github_token covers.
+  sed -i '/^  verify:$/,/^  snapshot:$/ s|NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}|NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}|g' "$1"
+}
+drop_publish_token_for_github_token() {
+  # The private-dependency read token handed to node-release.yml cannot be the
+  # caller's GITHUB_TOKEN, which cannot read another repository's package.
+  sed -i '/^  publish:/,$ s|NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}|NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}|' "$1"
 }
 drop_explicit_runner() { sed -i '/^      runner: /d' "$1"; }
 diverge_runner_pool() {
@@ -475,7 +490,9 @@ hollow_out_the_suite() {
 }
 drop_verify_hook() { sed -i '/scripts\/release-verify.sh/d' "$1"; }
 drop_verify_suite_token_blank() {
-  sed -i '/^      - name: Run the release verification suite$/,/^      - name:/ {/NODE_AUTH_TOKEN:/d;}' "$1"
+  # Bounded to the verify job: the step range otherwise runs on into publish
+  # and deletes its private-dependency secret as well.
+  sed -i '/^  verify:$/,/^  snapshot:$/ { /^      - name: Run the release verification suite$/,/^      - name:/ {/NODE_AUTH_TOKEN:/d;} }' "$1"
 }
 shadow_stamped_version_header() {
   python3 - "$1" <<'PY'
@@ -521,43 +538,76 @@ drop_publish_prefix() {
   sed -i '/^  publish:/,$ { /^      prefix: /d; }' "$1"
 }
 
-expect_shape_rejection "snapshot without needs: verify (#463, #464)" drop_needs_verify
-expect_shape_rejection "publish without needs: snapshot" drop_needs_snapshot
-expect_shape_rejection "snapshot without restart condition (#588)" drop_snapshot_restart_condition
-expect_shape_rejection "publish skipped after a reused snapshot (#588)" drop_publish_restart_condition
-expect_shape_rejection "verify without snapshot state output (#588)" drop_snapshot_state_output
-expect_shape_rejection "resumed verification without the tagged snapshot checkout (#591)" drop_resume_snapshot_checkout
-expect_shape_rejection "dependency acquisition with GITHUB_TOKEN (#465)" install_with_github_token
-expect_shape_rejection "snapshot without an explicit runner (#465)" drop_explicit_runner
-expect_shape_rejection "snapshot and publish on different pools (#465)" diverge_runner_pool
-expect_shape_rejection "a push: trigger that derives a release from a merge" add_push_trigger
-expect_shape_rejection "an unpinned reusable ref" unpin_reusable_ref
-expect_shape_rejection "a contract_ref that disagrees with the uses: pin" skew_contract_ref
-expect_shape_rejection "a snapshot that drops the selected component" drop_component_selection
-expect_shape_rejection "snapshot without RELEASE_APP_CLIENT_ID (ADR 0099)" drop_release_app_client_id
-expect_shape_rejection "snapshot without release environment (ADR 0166)" drop_release_environment
-expect_shape_rejection "snapshot without inherited environment context (ADR 0171)" drop_snapshot_context
-expect_shape_rejection "the temporary ORG_ADMIN_TOKEN release credential" restore_org_admin_token
-expect_shape_rejection "verifying a ref other than github.sha" verify_a_different_ref
-expect_shape_rejection "a verify job that runs no suite" hollow_out_the_suite
-expect_shape_rejection "a verify job with no release-verify.sh hook" drop_verify_hook
-expect_shape_rejection "a release verification suite without an explicit credential blank (#1712)" drop_verify_suite_token_blank
-expect_shape_rejection "stamped-version warning text shadowed outside the generated header (#862)" shadow_stamped_version_header
+expect_shape_rejection "snapshot without needs: verify (#463, #464)" drop_needs_verify \
+  '`snapshot` does not declare `needs: verify`, so the irreversible snapshot can run before anything has verified the tree (#463, #464)'
+expect_shape_rejection "publish without needs: snapshot" drop_needs_snapshot \
+  '`publish` must depend on both verify and snapshot for restart-safe publication'
+expect_shape_rejection "snapshot without restart condition (#588)" drop_snapshot_restart_condition \
+  '`snapshot` does not skip empty selections and verified existing immutable snapshots'
+expect_shape_rejection "publish skipped after a reused snapshot (#588)" drop_publish_restart_condition \
+  '`publish` does not run after a deliberately skipped existing snapshot'
+expect_shape_rejection "verify without snapshot state output (#588)" drop_snapshot_state_output \
+  '`verify` does not expose the restart-safe snapshot state'
+expect_shape_rejection "resumed verification without the tagged snapshot checkout (#591)" drop_resume_snapshot_checkout \
+  '`verify` does not switch to the existing tagged snapshot before resumed verification'
+expect_shape_rejection "dependency acquisition with GITHUB_TOKEN (#465)" install_with_github_token \
+  'the dependency acquisition step in `verify` uses GITHUB_TOKEN, which cannot read a private @verjson package owned by another repository (#465)'
+expect_shape_rejection "snapshot without an explicit runner (#465)" drop_explicit_runner \
+  "\`snapshot\` passes no explicit \`runner:\`, so changelog-release.yml routes it by its own default while this caller's jobs route by another — on a private repository the snapshot half then queues silently on hosted runners (#465)"
+expect_shape_rejection "snapshot and publish on different pools (#465)" diverge_runner_pool \
+  '`publish` and `snapshot` do not route on the same pool'
+expect_shape_rejection "a push: trigger that derives a release from a merge" add_push_trigger \
+  "triggers are ['push', 'workflow_dispatch']; a release states the version it cuts and is never derived from a merge (ADR 0038, ADR 0060)"
+expect_shape_rejection "an unpinned reusable ref" unpin_reusable_ref \
+  "\`snapshot\` does not call changelog-release.yml at an immutable 40-character commit; it uses 'verJSON/.github/.github/workflows/changelog-release.yml@main'"
+expect_shape_rejection "a contract_ref that disagrees with the uses: pin" skew_contract_ref \
+  "\`snapshot\` passes contract_ref 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' but calls the workflow at $sha"
+expect_shape_rejection "a snapshot that drops the selected component" drop_component_selection \
+  '`snapshot` does not pass the selected component stream'
+expect_shape_rejection "snapshot without RELEASE_APP_CLIENT_ID (ADR 0099)" drop_release_app_client_id \
+  '`snapshot` does not pass vars.RELEASE_APP_CLIENT_ID'
+expect_shape_rejection "snapshot without release environment (ADR 0166)" drop_release_environment \
+  '`snapshot` does not select the release-app environment (ADR 0166)'
+expect_shape_rejection "snapshot without inherited environment context (ADR 0171)" drop_snapshot_context \
+  "\`snapshot\` does not inherit its caller's environment context (ADR 0171)"
+expect_shape_rejection "the temporary ORG_ADMIN_TOKEN release credential" restore_org_admin_token \
+  'release caller retains the temporary broad push credential'
+expect_shape_rejection "verifying a ref other than github.sha" verify_a_different_ref \
+  '`verify` does not check out github.sha, so it proves nothing about the tree the snapshot will tag'
+expect_shape_rejection "a verify job that runs no suite" hollow_out_the_suite \
+  "\`verify\` never runs the repository's suite"
+expect_shape_rejection "a verify job with no release-verify.sh hook" drop_verify_hook \
+  '`verify` offers no scripts/release-verify.sh hook, so an adopter whose suite is not `npm test` must edit a generated artifact'
+expect_shape_rejection "a release verification suite without an explicit credential blank (#1712)" drop_verify_suite_token_blank \
+  'the release verification hook/default suite must explicitly clear NODE_AUTH_TOKEN (#1712)'
+expect_shape_rejection "stamped-version warning text shadowed outside the generated header (#862)" shadow_stamped_version_header \
+  'the stamped-version warning is not inside the generated header before `on:` (#862)'
 grep -qF 'the stamped-version warning is not inside the generated header before `on:` (#862)' "$tmp/shape.out" \
   && pass "the shape validator rejects the shadowed warning for leaving the header" \
   || fail "the shadowed warning failed shape validation for another reason: $(cat "$tmp/shape.out")"
-expect_shape_rejection "a no-op stamped-version failure diagnostic (#862)" noop_stamped_version_diagnostic
+expect_shape_rejection "a no-op stamped-version failure diagnostic (#862)" noop_stamped_version_diagnostic \
+  'the release verification step does not execute the canonical stamped-version failure diagnostic (#862)'
 grep -qF 'does not execute the canonical stamped-version failure diagnostic (#862)' "$tmp/shape.out" \
   && pass "the shape validator rejects the no-op diagnostic as non-executable" \
   || fail "the no-op diagnostic failed shape validation for another reason: $(cat "$tmp/shape.out")"
-expect_shape_rejection "a caller carrying no generator provenance" strip_provenance
-expect_shape_rejection "a publish job without its private dependency token" drop_publish_token
-expect_shape_rejection "a publish job without its generated Node version" drop_publish_node_version
-expect_shape_rejection "a publish job without its generated npm scope" drop_publish_scope
-expect_shape_rejection "a branch guard that compares github.ref to itself" tautological_branch_guard
-expect_shape_rejection "an exact-head guard made tautological across the dispatch race" tautological_exact_head_guard
-expect_shape_rejection "a selector receipt not recomputed by the canonical digest" drift_selector_receipt
-expect_shape_rejection "a publish job without the release namespace" drop_publish_prefix
+expect_shape_rejection "a caller carrying no generator provenance" strip_provenance \
+  'the emitted caller carries no generator provenance marker'
+expect_shape_rejection "a publish job without its private dependency token" drop_publish_token \
+  '`publish` does not pass the private-dependency read token'
+expect_shape_rejection "a publish job without its generated Node version" drop_publish_node_version \
+  '`publish` does not pass the generated Node version to node-release.yml'
+expect_shape_rejection "a publish job without its generated npm scope" drop_publish_scope \
+  '`publish` does not pass the generated npm scope to node-release.yml'
+expect_shape_rejection "a branch guard that compares github.ref to itself" tautological_branch_guard \
+  'the default-branch guard does not read DEFAULT_BRANCH from github.event.repository.default_branch, so it cannot tell the default branch from the ref it was dispatched on (#466)'
+expect_shape_rejection "an exact-head guard made tautological across the dispatch race" tautological_exact_head_guard \
+  'the proposer guard does not fail a mutable-branch TOCTOU head change'
+expect_shape_rejection "a selector receipt not recomputed by the canonical digest" drift_selector_receipt \
+  'the release-plan step does not resolve and bind the canonical selection digest'
+expect_shape_rejection "a publish job reading private dependencies with GITHUB_TOKEN" drop_publish_token_for_github_token \
+  '`publish` does not pass the private-dependency read token'
+expect_shape_rejection "a publish job without the release namespace" drop_publish_prefix \
+  '`publish` does not pass the independent release namespace'
 
 # The hand-copied shape every adopter carries today must be rejected, otherwise
 # regenerating changes nothing observable.
@@ -663,7 +713,24 @@ run_guard() { # run_guard <script> [env assignments...]
       FRAGMENTS= \
       EXPECTED_SELECTOR_DIGEST= \
       CI_PACKAGE_RETENTION_KEEP=3 \
+      LC_ALL=C \
       "${@:2}" bash -eo pipefail "$1" ) >"$tmp/guard.out" 2>&1
+}
+
+# A guard refuses with its own exit status and its own line. Any other failure of
+# the extracted step is nonzero too, so the line is what names the guard.
+expect_guard_rejection() {
+  # expect_guard_rejection <pass label> <accepted label> <exit status> <reason> <script> [env...]
+  local label="$1" accepted="$2" want_rc="$3" reason="$4" guard_rc=0
+  shift 4
+  run_guard "$@" || guard_rc=$?
+  if [ "$guard_rc" -eq 0 ]; then
+    fail "$accepted"
+  elif [ "$guard_rc" -eq "$want_rc" ] && grep -qF -- "$reason" "$tmp/guard.out"; then
+    pass "$label"
+  else
+    fail "$label: rejected for another reason (exit $guard_rc, expected $want_rc): $(cat "$tmp/guard.out")"
+  fi
 }
 
 mkdir -p "$tmp/sandbox/CHANGELOG" "$tmp/sandbox/NEXT" "$tmp/sandbox/.changelog-contract/scripts" "$tmp/runner" "$tmp/bin"
@@ -694,11 +761,10 @@ else
   fail "the branch guard rejected the default branch: $(cat "$tmp/guard.out")"
 fi
 for ref in refs/heads/topic refs/tags/v1.0.0 refs/heads/mainline; do
-  if run_guard "$branch_guard" "DISPATCH_REF=$ref" DEFAULT_BRANCH=main; then
-    fail "the branch guard admitted a dispatch from $ref"
-  else
-    pass "the branch guard rejects a dispatch from $ref"
-  fi
+  expect_guard_rejection "the branch guard rejects a dispatch from $ref" \
+    "the branch guard admitted a dispatch from $ref" \
+    1 "::error::A release must be dispatched from main, but this run was dispatched from '$ref'." \
+    "$branch_guard" "DISPATCH_REF=$ref" DEFAULT_BRANCH=main
 done
 
 expected_head="$(printf 'a%.0s' {1..40})"
@@ -713,16 +779,32 @@ if run_guard "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$sele
 else
   fail "the exact-head guard rejected its derived head: $(cat "$tmp/guard.out")"
 fi
-if run_guard "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
-  fail "the exact-head guard admitted a newer branch head after proposer derivation"
-else
-  pass "the exact-head guard rejects the mutable-branch TOCTOU race before verification"
-fi
-if run_guard "$head_guard" "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"; then
-  fail "the exact-head guard admitted a partial proposer receipt"
-else
-  pass "the exact-head guard rejects partial proposer receipts"
-fi
+expect_guard_rejection "the exact-head guard rejects the mutable-branch TOCTOU race before verification" \
+  "the exact-head guard admitted a newer branch head after proposer derivation" \
+  1 "::error::The default branch advanced from derived head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
+  "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
+expect_guard_rejection "the exact-head guard rejects partial proposer receipts" \
+  "the exact-head guard admitted a partial proposer receipt" \
+  1 "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests." \
+  "$head_guard" "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+# release-artifact and release-snapshot each emit their own copy of the guard, so
+# each copy is executed rather than matched by its step text (#1995).
+for mode_args in "release-artifact --build-runner ubuntu-24.04" release-snapshot; do
+  read -r -a mode_argv <<<"$mode_args"
+  mode="${mode_argv[0]}"
+  mode_release="$tmp/head-$mode.yml"
+  mode_guard="$tmp/head-guard-$mode.sh"
+  if ! bash "$gen" "$mode" "$sha" "${mode_argv[@]:1}" >"$mode_release" 2>"$tmp/gen.err" \
+    || ! release="$mode_release" extract_run verify "exact derived head" >"$mode_guard" 2>"$tmp/extract.err"; then
+    fail "cannot extract the $mode exact-head guard: $(cat "$tmp/gen.err" "$tmp/extract.err" 2>/dev/null)"
+  elif run_guard "$mode_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
+    fail "the $mode exact-head guard admitted a newer branch head after proposer derivation"
+  elif grep -qF "::error::The default branch advanced from derived head $expected_head" "$tmp/guard.out"; then
+    pass "the $mode exact-head guard rejects the mutable-branch TOCTOU race before verification"
+  else
+    fail "the $mode exact-head guard failed for another reason: $(cat "$tmp/guard.out")"
+  fi
+done
 
 while IFS=' ' read -r prefix good; do
   : >"$tmp/version-output"
@@ -739,13 +821,13 @@ python-v python-v1.2.3
 worker_2-v worker_2-v3.4.5
 GOOD
 # `1.2.3` is the case #464 names: the engine strips a leading v, so a bare
-# version cuts a tag that sorts apart from every v-prefixed sibling.
+# version cuts a tag that sorts apart from every v-prefixed sibling. The engine
+# exits 1 for every refusal; its `changelog:` line names the check.
+not_semver='changelog: version must be v-prefixed SemVer, optionally with a stream prefix'
 while IFS= read -r bad; do
-  if run_guard "$version_guard" PREFIX=v "INPUT_VERSION=$bad" "GITHUB_OUTPUT=$tmp/version-output"; then
-    fail "the version guard accepted '$bad'"
-  else
-    pass "the version guard rejects '${bad//$'\n'/\\n}'"
-  fi
+  expect_guard_rejection "the version guard rejects '${bad//$'\n'/\\n}'" \
+    "the version guard accepted '$bad'" 1 "$not_semver" \
+    "$version_guard" PREFIX=v "INPUT_VERSION=$bad" "GITHUB_OUTPUT=$tmp/version-output"
 done <<'BAD'
 1.2.3
 v1.2
@@ -759,23 +841,25 @@ BAD
 
 # Anchored against the whole string, not per line: a version carrying a second
 # line would otherwise be admitted on the strength of its first.
-if run_guard "$version_guard" PREFIX=v "$(printf 'INPUT_VERSION=v1.0.0\nevil')" "GITHUB_OUTPUT=$tmp/version-output"; then
-  fail "the version guard accepted a multi-line version"
-else
-  pass "the version guard rejects a multi-line version"
-fi
+expect_guard_rejection "the version guard rejects a multi-line version" \
+  "the version guard accepted a multi-line version" 1 "$not_semver" \
+  "$version_guard" PREFIX=v "$(printf 'INPUT_VERSION=v1.0.0\nevil')" "GITHUB_OUTPUT=$tmp/version-output"
 
-while IFS=' ' read -r prefix version; do
-  if run_guard "$version_guard" "PREFIX=$prefix" "INPUT_VERSION=$version" "GITHUB_OUTPUT=$tmp/version-output"; then
-    fail "the version guard accepted namespace '$prefix' for '$version'"
-  else
-    pass "the version guard rejects namespace '$prefix' for '$version'"
-  fi
+# A well-formed prefix that the version does not carry is a namespace mismatch;
+# a malformed prefix is refused before the version is compared with it.
+while IFS=' ' read -r prefix version guard; do
+  case "$guard" in
+    mismatch) reason="changelog: version namespace '${version%%[0-9]*}' does not match prefix '$prefix'" ;;
+    prefix) reason='changelog: version prefix must be v or a lowercase stream name followed by -v' ;;
+  esac
+  expect_guard_rejection "the version guard rejects namespace '$prefix' for '$version'" \
+    "the version guard accepted namespace '$prefix' for '$version'" 1 "$reason" \
+    "$version_guard" "PREFIX=$prefix" "INPUT_VERSION=$version" "GITHUB_OUTPUT=$tmp/version-output"
 done <<'BAD_NAMESPACE'
-python-v v1.2.3
-v python-v1.2.3
-Python-v Python-v1.2.3
-python python1.2.3
+python-v v1.2.3 mismatch
+v python-v1.2.3 mismatch
+Python-v Python-v1.2.3 prefix
+python python1.2.3 prefix
 BAD_NAMESPACE
 
 : >"$tmp/version-output"
@@ -824,11 +908,10 @@ git -C "$tmp/sandbox" add CHANGELOG/v1.2.3.md
 git -C "$tmp/sandbox" commit -qm 'Change released snapshot on default branch'
 git -C "$tmp/sandbox" push -qu origin main
 : >"$tmp/release-state"
-if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state"; then
-  fail "the release-state guard admitted a conflicting existing tag"
-else
-  pass "the release-state guard rejects a conflicting existing tag"
-fi
+expect_guard_rejection "the release-state guard rejects a conflicting existing tag" \
+  "the release-state guard admitted a conflicting existing tag" \
+  1 "::error::Tag v1.2.3 exists but is not the immutable release snapshot reachable from this default-branch head." \
+  "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state"
 : >"$tmp/release-state"
 if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; then
   grep -q '^snapshot-exists=false$' "$tmp/release-state" \
@@ -839,19 +922,25 @@ else
 fi
 : >"$tmp/release-state"
 git -C "$tmp/sandbox" remote remove origin
-if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; then
+# The guard exits with git ls-remote's own status, which git chooses; it is
+# neither 1 (a refusal) nor 2 (no such tag), and the line names that status.
+tag_state_rc=0
+run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state" || tag_state_rc=$?
+if [ "$tag_state_rc" -eq 0 ]; then
   fail "the release-state guard admitted a version when remote tag state was unavailable"
-else
+elif [ "$tag_state_rc" -ne 1 ] && [ "$tag_state_rc" -ne 2 ] \
+  && grep -qxF "::error::Unable to resolve remote release tag state (git ls-remote exited $tag_state_rc)." "$tmp/guard.out"; then
   pass "the release-state guard fails closed when remote tag state is unavailable"
+else
+  fail "the release-state guard fails closed when remote tag state is unavailable: rejected for another reason (exit $tag_state_rc): $(cat "$tmp/guard.out")"
 fi
 git -C "$tmp/sandbox" remote add origin "$tmp/release-remote.git"
 printf 'immutable\n' >"$tmp/sandbox/CHANGELOG/v1.2.4.md"
 : >"$tmp/release-state"
-if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; then
-  fail "the release-state guard admitted an untagged released snapshot"
-else
-  pass "the release-state guard rejects an untagged released snapshot"
-fi
+expect_guard_rejection "the release-state guard rejects an untagged released snapshot" \
+  "the release-state guard admitted an untagged released snapshot" \
+  1 "::error::CHANGELOG/v1.2.4.md already exists, and a released snapshot is immutable (ADR 0059)." \
+  "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"
 runtime_temp="$tmp/runtime-runner"
 runtime_output="$tmp/runtime-output"
 mkdir -p "$runtime_temp"
@@ -913,7 +1002,8 @@ mkdir -p "$tmp/sandbox/scripts"
 cat >"$tmp/sandbox/scripts/release-verify.sh" <<EOF
 #!/usr/bin/env bash
 set -e
-test "\$VERJSON_CHANGELOG_TOOL_CACHE" = "\$RUNNER_TEMP/verjson-changelog-tools"
+test "\$VERJSON_CHANGELOG_TOOL_CACHE" = "\$RUNNER_TEMP/verjson-changelog-tools" \\
+  || { echo HOOK_CACHE_NOT_JOB_SCOPED; exit 5; }
 mkdir -p "\$VERJSON_CHANGELOG_TOOL_CACHE/$sha"
 printf verified >"\$VERJSON_CHANGELOG_TOOL_CACHE/$sha/changelog.py"
 echo REPO_HOOK_RAN
@@ -964,12 +1054,13 @@ for step in doc["jobs"]["verify"]["steps"]:
         print(step["run"])
 PY
 [ ! -s "$missing_cache_step" ] || fail "the verify-cache removal mutation left an override step"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH" \
-  "VERJSON_CHANGELOG_TOOL_CACHE=$ambient_release_cache"; then
-  fail "the verify hook survived removal of the runner.temp cache override"
-else
-  pass "removing the verify override reproduces the hostile persistent-cache failure (#630)"
-fi
+# The hook's own cache check exits 5, which the suite step passes through; any
+# earlier refusal in the step exits 1.
+expect_guard_rejection "removing the verify override reproduces the hostile persistent-cache failure (#630)" \
+  "the verify hook survived removal of the runner.temp cache override" \
+  5 HOOK_CACHE_NOT_JOB_SCOPED \
+  "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH" \
+  "VERJSON_CHANGELOG_TOOL_CACHE=$ambient_release_cache"
 unset VERJSON_CHANGELOG_TOOL_CACHE
 
 # A failing hook must fail the job, or the verify gate is decorative.
@@ -995,11 +1086,10 @@ fi
 # verified by a suite they deliberately replaced.
 printf '%s\n' '#!/usr/bin/env bash' 'echo REPO_HOOK_RAN' >"$tmp/sandbox/scripts/release-verify.sh"
 chmod 644 "$tmp/sandbox/scripts/release-verify.sh"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH"; then
-  fail "a non-executable release-verify.sh was ignored and the job passed on the wrong suite"
-else
-  pass "a non-executable release-verify.sh fails the job instead of falling back"
-fi
+expect_guard_rejection "a non-executable release-verify.sh fails the job instead of falling back" \
+  "a non-executable release-verify.sh was ignored and the job passed on the wrong suite" \
+  1 "::error::scripts/release-verify.sh exists but is not executable, so this release would silently fall back to the default Node suite." \
+  "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH"
 if grep -q 'chmod' "$tmp/guard.out"; then
   pass "the failure tells the adopter to chmod +x the hook"
 else
@@ -1025,19 +1115,33 @@ pass "pull-request workflows do not receive the private release credential"
 
 # --- generator hygiene, matching the sibling modes ---------------------------
 
-for bad in 'main' "$(printf 'main\n    if: false')" '../../evil' "${sha^^}" "${sha}0" ''; do
-  if bash "$gen" release-node "$bad" >/dev/null 2>&1; then
-    fail "release-node accepted a non-commit ref: '$bad'"
+# Every generator refusal exits 2 on stderr with nothing on stdout; the stderr
+# line is what names the guard.
+expect_generator_rejection() {
+  # expect_generator_rejection <pass label> <accepted label> <first stderr line> <generator args...>
+  local label="$1" accepted="$2" reason="$3" gen_rc=0
+  shift 3
+  LC_ALL=C bash "$gen" "$@" >"$tmp/gen.out" 2>"$tmp/gen.err" || gen_rc=$?
+  if [ "$gen_rc" -eq 0 ]; then
+    fail "$accepted"
+  elif [ "$gen_rc" -eq 2 ] && [ ! -s "$tmp/gen.out" ] && [ "$(head -n 1 "$tmp/gen.err")" = "$reason" ]; then
+    pass "$label"
   else
-    pass "release-node rejects a non-commit ref: '${bad//$'\n'/\\n}'"
+    fail "$label: rejected for another reason (exit $gen_rc): $(cat "$tmp/gen.err")"
   fi
+}
+
+for bad in 'main' "$(printf 'main\n    if: false')" '../../evil' "${sha^^}" "${sha}0" ''; do
+  expect_generator_rejection "release-node rejects a non-commit ref: '${bad//$'\n'/\\n}'" \
+    "release-node accepted a non-commit ref: '$bad'" \
+    'gen-changelog-caller.sh: ref must be a 40-character lowercase commit SHA' \
+    release-node "$bad"
 done
 
-if bash "$gen" release "$sha" >/dev/null 2>&1; then
-  fail "a bare 'release' mode emitted output; the stack must be named explicitly"
-else
-  pass "a bare 'release' mode is refused so no stack is chosen implicitly"
-fi
+expect_generator_rejection "a bare 'release' mode is refused so no stack is chosen implicitly" \
+  "a bare 'release' mode emitted output; the stack must be named explicitly" \
+  'gen-changelog-caller.sh: unknown mode; the usage line lists every mode' \
+  release "$sha"
 
 # A called workflow cannot exceed its caller's grant: a callee job asking for a
 # scope the caller withheld ends the dispatch as a zero-job startup_failure with
