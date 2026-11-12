@@ -53,6 +53,15 @@ Keep workflow classifications and their draft/ready conformance assertions in
 `scripts/ci-gate/pr-ci-tiers.test.py`, registered in
 `scripts/actions-ci-groups.tsv`.
 
+## Generated adopter callers
+
+Generated callers apply the draft rule in the caller, which owns the trigger.
+Their jobs skip drafts and run on `ready_for_review`; they do not request
+`converted_to_draft`, and only a new commit cancels a running run. Node CI
+callers follow [ADR 0253](decisions/0253-generated-node-ci-callers-defer-drafts/README.md)
+and container-candidate callers follow
+[ADR 0261](decisions/0261-generated-container-candidate-callers-defer-drafts/README.md).
+
 ## Runner placement for pull-request code
 
 Tiers decide *when* a pull-request job runs; placement decides *where*. This
