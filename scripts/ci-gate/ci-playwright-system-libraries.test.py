@@ -1120,6 +1120,28 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertTrue(stopped, f"descendant process {child_pid} remained live after timeout")
 
+    def test_process_that_exits_during_group_scan_is_not_a_live_member(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            for pid in ("100", "200"):
+                (proc / pid).mkdir()
+            (proc / "200" / "stat").write_text("200 (other) S 1 200 200 0", encoding="ascii")
+            real_scandir = os.scandir
+            real_read_text = Path.read_text
+
+            def scandir(path: Any) -> Any:
+                return real_scandir(proc if os.fspath(path) == "/proc" else path)
+
+            def read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+                if path.parent.name == "100":
+                    raise ProcessLookupError(3, "No such process")
+                return real_read_text(path, *args, **kwargs)
+
+            with patch.object(playwright_profile.os, "scandir", scandir), patch.object(
+                Path, "read_text", read_text
+            ):
+                self.assertFalse(playwright_profile._process_group_has_live_members(100))
+
     def test_sigint_and_mixed_signals_during_spawn_are_registered_before_cleanup(self) -> None:
         child_script = (
             "import os, signal, sys, time\n"

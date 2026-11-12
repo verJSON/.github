@@ -1122,7 +1122,8 @@ def _process_group_has_live_members(process_group_id: int) -> bool:
                 continue
             try:
                 raw_stat = Path(entry.path, "stat").read_text(encoding="ascii")
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
+                # The process exited after enumeration, so it is not a live member.
                 continue
             except OSError as error:
                 raise PlaywrightProfileError("cannot inspect trusted package process identity") from error
