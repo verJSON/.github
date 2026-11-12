@@ -218,8 +218,8 @@ done
 
 if [ "$codeowners_org_set" = true ] || [ "$codeowners_team_set" = true ]; then
   if { [ "$mode" != codeowners ] && [ "$mode" != contract-test ]; } ||
-     ! [[ "$codeowners_org" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]] ||
-     ! [[ "$codeowners_team" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,98}[A-Za-z0-9])?$ ]]; then
+     ! [[ "$codeowners_org" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]{0,37}[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])?$ ]] ||
+     ! [[ "$codeowners_team" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]{0,98}[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])?$ ]]; then
     echo "$(basename "$0"): --codeowners-org and --codeowners-team require valid GitHub names and are accepted together only for codeowners or contract-test" >&2
     exit 2
   fi
