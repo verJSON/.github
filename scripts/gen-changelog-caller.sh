@@ -6174,6 +6174,49 @@ def package_less_admits(condition, tree):
     return True
 
 
+# The values a verify step's env: may take from earlier steps, by exact text. A
+# runner resolves them; the check substitutes what the emulated job produced
+# and refuses any other expression rather than guessing its value.
+PACKAGE_LESS_DISPATCH_EXPRESSIONS = {
+    "${{ steps.release-version.outputs.package-version }}": "9.8.7",
+    "${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}": "3",
+}
+
+
+def package_less_runner_environment(search_path, runner_temp, tool_cache):
+    """What the runner gives every verify step; the host's shell startup is not part of it."""
+    environment = {
+        key: value for key, value in os.environ.items() if key not in ("BASH_ENV", "ENV")
+    }
+    environment.update(
+        PATH=search_path, RUNNER_TEMP=runner_temp, VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
+    )
+    return environment
+
+
+def package_less_step_environment(step, runtime_outputs):
+    """Resolve a step's own env:, so the check runs it as the runner would."""
+    values = step_mapping_values(step, "env")
+    if values is None:
+        raise PackageLessUnreadable("has a release verification suite env the package-less check cannot read")
+    expressions = dict(PACKAGE_LESS_DISPATCH_EXPRESSIONS)
+    for output in ("path", "cache"):
+        expressions["${{ steps.release-verification-runtime.outputs.%s }}" % output] = (
+            runtime_outputs.get(output, "")
+        )
+    environment = {}
+    for key, raw in values.items():
+        value = yaml_scalar_value(raw)
+        if value is not None and "${{" in value:
+            value = expressions.get(value)
+        if value is None:
+            raise PackageLessUnreadable(
+                "has a release verification suite env value the package-less check cannot evaluate: %s" % key
+            )
+        environment[key] = value
+    return environment
+
+
 def package_less_run(body, tree, environment):
     script = os.path.join(environment["RUNNER_TEMP"], "step.sh")
     with open(script, "w", encoding="utf-8") as handle:
@@ -6197,7 +6240,7 @@ def package_less_verification(steps, root, with_hook):
             handle.write("#!/usr/bin/env node\nprocess.stdout.write('runner node ' + process.version + '\\n')\n")
         os.chmod(hook, 0o755)
     search_path = os.environ.get("PATH", "")
-    captured_path = ""
+    runtime_outputs = {}
     tool_cache = os.path.join(runner_temp, "verjson-changelog-tools")
     for step in steps:
         fields = step_mapping_entries(step) or {}
@@ -6225,8 +6268,8 @@ def package_less_verification(steps, root, with_hook):
             output = os.path.join(runner_temp, "github-output")
             open(output, "w", encoding="utf-8").close()
             capture = package_less_run(run_body(step) or "", tree, dict(
-                os.environ, PATH=search_path, RUNNER_TEMP=runner_temp,
-                VERJSON_CHANGELOG_TOOL_CACHE=tool_cache, GITHUB_OUTPUT=output,
+                package_less_runner_environment(search_path, runner_temp, tool_cache),
+                GITHUB_OUTPUT=output,
             ))
             if capture.returncode != 0:
                 raise PackageLessUnreadable(
@@ -6235,16 +6278,15 @@ def package_less_verification(steps, root, with_hook):
                 )
             with open(output, encoding="utf-8") as handle:
                 for line in handle.read().splitlines():
-                    if line.startswith("path="):
-                        captured_path = line[len("path="):]
+                    key, separator, value = line.partition("=")
+                    if separator:
+                        runtime_outputs[key] = value
         elif name == "Run the release verification suite":
             if not package_less_admits(condition, tree):
                 raise PackageLessUnreadable("does not run its release verification suite on a package-less tree")
             return package_less_run(run_body(step) or "", tree, dict(
-                os.environ, PATH=search_path, RUNNER_TEMP=runner_temp,
-                RELEASE_VERIFICATION_PATH=captured_path,
-                VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
-                PACKAGE_VERSION="9.8.7", CI_PACKAGE_RETENTION_KEEP="3", NODE_AUTH_TOKEN="",
+                package_less_runner_environment(search_path, runner_temp, tool_cache),
+                **package_less_step_environment(step, runtime_outputs)
             ))
     raise PackageLessUnreadable("has no release verification suite the package-less check can run")
 

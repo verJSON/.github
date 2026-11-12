@@ -7138,6 +7138,19 @@ pass_package_less_tree_without_hook() {
 expect_release_mode_rejection release-snapshot \
   "release-snapshot passing a package-less tree without a verification hook (#1906)" pass_package_less_tree_without_hook \
   'lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)'
+# The suite runs with the step's own env:, never one the check supplies: a
+# verification PATH that does not come from the runtime capture never sees the
+# configured Node, whatever the check would have injected.
+verify_on_fixed_system_path() {
+  mutate_snapshot_release "$1" \
+    '          RELEASE_VERIFICATION_PATH: ${{ steps.release-verification-runtime.outputs.path }}
+' \
+    '          RELEASE_VERIFICATION_PATH: /usr/bin:/bin
+'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot verifying on a fixed system PATH (#1906)" verify_on_fixed_system_path \
+  'does not give a package-less verification hook the configured Node 24 (#1906)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
 grep -Fqx "$expected_release_fallback" "$emitted" \
