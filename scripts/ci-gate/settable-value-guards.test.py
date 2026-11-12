@@ -42,8 +42,9 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 # repository's release caller at 3619ce18 adds its CI_PACKAGE_RETENTION_KEEP
 # guard, which enumerates its digits, to the prior reviewed inventory.
 # The pinned Prisma stager fetch adds a JOB_WORKFLOW_SHA guard in both the
-# canonical and generated protected workflows.
-GUARD_COUNT = 526
+# canonical and generated protected workflows. The portable CODEOWNERS owner
+# options (#1953) add the --codeowners-org and --codeowners-team name guards.
+GUARD_COUNT = 528
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the

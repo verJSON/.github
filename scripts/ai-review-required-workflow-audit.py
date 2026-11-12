@@ -625,6 +625,13 @@ def suspended_image(contract: dict) -> dict:
 
 
 def suspension_finding(contract: dict) -> str:
+    """The standing finding the audit reports while main-protection is suspended (#1933).
+
+    A match with suspended_image is a reviewed state, not drift, so it is raised
+    as an AuditFindings line with the full report rather than as an AuditError
+    that would discard it. It leads the findings, ahead of the conformance
+    classes, so a suspended ruleset is never read as a ready rollout.
+    """
     return (
         f"{contract['postimage']['name']} ({contract['ruleset_id']}) "
         "matches the reviewed suspended image (#1933)"
