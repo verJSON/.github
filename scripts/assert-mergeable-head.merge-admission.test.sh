@@ -176,6 +176,22 @@ with_checks "$ci_check" "$(check_run 2 merge-admission completed stale "$AI_REVI
 run
 expect_true "a stale merge-admission check from the bound AI review App is set aside"
 
+# The self-exclusion is bound to the App the conformance policy binds `merge-admission` to,
+# which is the App the ruleset requires, and to the producer's App. If any one of the three
+# drifts, the assertion reads the producer's own check as pending, or sets aside a check no
+# ruleset requires, and the asserted --admin path refuses every merge
+# (ARB-2031-2026-11-12 C10 (i)(a)).
+bound_id() { sed -n 's/^readonly MERGE_ADMISSION_APP_ID=\([0-9][0-9]*\)$/\1/p' "$1"; }
+assertion_app="$(bound_id "$script")"
+producer_app="$(bound_id "$here/ci-gate/merge-admission.sh")"
+policy_app="$(jq -r '.merge_admission_binding.integration_id | numbers | tostring' \
+  "$here/../config/org-ruleset-conformance-policy.json")"
+if [ -n "$policy_app" ] && [ "$assertion_app" = "$policy_app" ] && [ "$producer_app" = "$policy_app" ]; then
+  pass "the assertion sets aside the App the conformance policy and the producer bind"
+else
+  fail "the assertion sets aside the App the conformance policy and the producer bind (assertion: '$assertion_app', producer: '$producer_app', policy: '$policy_app')"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%s merge-admission self-exclusion case(s) failed\n' "$fails" >&2
   exit 1

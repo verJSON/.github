@@ -29,8 +29,9 @@ printf -v pr '%s,#' "${prs[@]}"
 pr="${pr%,#}"
 
 # The AI review App, the only producer whose merge-admission checks the assertion sets
-# aside. It equals MERGE_ADMISSION_APP_ID in scripts/assert-mergeable-head.sh, and
-# scripts/ci-gate/merge-admission.test.sh fails when the two disagree.
+# aside. It equals MERGE_ADMISSION_APP_ID in scripts/assert-mergeable-head.sh and the
+# conformance policy's merge_admission_binding, and scripts/ci-gate/merge-admission.test.sh
+# fails when any of the three disagree.
 readonly MERGE_ADMISSION_APP_ID=4528902
 assertion="$(dirname "${BASH_SOURCE[0]}")/../assert-mergeable-head.sh"
 planner="$(dirname "${BASH_SOURCE[0]}")/merge-admission-plan.sh"

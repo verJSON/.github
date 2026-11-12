@@ -24,3 +24,8 @@ disabled, it also requires the ruleset to require `merge-admission` bound to tha
 prints a `full` receipt naming the ruleset id and enforcement. The pre-creation receipt
 gates creation; the full receipt gates activation and each enrollment edit. The variable's
 value is compared and never printed.
+
+`scripts/assert-mergeable-head.merge-admission.test.sh` and
+`scripts/ci-gate/merge-admission.test.sh` (merge-gate) now each fail when
+`MERGE_ADMISSION_APP_ID` in the assertion or the producer differs from the policy's
+`merge-admission` binding, so the three cannot drift apart (C10 (i)(a)).
