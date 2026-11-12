@@ -232,7 +232,7 @@ fi
 # --- usage --------------------------------------------------------------------------------------
 # The repository, number, and head are spent in API paths and the check run's head, so a
 # malformed one is refused before any call.
-for args in "$REPO ${HEAD_SHA^^} $PR" "$REPO $HEAD_SHA 0" "not/a/repo $HEAD_SHA $PR" "$REPO $HEAD_SHA"; do
+for args in "$REPO ${HEAD_SHA^^} $PR" "$REPO $HEAD_SHA 0" "$REPO $HEAD_SHA $PR 07" "not/a/repo $HEAD_SHA $PR" "$REPO $HEAD_SHA"; do
   reset_env
   # shellcheck disable=SC2086 # each row is deliberately split into arguments
   OUT="$(bash "$producer" $args 2>&1)"
