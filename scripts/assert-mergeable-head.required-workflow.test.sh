@@ -264,6 +264,24 @@ f1r_env "$f1r_yield_checks" '{"conclusion":"failure","created_at":"2026-11-06T19
 expect "a yield-shaped local run that concluded FAILURE still makes the newest participant ambiguous, so Gate C refuses" 5 \
   "rearm / event-policy=CANCELLED"
 
+# Only a first attempt (ARB-2059-2026-11-12 C2). The check-run inventory's default
+# `filter=latest` collapses re-run attempts within a suite, so a yield-shaped suite on a
+# later attempt can hide an earlier attempt whose `rearm` entered the group. Anything
+# but the number 1 -- a re-run, a missing attempt, or the string "1" -- stays a candidate.
+f1r_env "$f1r_yield_checks" '{"run_attempt":2}'; run
+expect "a yield-shaped local run on attempt 2 is still the newest family run, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
+f1r_env "$f1r_yield_checks" '{"run_attempt":"1"}'; run
+expect "a yield-shaped local run whose attempt is the string \"1\" is still the newest family run, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
+f1r_env
+RUNS_FIXTURE="$(jq -c '.workflow_runs |= map(if .id == 41703200003 then del(.run_attempt) else . end)' <<<"$RUNS_FIXTURE")"
+run
+expect "a yield-shaped local run reporting no attempt is still the newest family run, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
 # Only the caller the family map declares as yielding: the label re-arm caller is a
 # family member with no guard, so a `guard`/`rearm`-shaped run of it stays a candidate.
 f1r_env "$f1r_yield_checks" '{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"}'; run

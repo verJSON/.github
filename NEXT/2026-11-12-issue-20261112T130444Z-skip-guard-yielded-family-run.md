@@ -8,13 +8,17 @@ title: Set aside a family run displaced before a guard-yielded local re-arm run
 
 `assert-mergeable-head.sh` no longer refuses Gate C (exit `5`) on a cancelled
 `ai-review-arm-<PR>` family run when the only newer family run is a local
-`gate re-arm` run whose F-1R guard yielded: a run that concluded success and whose
-own suite is exactly the guard's `SUCCESS` and the calling job's `SKIPPED`. That run
+`gate re-arm` run whose F-1R guard yielded: a first-attempt run that concluded
+success and whose own suite is exactly the guard's `SUCCESS` and the calling job's
+`SKIPPED`. That run
 never entered the concurrency group, so the newest family run that did is consulted
 instead, and it must still report only `SUCCESS` (#1905, ARB-G1-2026-11-06 C1
-precondition 5). Proposed in an ADR 0226 amendment pending an ARB decision.
+precondition 5). The ADR 0226 amendment is adopted by ARB decision
+ARB-2059-2026-11-12, which also required the first-attempt condition and a map-test
+check that a yielding caller holds no group at workflow level or on its calling job.
 
 The yield shape is declared per caller in `CONCURRENCY_FAMILIES` and derived from
 the caller generator by `scripts/ci-gate/concurrency-family-map.test.py`. A failed
 or cancelled guard, a calling job that ran, an extra or missing check, a run that
-did not succeed, or any other caller keeps today's refusal. Gate W is unchanged.
+did not succeed, a re-run attempt or a missing or non-numeric `run_attempt`, or any
+other caller keeps today's refusal. Gate W is unchanged.

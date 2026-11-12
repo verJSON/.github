@@ -563,12 +563,17 @@ if [ "$nonpassing_count" -gt 0 ]; then
     # the newest family run. Any other shape -- a failed or cancelled guard, a calling
     # job that ran, an extra or missing check, another caller -- stays a candidate.
     # Leaving a run out only narrows the candidates; the newest one left must still
-    # pass every condition below, so no non-success check is ever admitted.
+    # pass every condition below, so no non-success check is ever admitted. Only a
+    # first attempt (ARB-2059-2026-11-12 C2): the inventory'"'"'s `filter=latest` collapses
+    # re-run attempts within a suite, so a later attempt'"'"'s yield-shaped suite can hide
+    # an earlier attempt that entered the group. jq'"'"'s `==` is type-strict, so a missing
+    # or string attempt keeps the run a candidate.
     def guard_yielded($f):
       . as $run
       | [ $f.callers[] | select(.name == $run.name and .path == $run.path) | .yield | objects ] as $yield
       | [ $all[] | select(.kind == "check_run" and .suite_id == $run.check_suite_id) ] as $suite
       | ($yield | length) == 1
+        and .run_attempt == 1
         and .status == "completed" and .conclusion == "success"
         and ($suite | length) == 2
         and any($suite[]; .name == $yield[0].guard and .conclusion == "SUCCESS")
