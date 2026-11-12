@@ -238,6 +238,9 @@ GENERATED_HEADER_FORMATS = {
     "AI review caller": "#   scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
     "label re-arm caller": (
         "# scripts/gen-ai-review-label-rearm-caller.sh {sha} > .github/workflows/ai-review-label-rearm.yml"),
+    "lifecycle re-arm caller": (
+        "# scripts/gen-ai-review-lifecycle-rearm-caller.sh {sha}"
+        " > .github/workflows/ai-review-lifecycle-rearm.yml"),
     "gate re-arm caller": "#   scripts/gen-gate-rearm-caller.sh {sha} > .github/workflows/gate-rearm.yml",
     "privileged merge caller": (
         "#   scripts/gen-privileged-merge-caller.sh {sha} '[{{\"name\":\"ci\"}}]'"
@@ -254,7 +257,6 @@ GENERATORS_WITHOUT_ADOPTER_SHA_HEADERS = {
     "gen-adr-index.sh": "the hub's own ADR index generator; its output names no contract SHA",
     "gen-ai-review-caller-bootstrap-fragment.sh":
         "writes NEXT fragment prose, where the SHAs are text rather than a generated header",
-    "gen-ai-review-lifecycle-rearm-caller.sh": "accepts only --local, so it has no contract SHA",
     "gen-authn-type-surface-required-workflow.py": "writes the hub's own required workflow",
     "gen-conformance-regression-fixture.py": "writes a hub test fixture",
     "gen-node-ci-caller.py": "its pins are `uses:` lines; the header names no SHA",
@@ -279,6 +281,7 @@ def generator_invocations(sha):
         ("gen-changelog-caller.sh", ["release-artifact", sha, "--build-runner", "ubuntu-24.04-arm"]),
         ("gen-ai-review-caller.sh", [sha]),
         ("gen-ai-review-label-rearm-caller.sh", [sha]),
+        ("gen-ai-review-lifecycle-rearm-caller.sh", [sha]),
         ("gen-gate-rearm-caller.sh", [sha]),
         ("gen-renovate-compatibility-caller.sh", [sha, "@verjson/example", "1.2.3", "node"]),
         ("gen-privileged-merge-caller.sh", [sha, REQUIRED_CHECKS]),
@@ -1358,20 +1361,21 @@ class ReleaseDocument(unittest.TestCase):
     def test_one_version_published_at_two_commits_is_a_usage_failure(self):
         # First-wins picks a commit silently, and which one it picks decides
         # every PIN_MISMATCH in the sweep. An ambiguous list cannot be asked.
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "^v3.2.0 appears more than once, so its commit is ambiguous$"):
             self.load([{"version": "v3.2.0", "commit": "a" * 40, "published": "2026-02-01"},
                        {"version": "v3.2.0", "commit": "b" * 40, "published": "2026-02-01"}])
 
     def test_a_commit_that_is_not_a_40_hex_object_id_is_a_usage_failure(self):
         # `target_commitish` is a branch name for v2.0.0 and older on this
         # repository right now; a producer that used it is broken at the source.
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "^v3.2.0 has commit 'main', which is not a 40-hex object id$"):
             self.load([{"version": "v3.2.0", "commit": "main", "published": "2026-02-01"}])
 
     def test_a_timestamp_shaped_publication_date_is_a_usage_failure(self):
         # `published_at` is `2026-03-01T00:00:00Z` raw; the deprecation clock
         # calls date.fromisoformat on it and would raise mid-verdict.
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(
+                ValueError, "^v3.2.0 has published '2026-02-01T00:00:00Z', which is not a YYYY-MM-DD date$"):
             self.load([{"version": "v3.2.0", "commit": "a" * 40,
                         "published": "2026-02-01T00:00:00Z"}])
 
@@ -1425,9 +1429,11 @@ class CommandLine(unittest.TestCase):
     def test_a_today_that_is_not_an_iso_date_is_rejected_at_the_flag(self):
         releases = self.releases_file(
             [{"version": "v3.2.0", "commit": "a" * 40, "published": "2026-02-01"}])
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+        with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(io.StringIO()) as captured:
             cv.main(["classify", "--version", "v3.2.0", "--releases", releases,
                      "--today", "not-a-date"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("argument --today: 'not-a-date' is not a YYYY-MM-DD date", captured.getvalue())
 
     def test_the_default_today_is_utc_not_the_runner_local_date(self):
         # Two zones 26 hours apart, so whatever hour it is in UTC at least one
@@ -1469,10 +1475,12 @@ class CommandLine(unittest.TestCase):
     def test_a_releases_file_that_cannot_be_read_is_a_usage_failure_not_a_verdict(self):
         # A sweep that lost its input must not report the tree it never compared
         # as conformant; exit 2 is "the question could not be asked".
-        with contextlib.redirect_stderr(io.StringIO()):
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
             status = cv.main(["verify", "--repo-root", ".", "--releases",
                               "/nonexistent.json", "--today", "2026-02-02"])
         self.assertEqual(status, 2)
+        self.assertIn("contract-version: could not read /nonexistent.json: [Errno 2] No such file or directory",
+                      captured.getvalue())
 
 
 if __name__ == "__main__":

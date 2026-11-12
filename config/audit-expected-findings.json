@@ -3,10 +3,55 @@
         "ai-review-arm": [
             {
                 "expires": "2026-12-31",
-                "finding": "authorization-arm-rollout-not-ready: armed adopters with an incomplete generated adopter caller set: missing=20 sample=['verJSON/verjson-agent-observer:.github/workflows/ai-promotion-retry.yml', 'verJSON/verjson-agent-observer:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-ai-gguf:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-ai:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-browser-agent:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-ci:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-cli-projects:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-cloud-storage:.github/workflows/ai-review-label-rearm.yml'] (plus 12 more) items=sha256:7d11c791f6b14874571ce7a1f9473dc3a4895e7e2521a8b0cf9274525112e3fc",
-                "fingerprint": "3b9ddfd3fde421ae5ee3aafdf732af42b4acb971def7abff18035faa99c893bc",
+                "finding": "authorization-arm-rollout-not-ready: armed adopters with an incomplete generated adopter caller set: missing=35 sample=['verJSON/AiB:.github/workflows/ai-review-lifecycle-rearm.yml', 'verJSON/verjson-agent-observer:.github/workflows/ai-promotion-retry.yml', 'verJSON/verjson-agent-observer:.github/workflows/ai-review-label-rearm.yml', 'verJSON/verjson-agent-observer:.github/workflows/ai-review-lifecycle-rearm.yml', 'verJSON/verjson-ai-gguf:.github/workflows/ai-review-lifecycle-rearm.yml', 'verJSON/verjson-ai:.github/workflows/ai-review-lifecycle-rearm.yml', 'verJSON/verjson-authn:.github/workflows/ai-review-lifecycle-rearm.yml', 'verJSON/verjson-browser-agent:.github/workflows/ai-review-label-rearm.yml'] (plus 27 more) items=sha256:bd945149a52f8e57418df0bf7ff2b261b43745dbce9951f6b27b79026f02f009",
+                "finding_class": "authorization-arm-rollout-not-ready: armed adopters with an incomplete generated adopter caller set",
+                "fingerprint": "367c4bb70ee03be59cb86c7511ce1ce010501e9fca53a0c223222d0ce3ff7f94",
                 "issue": 1810,
-                "reason": "Provisioning (#1803) finished on 2026-10-15: every armed repository's ai-review-app environment has a main-only deployment branch policy and holds AI_REVIEW_APP_PRIVATE_KEY. What remains is consumer drift tracked in #1810. Re-recorded 2026-10-18 from a live read-only audit run, whose list digest matches an independent per-repository contents enumeration (ADR 0189 2026-10-18 amendment), after verjson-editor landed all four generated callers, including its ai-review-merge.yml admission caller: 20 generated adopter callers are missing across 18 armed repositories (17 ai-review-label-rearm.yml, 3 ai-promotion-retry.yml), and no armed repository lacks its admission caller. Re-record as repositories regenerate; remove once the audit reports no finding."
+                "items": [
+                    "verJSON/AiB:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-agent-observer:.github/workflows/ai-promotion-retry.yml",
+                    "verJSON/verjson-agent-observer:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-agent-observer:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-ai-gguf:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-ai:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-authn:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-browser-agent:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-browser-agent:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-ci:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-cloud-storage:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-cloud-storage:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-customer-lifecycle:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-document-contracts:.github/workflows/ai-promotion-retry.yml",
+                    "verJSON/verjson-document-contracts:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-document-contracts:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-editor:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-email:.github/workflows/ai-promotion-retry.yml",
+                    "verJSON/verjson-email:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-eslint-config:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-eslint-config:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-graphql-conventions:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-identity-contracts:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-identity-lifecycle:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-identity-lifecycle:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-infra:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-infra:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-leads:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-object-storage:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-observability:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-oidc-claims-middleware:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-oidc-claims-middleware:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-payments:.github/workflows/ai-review-lifecycle-rearm.yml",
+                    "verJSON/verjson-video-forge:.github/workflows/ai-review-label-rearm.yml",
+                    "verJSON/verjson-video-forge:.github/workflows/ai-review-lifecycle-rearm.yml"
+                ],
+                "reason": "Provisioning (#1803) finished on 2026-10-15: every armed repository's ai-review-app environment has a main-only deployment branch policy and holds AI_REVIEW_APP_PRIVATE_KEY. What remains is consumer drift tracked in #1810. Re-recorded 2026-11-03 from a live read-only audit run, after the main-protection suspension image (#2002, ADR 0254) let the audit reach this check again. Its items= digest equals an independent per-repository enumeration (ADR 0189 2026-10-18 amendment): for each of the 32 repositories carrying the live arm selector property, the default-branch git tree was listed and checked for every completeness caller in the rollout contract. 35 generated adopter callers are missing across 23 armed repositories: 12 kept from the 20 recorded on 2026-10-18 (9 ai-review-label-rearm.yml, 3 ai-promotion-retry.yml); 8 ai-review-label-rearm.yml resolved since then; 23 ai-review-lifecycle-rearm.yml new, because #1993 added that caller to the completeness set (#1982), and consumers regenerate it under #1982. No armed repository lacks its admission caller. Actions-paused repositories (27 of the 32, which ruleset 20722935 excludes from enforcement) are still counted, so the finding stays conservative (ADR 0254). A shrinking item set now adjudicates as improved (ADR 0189 2026-10-21 amendment); re-record on any other change, and remove once the audit reports no finding."
+            },
+            {
+                "expires": "2026-12-03",
+                "finding": "authorization-arm-rollout-not-ready: main-protection (18098028) matches the reviewed suspended image (#1933)",
+                "fingerprint": "cab9c6818296d73dd73af7af184da7549fbb955c55cc8da40983fc0f53a47336",
+                "issue": 1933,
+                "reason": "main-protection (18098028) is disabled under the owner hold tracked in #1933, which names no review date. The audit recognizes that state as the derived suspended image (the split postimage with only enforcement: disabled; ADR 0254, ARB RUN-D, #1992) and reports it as this one constant finding, so every later check still runs. Expires 30 days after recording (ARB RUN-D D-2); extending it is a new reviewed diff. Remove this entry, and the test binding it to the audit's text, once #1933 restores enforcement: the finding then stops reproducing and the scheduled run reports it stale."
             }
         ]
     },

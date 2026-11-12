@@ -176,3 +176,7 @@ Their exposure depends on the npm each one runs and on whether its lock validati
 The other canonical changelog workflows, `changelog-release.yml`, `release-propose.yml`, and `release-dispatch.yml`, get the same step before their `.changelog-contract` checkout. They check out only merged content earlier in the job, so for them it covers residue a persistent runner keeps from an earlier job.
 
 **Rollout.** Adopters pin both workflows by commit, and `scripts/gen-changelog-caller.sh` pins only that commit, not the workflow's bytes, so no generated surface changes; an adopter is protected once its caller is regenerated at a contract commit containing this change. The ADR 0235 relay-backlog digests for `changelog-validate.yml validate` and `generated-artifacts.yml validate` are re-recorded because the jobs' bytes changed; its runner selection and head handling did not.
+
+## 2026-11-12 amendment pointer — pre-credential digests re-recorded by ADR 0244
+
+[ADR 0244](../0244-manually-dispatched-fragment-derived-release/README.md) (#1939, PR #1941) adds the stated-head check to the verify job's pre-credential region and re-records `APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256` there. The values in the 2026-10-18 amendment above are superseded: release-node `639d473d…`, release-artifact `6c7bf751…`, release-snapshot `7eceae92…`.

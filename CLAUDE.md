@@ -77,13 +77,21 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
+
+- [#1944](https://github.com/verJSON/.github/issues/1944) — Generated container-candidate callers still run full multi-architecture candidate validation on draft pull requests; canonical draft/ready scheduling is unimplemented. GitHub's native relationships record #1944 as blocking #1945, among others (it has no `blocked by` edge). Verified open 2026-11-12 via live `gh issue view` and a GraphQL relationship query.
+
+- [#1945](https://github.com/verJSON/.github/issues/1945) — The terminal merge still uses `gh pr merge --admin` (`scripts/ci-gate/terminal-merge.sh:43`). [ADR 0260](docs/decisions/0260-native-merge-admission-through-a-producer-posted-check/README.md) and #2055 ship a producer-posted `merge-admission` check that no ruleset requires yet. The remaining work is to replace the admin merge with a native merge gated on `merge-admission` after ADR 0260's rollout enables that ruleset. Draft ADR proposal #1946 is still open. Native relationships: blocked by #1944; blocking #1949, among others. Verified open 2026-11-12 via live `gh issue view`.
+
+- [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
+
+- [#1949](https://github.com/verJSON/.github/issues/1949) — Container promotion is not yet bound to the authorized release source. The interim guard from #1952 (merged as eadc23b5, ADR 0078 amendment 2026-11-12) rejects candidates whose source commit differs from the release source, and the source-bound release ADR proposal (draft #1950) is open. Natively blocked by #1945. Verified open 2026-11-12 via live `gh issue view`.
+
 - [#1763](https://github.com/verJSON/.github/issues/1763) — The authorization arm could wait indefinitely on a lost runner assignment; #1772 (ADR 0230) adds a hosted-only acquisition watchdog. Open until org ruleset 20722935 is rotated to `f2914525` and a live cancel receipt exists; `ai-review-merge.yml` still needs the same bound. Verified 2026-10-14 from verjson-payments runs 37352915856 and 38427381694.
 
 - [#1667](https://github.com/Verjson/.github/issues/1667) — Track configurable generated OCI candidate destinations for GHCR, GAR, and Sonatype Nexus. Opened 2026-10-01 after live issue searches and checking related [.github#1264](https://github.com/Verjson/.github/issues/1264), [.github#1186](https://github.com/Verjson/.github/issues/1186), and [verjson-ci#30](https://github.com/Verjson/verjson-ci/issues/30); those cover adopter rollout and GitLab CE Nexus engine work, not registry-neutral canonical publisher destinations.
 
 - [#1692](https://github.com/Verjson/.github/issues/1692) — Target current `main` HEAD in dev via a fast, validated image path and promote one fully verified pinned digest set from nonprod to prod with separate environment controls; opened 2026-10-05 after confirming the candidate and release generators lack a general app deployment caller.
-
-- [#1696](https://github.com/Verjson/.github/issues/1696) — The authorization arm bootstraps a stale default-branch AI review caller ([ADR 0227](docs/decisions/0227-arm-bootstraps-stale-review-callers/README.md)). Closing the issue still requires rotating ruleset 20722935 to the merge SHA and proving a focused verjson-cli bootstrap pull request. Verified 2026-10-13 with `python3 scripts/ci-gate/review-caller-bootstrap.test.py` and a read-only live classifier run against verjson-cli#302.
 
 - [#1655](https://github.com/Verjson/.github/issues/1655) — Signed merge-gate provenance rollout, opened 2026-09-28 after #1339 met its evidence gate; ADR 0211 still requires a real `pull_request_target` capture before rollout.
 

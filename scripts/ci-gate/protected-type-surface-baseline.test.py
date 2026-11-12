@@ -293,19 +293,24 @@ class ProtectedBaselineTest(unittest.TestCase):
         )
 
     def test_malformed_duplicate_and_unauthorized_declarations_fail_closed(self):
+        prefix = "protected type-surface declaration"
+        shape = f"{prefix} requires exactly package, version, and script\n"
+        unauthorized = f"{prefix} is unauthorized\n"
         declarations = [
-            "{}",
-            '{"package":"@verjson/authn","package":"@attacker/pkg","version":"3.0.0","script":"test:type-surface-compatibility"}',
-            '{"package":"@verjson/authz","version":"3.0.0","script":"test:type-surface-compatibility"}',
-            '{"package":"@verjson/authn","version":"latest","script":"test:type-surface-compatibility"}',
-            '{"package":"@verjson/authn","version":"3.0.0-rc.1","script":"test:type-surface-compatibility"}',
-            '{"package":"@verjson/authn","version":"3.0.0","script":"test:other"}',
-            '{"package":"@verjson/authn","version":"3.0.0","script":"test:type-surface-compatibility","extra":true}',
+            ("{}", shape),
+            ('{"package":"@verjson/authn","package":"@attacker/pkg","version":"3.0.0","script":"test:type-surface-compatibility"}',
+             f"{prefix} is invalid: \n"),
+            ('{"package":"@verjson/authz","version":"3.0.0","script":"test:type-surface-compatibility"}', unauthorized),
+            ('{"package":"@verjson/authn","version":"latest","script":"test:type-surface-compatibility"}', unauthorized),
+            ('{"package":"@verjson/authn","version":"3.0.0-rc.1","script":"test:type-surface-compatibility"}', unauthorized),
+            ('{"package":"@verjson/authn","version":"3.0.0","script":"test:other"}', unauthorized),
+            ('{"package":"@verjson/authn","version":"3.0.0","script":"test:type-surface-compatibility","extra":true}', shape),
         ]
-        for declaration in declarations:
+        for declaration, reason in declarations:
             with self.subTest(declaration=declaration):
                 result, _, _, _ = run_resolver(declaration)
                 self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, reason)
 
     def test_receipt_tampering_fails_the_protected_transfer_validator(self):
         generator = load_generator()
@@ -369,8 +374,12 @@ class ProtectedBaselineTest(unittest.TestCase):
         ):
             mutated = {**provenance, "protectedBaseline": mutation}
             with self.subTest(mutation=mutation):
-                with self.assertRaises(SystemExit):
+                with self.assertRaises(SystemExit) as raised:
                     validate(mutated)
+                self.assertEqual(
+                    raised.exception.code,
+                    "protected baseline receipt does not bind declaration, base, and artifact",
+                )
 
 
 if __name__ == "__main__":

@@ -33,6 +33,17 @@ INTRODUCED = "23f641822d1fdf4787a46f0b55f24a755b8a73ae"
 STALE_PIN = "a6b3ccc0590f4fcfdacd7818279ab3eea6b30155"
 CURRENT_PIN = "c4127043f16fbcfd64f701797ccf0f11c9077317"
 UNKNOWN_SHA = "0" * 40
+# Lifecycle re-arm receipts (#2000):
+#   LIFECYCLE_FLOOR     - 010fa39... "verify lifecycle re-arm receipts"
+#                          (2026-09-30, first released in v4.0.0) - the first
+#                          arm that source-binds a lifecycle caller's delivery.
+#   LIFECYCLE_STALE_PIN - 0f8aead... its parent. A lifecycle caller the current
+#                          generator pins here passes the authorization audit's
+#                          completeness check but reaches an arm that binds only
+#                          the label caller's WORKFLOW_REF.
+LIFECYCLE_GENERATOR = "scripts/gen-ai-review-lifecycle-rearm-caller.sh"
+LIFECYCLE_FLOOR = "010fa39da9e718e59a53344e2a7d5575a8319a64"
+LIFECYCLE_STALE_PIN = "0f8aead1065df13ef8cf232f7f2527c7d35da8a1"
 
 failures = []
 
@@ -88,6 +99,31 @@ with tempfile.TemporaryDirectory() as tmp:
             "stale row surfaces the org variable this capability assumes",
             stale_row["assumed_by_org_variable"] == {"name": "AI_REVIEW_PRIMARY_PROVIDER", "value": "deepseek"},
         )
+
+    # --- The shipped config floors the lifecycle re-arm caller at the arm
+    # that first verifies its receipts (#2000): a pin before it is stale. ---
+    lifecycle_pins = write_json(
+        tmp_path,
+        "lifecycle-pins.json",
+        [
+            {"repo": "Verjson/verjson-authn", "generator": LIFECYCLE_GENERATOR, "pinned_sha": LIFECYCLE_STALE_PIN},
+            {"repo": "Verjson/verjson-authn", "generator": LIFECYCLE_GENERATOR, "pinned_sha": LIFECYCLE_FLOOR},
+        ],
+    )
+    lifecycle_result = run(["--pins", str(lifecycle_pins)])
+    lifecycle_report = json.loads(lifecycle_result.stdout) if lifecycle_result.returncode == 0 else {}
+    lifecycle_rows = {
+        (row["pinned_sha"], row["capability_id"], status)
+        for status in ("stale", "current")
+        for row in lifecycle_report.get(status, [])
+    }
+    check(
+        "a lifecycle pin before the receipt-verifying arm is stale and one at it is current",
+        lifecycle_rows == {
+            (LIFECYCLE_STALE_PIN, "ai-review-lifecycle-receipt-binding", "stale"),
+            (LIFECYCLE_FLOOR, "ai-review-lifecycle-receipt-binding", "current"),
+        },
+    )
 
     # --- --fail-on-stale flips the exit code without changing the report. ---
     fail_result = run(["--pins", str(real_pins), "--fail-on-stale"])

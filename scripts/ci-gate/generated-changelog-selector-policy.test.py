@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the consumer policy against actual canonical generator output."""
 import copy
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -27,7 +28,8 @@ class GeneratedCallerPolicyTests(unittest.TestCase):
     def policy(self, text):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'caller.yml').write_text(text)
-            return subprocess.run([sys.executable, str(POLICY), '--consumer-policy', directory], capture_output=True, text=True)
+            return subprocess.run([sys.executable, str(POLICY), '--consumer-policy', directory], capture_output=True, text=True,
+                                  env={**os.environ, 'LC_ALL': 'C'})
 
     def assert_allowed(self, text):
         result = self.policy(text)
@@ -82,18 +84,38 @@ class GeneratedCallerPolicyTests(unittest.TestCase):
                 self.assertIn('TierB', result.stdout + result.stderr)
         document = copy.deepcopy(self.gate)
         document['jobs']['changelog-contract']['steps'].append({'run': 'echo extra'})
-        self.assertEqual(self.policy(yaml.safe_dump(document)).returncode, 1)
+        result = self.policy(yaml.safe_dump(document))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("TierB literal Linux hosted selector in consumer job 'changelog-contract' runs-on",
+                      result.stdout + result.stderr)
 
     def test_unreviewed_release_expression_and_metered_selector_remain_rejected(self):
         release = self.generate('release-snapshot')
-        self.assertNotEqual(self.policy(release.replace('vars.CI_RUNNER_DEFAULT', 'vars.UNKNOWN_RUNNER')).returncode, 0)
-        self.assertNotEqual(self.policy(release.replace('ubuntu-24.04', 'macos-15')).returncode, 0)
+        # Every release selector is an expression, so a metered fallback inside one
+        # is rejected by the reviewed-shape guard rather than the R1 literal rule.
+        unreviewed = ": selector uses an unreviewed routing expression source or shape"
+        for changed in (release.replace('vars.CI_RUNNER_DEFAULT', 'vars.UNKNOWN_RUNNER'),
+                        release.replace('ubuntu-24.04', 'macos-15')):
+            result = self.policy(changed)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            lines = (result.stdout + result.stderr).splitlines()
+            self.assertTrue(lines)
+            self.assertTrue(all(line.startswith('UNDETERMINED: ') and line.endswith(unreviewed) for line in lines), lines)
+            self.assertEqual([line.split(': ')[2] for line in lines],
+                             ["job 'verify'", "reusable job 'snapshot' input 'runner'", "job 'publish'"])
 
     def test_explicit_untrusted_override_stays_on_normal_policy_path(self):
         self.assert_allowed(self.generate('pr-gate', '--untrusted-runner', 'self-hosted,isolated'))
-        self.assertNotEqual(self.policy(self.generate('pr-gate', '--untrusted-runner', 'macos-15')).returncode, 0)
-        result = subprocess.run([str(GENERATOR), 'pr-gate', self.sha, '--untrusted-runner', '${{ vars.CI_LANE_TRUSTED }}'], capture_output=True)
+        metered = self.policy(self.generate('pr-gate', '--untrusted-runner', 'macos-15'))
+        self.assertNotEqual(metered.returncode, 0)
+        self.assertIn("R1 metered hosted runner family in job 'changelog-contract' runs-on: macos-15",
+                      metered.stdout + metered.stderr)
+        result = subprocess.run([str(GENERATOR), 'pr-gate', self.sha, '--untrusted-runner', '${{ vars.CI_LANE_TRUSTED }}'],
+                                capture_output=True, text=True, env={**os.environ, 'LC_ALL': 'C'})
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr,
+                         'gen-changelog-caller.sh: --untrusted-runner must be a comma-separated list of runner labels\n')
 
 
 if __name__ == '__main__':

@@ -220,7 +220,8 @@ def _rewrite_operators(expression: str, placeholders: dict[str, str]) -> str:
 
 
 def _python_source(expression: str, placeholders: dict[str, str]) -> str:
-    return _rewrite_operators(expression, placeholders)
+    # A leading `!` rewrites to ' not ', which `mode='eval'` reads as an indent.
+    return _rewrite_operators(expression, placeholders).strip()
 
 
 class _GitHubComparisonRewriter(ast.NodeTransformer):

@@ -110,6 +110,10 @@ assert docs_group_step["env"] == {
     "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
         "${{ github.event_name == 'pull_request' && '60' || '' }}"
     ),
+    "ACTIONS_CI_RUNTIME_RECORDS": (
+        "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-"
+        "${{ github.run_attempt }}/docs.jsonl"
+    ),
 }
 assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
 scope_run = next(
@@ -238,7 +242,10 @@ compatibility_commands = (
     "python3 -I scripts/ci-gate/node-ci-secretless-compatibility-absent.test.py",
     "python3 -I scripts/ci-gate/node-ci-required-identity.test.py",
     "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/ci-entry-receipts.test.py",
+    "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/pidfd-launcher.test.py",
+    "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/ci-mount-destination.test.py",
     "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/node-ci-secretless-rebuild-env.test.py",
+    "python3 -I scripts/ci-gate/prisma-schema-engine.test.py",
     "bash scripts/ci-gate/node-ci-secretless-consumer.test.sh",
     "bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh",
     "python3 -I scripts/container_release_reconcile.test.py",
@@ -825,6 +832,10 @@ def validate_locale_collation(candidate, candidate_manifest, sources=script_sour
             "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
                 "${{ github.event_name == 'pull_request' && '60' || '' }}"
             ),
+            "ACTIONS_CI_RUNTIME_RECORDS": (
+                "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-"
+                f"${{{{ github.run_attempt }}}}/{LOCALE_GROUP}.jsonl"
+            ),
         },
         "run": f"bash scripts/actions-ci-group.sh {LOCALE_GROUP}",
     }:
@@ -854,6 +865,99 @@ def validate_locale_collation(candidate, candidate_manifest, sources=script_sour
 
 validate_locale_collation(document, manifest_text)
 print("ok - every manifest group has one runner; en_US.UTF-8 contracts run hosted")
+
+
+RUNTIME_RECORDS_DIRECTORY = (
+    "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}"
+)
+
+
+def validate_runtime_records(candidate):
+    """Every step that runs the group runner writes its records and uploads them next (#1999).
+
+    The collector looks up `actions-ci-runtime-records-<run>-<attempt>-<group>` from the
+    step named `Upload <group> runtime records` for every group a job's log announces.
+    """
+    for job_name, job in candidate["jobs"].items():
+        steps = job.get("steps", [])
+        for index, step in enumerate(steps):
+            run = step.get("run", "")
+            if 'bash scripts/actions-ci-group.sh "${{ matrix.group }}"' in run:
+                group = "${{ matrix.group }}"
+            else:
+                named = re.findall(r"^\s*bash scripts/actions-ci-group\.sh ([a-z0-9-]+)\s*$", run, re.MULTILINE)
+                if not named:
+                    continue
+                if len(named) != 1:
+                    raise AssertionError(f"{job_name} step runs several groups: {named}")
+                group = named[0]
+            records = f"{RUNTIME_RECORDS_DIRECTORY}/{group}.jsonl"
+            if (step.get("env") or {}).get("ACTIONS_CI_RUNTIME_RECORDS") != records:
+                raise AssertionError(f"{job_name} runs group {group} without writing its runtime records")
+            upload = steps[index + 1] if index + 1 < len(steps) else None
+            if upload != {
+                "name": f"Upload {group} runtime records",
+                "if": "${{ always() }}",
+                "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+                "with": {
+                    "name": (
+                        "actions-ci-runtime-records-${{ github.run_id }}-"
+                        f"${{{{ github.run_attempt }}}}-{group}"
+                    ),
+                    "path": records,
+                    "retention-days": 7,
+                    "if-no-files-found": "warn",
+                },
+            }:
+                raise AssertionError(f"{job_name} does not upload group {group} runtime records next: {upload}")
+
+
+validate_runtime_records(document)
+print("ok - every group-runner step writes and uploads its runtime records")
+
+
+def expect_records_failure(label, mutate, reason):
+    candidate = copy.deepcopy(document)
+    mutate(candidate)
+    try:
+        validate_runtime_records(candidate)
+    except AssertionError as error:
+        if reason not in str(error):
+            raise AssertionError(f"{label} failed for another reason: {error}") from error
+        print(f"ok - {label} fails closed")
+    else:
+        raise AssertionError(f"{label} passed")
+
+
+def runner_step(candidate, job_name, marker):
+    return next(step for step in candidate["jobs"][job_name]["steps"] if marker in step.get("run", ""))
+
+
+def upload_step(candidate, job_name, group):
+    steps = candidate["jobs"][job_name]["steps"]
+    return next(step for step in steps if step.get("name") == f"Upload {group} runtime records")
+
+
+for job_name, group, marker in (
+    ("shell-test-groups", "${{ matrix.group }}", '"${{ matrix.group }}"'),
+    ("docs-contracts", "docs", "actions-ci-group.sh docs"),
+    ("hosted-compatibility-tests", "locale-collation", "actions-ci-group.sh locale-collation"),
+):
+    expect_records_failure(
+        f"{group} runner without runtime records",
+        lambda candidate: runner_step(candidate, job_name, marker)["env"].pop("ACTIONS_CI_RUNTIME_RECORDS"),
+        f"runs group {group} without writing its runtime records",
+    )
+    expect_records_failure(
+        f"{group} records upload removed",
+        lambda candidate: candidate["jobs"][job_name]["steps"].remove(upload_step(candidate, job_name, group)),
+        f"does not upload group {group} runtime records next",
+    )
+    expect_records_failure(
+        f"{group} records upload skipped after a failed row",
+        lambda candidate: upload_step(candidate, job_name, group).update({"if": "${{ success() }}"}),
+        f"does not upload group {group} runtime records next",
+    )
 
 
 def expect_locale_failure(
@@ -1451,6 +1555,15 @@ document = yaml.safe_load(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 # command of their own, so no manifest row could run them. Each entry carries the
 # reason it is not a gate; adding one is a reviewable act, not a naming accident.
 NON_GATE_MODULES = {
+    "scripts/ci-gate/compatibility_lane_evidence.py": (
+        "experimental lane record comparator imported by its registered test"
+    ),
+    "scripts/ci-gate/compatibility_lane_channel.py": (
+        "experimental lane relay imported by its registered test"
+    ),
+    "scripts/ci-gate/compatibility_lane_peer.py": (
+        "experimental connector evidence imported by its registered test"
+    ),
     "scripts/ci-gate/ascii_digit_locales.py": (
         "locale-matrix helper imported by the digit-guard tests"
     ),
@@ -2009,8 +2122,10 @@ for command_id in schema readiness; do
         awk -F '\t' -v command="$command" '$2 != command' "$manifest" >"$mutant"
         ;;
       duplication)
-        cp "$manifest" "$mutant"
-        printf 'changelog-release\t%s\n' "$command" >>"$mutant"
+        # A valid cell, so only the duplicate itself can reject the mutant: the
+        # retired `changelog-release` cell failed the group check first.
+        cp "$manifest" "$mutant" \
+          && printf 'platform\t%s\n' "$command" >>"$mutant"
         ;;
       reassignment)
         awk -F '\t' -v command="$command" '
@@ -2019,8 +2134,13 @@ for command_id in schema readiness; do
         ' "$manifest" >"$mutant"
         ;;
     esac
+    mutator_status=$?
 
-    if validate_manifest "$mutant"; then
+    # validate_manifest rejects an absent or empty file too, so a mutant that
+    # was never written would read as the mutation failing closed.
+    if [ "$mutator_status" -ne 0 ] || [ ! -s "$mutant" ] || cmp -s "$manifest" "$mutant"; then
+      fail "$command_id manifest $mutation mutant was not built (mutator exit $mutator_status), so its rejection proves nothing"
+    elif validate_manifest "$mutant"; then
       fail "$command_id manifest $mutation mutation passed"
     else
       pass "$command_id manifest $mutation mutation fails closed"
@@ -2096,6 +2216,8 @@ expected = shards | {
     "changelog-release-3\tbash scripts/component-changelog-contract.test.sh": 90,
     "platform\tbash scripts/actions-ci-groups.test.sh": 180,
     "platform\tbash scripts/ci-gate/runner-admission-reconcile.test.sh": 120,
+    # 67 s on run 41549155557, and a 60 s timeout on PR #1979 (#1980).
+    "platform\tpython3 scripts/ci-gate/node-ci-secretless-hosted-lane.test.py": 150,
     "platform\tpython3 scripts/ci-gate/app-key-environment.test.py": 120,
     "platform\tbash scripts/required-checks-audit.test.sh": 120,
     "platform\tpython3 scripts/ci-gate/conformance/conformance.test.py": 120,
@@ -2118,6 +2240,10 @@ expected = shards | {
     "platform\tRUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 240,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
     "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
+    # The release-caller contract part that carried this case took 23-32s over 11
+    # hosted runs (32s on main run 41921027849); the sweep was 12.3s of its 13.7s
+    # locally, so twice 32s rounded up (#1999).
+    "platform\tRELEASE_CALLER_ISOLATION_PART=allowlist-sweep python3 scripts/release-caller-credential-isolation.test.py": 90,
 }
 if declared != expected:
     drift = sorted(

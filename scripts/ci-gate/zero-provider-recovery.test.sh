@@ -113,14 +113,16 @@ dispatch_workflow_path=".github/workflows/$dispatch_workflow"
 [ -z "${API_CAPTURE:-}" ] || printf "%s\n" "$*" >>"$API_CAPTURE"
 case "$*" in
   "api repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID")
+    [ -z "${RUN_RECORD_RAW+set}" ] || { printf '%s' "$RUN_RECORD_RAW"; exit 0; }
     jq -nc --argjson id "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
       --arg title "${RUN_TITLE:-AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT}" \
       --arg repo "${RUN_REPOSITORY:-verJSON/example}" --arg branch "$DEFAULT_BRANCH" \
       --arg actor "${RUN_ACTOR:-github-actions[bot]}" \
       --arg status "${RUN_STATUS:-in_progress}" --arg workflow_path "$dispatch_workflow_path" \
+      --argjson overrides "${RUN_RECORD_OVERRIDES:-null}" \
       '{id:$id,run_attempt:$attempt,event:"workflow_dispatch",path:$workflow_path,
         display_title:$title,head_branch:$branch,head_repository:{full_name:$repo},repository:{full_name:$repo},
-        actor:{login:$actor},triggering_actor:{login:$actor},status:$status}' ;;
+        actor:{login:$actor},triggering_actor:{login:$actor},status:$status} + ($overrides // {})' ;;
   "api --paginate --slurp repos/$TARGET_REPO/actions/workflows/$dispatch_workflow/runs?event=workflow_dispatch&per_page=100")
     # Verjson/.github#1480 — count the polls so a test can prove which
     # conditions are retried and which are refused on the first look.
@@ -179,6 +181,14 @@ case "$*" in
 esac
 SH
 chmod +x "$tmp/bin/gh"
+# The listing retry backs off with `sleep 3`. Record the backoff instead of
+# waiting it out, so the bounded-retry case below can assert it exactly.
+cat >"$tmp/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SLEEP_CALLS"
+SH
+chmod +x "$tmp/bin/sleep"
+export SLEEP_CALLS="$tmp/sleep-calls"
 export PATH="$tmp/bin:$PATH"
 
 expect_pass() {
@@ -191,25 +201,113 @@ expect_fail() {
   elif grep -qF "$reason" "$tmp/out"; then pass "$label"
   else fail "$label: $(tail -1 "$tmp/out")"; fi
 }
+# Fails with `reason` and never with `forbidden`: for a refusal whose wrong
+# variant would also name its own reason.
+expect_fail_not_naming() {
+  local label="$1" reason="$2" forbidden="$3"; shift 3
+  if "$@" >"$tmp/out" 2>&1; then fail "$label"
+  elif grep -qF -- "$forbidden" "$tmp/out"; then fail "$label: also names: $forbidden"
+  elif grep -qF -- "$reason" "$tmp/out"; then pass "$label"
+  else fail "$label: $(tail -1 "$tmp/out")"; fi
+}
+expect_fail_naming_each() {
+  local label="$1" reason
+  shift
+  local reasons=()
+  while [ "$1" != -- ]; do reasons+=("$1"); shift; done
+  shift
+  if "$@" >"$tmp/out" 2>&1; then fail "$label"; return; fi
+  for reason in "${reasons[@]}"; do
+    grep -qF -- "$reason" "$tmp/out" || { fail "$label: no line names: $reason"; return; }
+  done
+  pass "$label"
+}
 verify() { bash "$verifier"; }
 
 expect_pass "failed preflight with skipped gate is eligible for same-receipt recovery" verify
 RUN_REPOSITORY=$'v\u0435rJSON/example' \
-  expect_fail "Unicode lookalike repository cannot correlate recovery" "run identity mismatch" verify
+  expect_fail_naming_each "Unicode lookalike repository cannot correlate recovery" \
+  'review run head_repository.full_name mismatch: observed "v\u0435rJSON/example"' \
+  'review run repository.full_name mismatch: observed "v\u0435rJSON/example"' -- verify
 RUN_STATUS=queued expect_pass "queued direct review run remains eligible while a sibling waits" verify
-RUN_STATUS=completed expect_fail "terminal review run cannot be replayed as live" "run identity mismatch" verify
+# Verjson/.github#2012 — GitHub documents waiting, pending and requested as
+# further statuses only Actions sets on a run that has not finished.
+RUN_STATUS=waiting expect_pass "waiting direct review run is still the current live run" verify
+RUN_STATUS=pending expect_pass "pending direct review run is still the current live run" verify
+RUN_STATUS=requested expect_pass "requested direct review run is still the current live run" verify
+RUN_STATUS=completed expect_fail "terminal review run cannot be replayed as live" \
+  'review run status mismatch: observed "completed", which is terminal' verify
+RUN_STATUS=paused expect_fail "unrecognized review run status fails closed" \
+  'review run status mismatch: observed "paused", which is unrecognized' verify
 PREFLIGHT_CONCLUSION=success expect_pass "held preflight with skipped gate is eligible for same-receipt recovery" verify
 PREFLIGHT_CONCLUSION=skipped expect_pass "skipped preflight is eligible for same-receipt recovery" verify
 REVIEW_RUN_ATTEMPT=10 expect_pass "later same-run retry remains eligible with complete prior evidence" verify
 RUN_TITLE='AI review' \
-  expect_fail "generic run name cannot correlate recovery" "run identity mismatch" verify
+  expect_fail "generic run name cannot correlate recovery" 'review run display_title mismatch: observed "AI review"' verify
 RUN_TITLE="AI review authorization 9002 from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT" \
-  expect_fail "substituted authorization check id cannot correlate recovery" "run identity mismatch" verify
+  expect_fail "substituted authorization check id cannot correlate recovery" \
+  'review run display_title mismatch: observed "AI review authorization 9002 from arm 7001.1"' verify
 RUN_TITLE="AI review authorization $AUTHORIZATION_CHECK_ID from arm 7002.$ARM_RUN_ATTEMPT" \
-  expect_fail "substituted arm run id cannot correlate recovery" "run identity mismatch" verify
+  expect_fail "substituted arm run id cannot correlate recovery" \
+  'review run display_title mismatch: observed "AI review authorization 9001 from arm 7002.1"' verify
 RUN_TITLE="AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.2" \
-  expect_fail "substituted arm attempt cannot correlate recovery" "run identity mismatch" verify
+  expect_fail "substituted arm attempt cannot correlate recovery" \
+  'review run display_title mismatch: observed "AI review authorization 9001 from arm 7001.2"' verify
+# A character beyond the Basic Multilingual Plane is spelled as its JSON
+# surrogate pair, never as an ambiguous five-digit \u escape.
+RUN_TITLE=$'AI review \xf0\x9f\x98\x80' \
+  expect_fail "a supplementary-plane title character is spelled as a surrogate pair" \
+  'display_title mismatch: observed "AI review \ud83d\ude00"' verify
 unset RUN_TITLE
+# Actions decodes %0A inside an annotation, so a shown value spells % as %25.
+RUN_TITLE='AI review%0A::warning::forged' \
+  expect_fail "a percent-encoded newline in a title cannot fake an annotation line" \
+  'display_title mismatch: observed "AI review%250A::warning::forged"' verify
+RUN_RECORD_OVERRIDES='{"run_attempt":3}' \
+  expect_fail "a different run attempt cannot correlate recovery" \
+  'review run run_attempt mismatch: observed 3, expected 2' verify
+RUN_RECORD_OVERRIDES='{"event":"push"}' \
+  expect_fail "a non-dispatch event cannot correlate recovery" \
+  'review run event mismatch: observed "push", expected "workflow_dispatch"' verify
+RUN_RECORD_OVERRIDES='{"path":".github/workflows/other.yml"}' \
+  expect_fail "a different workflow path cannot correlate recovery" \
+  'review run path mismatch: observed ".github/workflows/other.yml", expected ".github/workflows/ai-review-merge.yml"' verify
+RUN_RECORD_OVERRIDES='{"head_branch":"feature"}' \
+  expect_fail "a non-default head branch cannot correlate recovery" \
+  'review run head_branch mismatch: observed "feature", expected "main"' verify
+# The per-predicate report must not become the verdict's only input: a record
+# that yields no predicate lines because it is empty or not one object is still
+# refused, as `jq -e` refused it before the diagnostics existed.
+RUN_RECORD_RAW='' \
+  expect_fail "an empty review run record fails closed" "review run record is not a single JSON object" verify
+RUN_RECORD_RAW='{"id":' \
+  expect_fail "an unparseable review run record fails closed" "review run record could not be evaluated" verify
+# The old `jq -e` judged only the last of several documents, so two valid
+# copies passed; the slurped record must be exactly one.
+single_run_record="$(gh api "repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID")"
+jq -e 'type == "object"' <<<"$single_run_record" >/dev/null ||
+  fail "multi-document fixture could not build a single valid run record"
+RUN_RECORD_RAW="$single_run_record$single_run_record" \
+  expect_fail "a multi-document review run record fails closed" "review run record is not a single JSON object" verify
+# A jq error part-way through still reports that the rest went unevaluated.
+RUN_RECORD_OVERRIDES='{"event":"push","head_repository":"verJSON/example"}' \
+  expect_fail_naming_each "an evaluation error after a mismatch reports both" \
+  'review run event mismatch: observed "push"' \
+  'review run record could not be evaluated' -- verify
+# Every failed predicate is named, under the unchanged first line log scrapers
+# key on, and nothing from the environment reaches the log.
+GH_TOKEN=ghs_sentinelTokenValue RUN_TITLE='AI review' RUN_STATUS=completed verify >"$tmp/out" 2>&1
+diagnostics_status=$?
+if [ "$diagnostics_status" -ne 0 ] &&
+   [ "$(sed -n 1p "$tmp/out")" = "::error::zero-provider recovery run identity mismatch" ] &&
+   [ "$(grep -c '^::error::review run ' "$tmp/out")" -eq 2 ] &&
+   grep -qF 'review run display_title mismatch' "$tmp/out" &&
+   grep -qF 'review run status mismatch' "$tmp/out" &&
+   ! grep -qF sentinelTokenValue "$tmp/out"; then
+  pass "a refusal names each failed predicate after the scraped first line, without secrets"
+else
+  fail "multi-predicate refusal diagnostics are wrong: $(tr '\n' '|' <"$tmp/out")"
+fi
 JOB_NAME_PREFIX='unexpected / ' \
   expect_fail "unexpected nested job-name prefix cannot correlate recovery" "approached the provider boundary" verify
 CURRENT_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -237,9 +335,6 @@ REVIEW_RUN_ATTEMPT=1 AUTHORIZATION_STATE=retained \
 # retried. These assert the distinctness, not merely that each still fails.
 REVIEW_RUN_ATTEMPT=1 DUPLICATE_CORRELATED_RUN=true \
   expect_fail "duplicate attempt-one dispatch is refused as a duplicate" "dispatch is duplicated" verify
-REVIEW_RUN_ATTEMPT=1 MISSING_CORRELATED_RUN=true \
-  expect_fail "a run absent from the listing is refused as absent, not as a duplicate" \
-  "has not appeared in the workflow run listing" verify
 REVIEW_RUN_ATTEMPT=1 CORRELATED_RUN_ATTEMPT=2 \
   expect_fail "a retried initial dispatch is refused as retried, not as a duplicate" \
   "was retried" verify
@@ -256,13 +351,20 @@ REVIEW_RUN_ATTEMPT=1 CORRELATED_POLLS="$polls_file" CORRELATED_RUN_APPEARS_AFTER
 
 # The retry must also be BOUNDED. `-ge 2` above pins only the floor, so a raised
 # or unbounded ceiling would slip through it; assert the exact maximum here.
+# This case also carries the absent-not-duplicate distinction: its reason is the
+# absent message, never "dispatch is duplicated".
 : >"$polls_file"
+: >"$SLEEP_CALLS"
 REVIEW_RUN_ATTEMPT=1 MISSING_CORRELATED_RUN=true CORRELATED_POLLS="$polls_file" \
-  expect_fail "a permanently absent run is refused after a bounded number of polls" \
-  "has not appeared in the workflow run listing" verify
+  expect_fail_not_naming "a permanently absent run is refused after a bounded number of polls" \
+  "has not appeared in the workflow run listing" "dispatch is duplicated" verify
 [ "$(cat "$polls_file")" -eq 5 ] \
   && pass "a permanently absent listing is polled exactly 5 times, then refused" \
   || fail "absent-listing poll count is not exactly 5 (polls=$(cat "$polls_file"))"
+# Five polls leave four gaps, each a 3-second backoff, and none after the last.
+[ "$(cat "$SLEEP_CALLS")" = $'3\n3\n3\n3' ] \
+  && pass "the absent listing backs off 3 seconds between polls, never after the last" \
+  || fail "absent-listing backoff is not exactly four 'sleep 3' calls: $(tr '\n' ' ' <"$SLEEP_CALLS")"
 
 # A duplicate is NOT eventually consistent — retrying it would only widen the
 # window in which a second dispatch could be accepted as the trusted one, so it

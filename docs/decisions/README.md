@@ -12,6 +12,17 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0260](0260-native-merge-admission-through-a-producer-posted-check/README.md) | 2026-11-12 | Native merge admission through a producer-posted `merge-admission` check |
+| [0259](0259-stage-locked-prisma-engine-outside-offline-sandbox/README.md) | 2026-11-10 | Stage the locked Prisma schema engine outside the offline candidate sandbox |
+| [0258](0258-gitlab-estate-migration/README.md) | 2026-11-05 | Migrate the repository estate to GitLab CE in owner-approved waves behind a verified one-way mirror from GitHub |
+| [0257](0257-merge-admission-requires-the-exact-head-review-receipt/README.md) | 2026-11-05 | Merge admission requires the exact-head independent-review receipt on promotion-enabled repositories |
+| [0256](0256-netcup-stack-backup-and-disaster-recovery/README.md) | 2026-11-05 | Back up the Netcup Git/CI stack to configured, locked off-site storage and drill every restore path |
+| [0255](0255-gate-w-required-workflow-run-precondition/README.md) | 2026-11-03 | Gate W: a required workflow's own successful run on the exact head is a merge precondition |
+| [0254](0254-audit-recognizes-the-main-protection-suspension/README.md) | 2026-11-03 | The arm audit recognizes the main-protection suspension as a reviewed state |
+| [0253](0253-generated-node-ci-callers-defer-drafts/README.md) | 2026-11-03 | Generated Node CI callers skip drafts and cancel only on new commits |
+| [0252](0252-exclude-actions-paused-repos-from-required-checks/README.md) | 2026-11-03 | Exclude Actions-paused repositories from required-check rulesets |
+| [0247](0247-portable-codeowners/README.md) | 2026-10-28 | Portable generated CODEOWNERS |
+| [0244](0244-manually-dispatched-fragment-derived-release/README.md) | 2026-10-28 | Derive manually dispatched release versions from fragments |
 | [0243](0243-agent-authored-changelog-context/README.md) | 2026-10-27 | Dependency updates require agent-authored changelog context |
 | [0242](0242-inline-required-workflow-app-key-validation/README.md) | 2026-10-27 | Inline app-key validation in the required gate workflow |
 | [0241](0241-configured-github-app-client-id-preflight-policy/README.md) | 2026-10-25 | Preflight validation pins the configured GitHub App client-ID format |

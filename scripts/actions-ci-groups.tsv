@@ -26,6 +26,7 @@ platform	bash scripts/ci-gate/node-ci-secretless.test.sh
 platform	python3 scripts/ci-gate/protected-type-surface-baseline.test.py
 platform	python3 scripts/gen-node-ci-protected-move-step.test.py
 platform	python3 scripts/ci-gate/ci-levels.test.py
+platform	bash scripts/ci-gate/ci-levels-actionlint.test.sh
 platform	python3 scripts/ci-gate/ci-build-artifacts.test.py
 platform	python3 scripts/ci-gate/ci-postgres-sandbox.test.py
 platform	python3 scripts/ci-gate/ci-playwright-system-libraries.test.py
@@ -36,11 +37,13 @@ platform	python3 scripts/ci-gate/node-ci-python-heredocs.test.py
 platform	python3 scripts/ci-gate/node-ci-script-plan.test.py
 platform	python3 scripts/ci-gate/node-ci-secretless-range-resolution.test.py
 platform	@budget=90 python3 scripts/ci-gate/compatibility-sandbox-provisioning.test.py
+platform	python3 scripts/ci-gate/compatibility-lane-evidence.test.py
+platform	python3 scripts/ci-gate/compatibility-lane-channel.test.py
 platform	python3 scripts/ci-gate/compatibility-sandbox-acquirer.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm-install.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-trusted-ref.test.sh
-platform	python3 scripts/ci-gate/node-ci-secretless-hosted-lane.test.py
+platform	@budget=150 python3 scripts/ci-gate/node-ci-secretless-hosted-lane.test.py
 platform	python3 scripts/ci-gate/node-ci-diff-classifier.test.py
 platform	python3 scripts/ci-gate/workflow-isolated-python.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-transfer.test.sh
@@ -57,6 +60,7 @@ platform	python3 scripts/ci-gate/contract-version.test.py
 platform	bash scripts/node-release-publish.test.sh
 platform	python3 scripts/node-release-credential-isolation.test.py
 platform	RELEASE_CALLER_ISOLATION_PART=contract python3 scripts/release-caller-credential-isolation.test.py
+platform	@budget=90 RELEASE_CALLER_ISOLATION_PART=allowlist-sweep python3 scripts/release-caller-credential-isolation.test.py
 platform	RELEASE_CALLER_ISOLATION_PART=npm10 python3 scripts/release-caller-credential-isolation.test.py
 platform	RELEASE_CALLER_ISOLATION_PART=npm11 python3 scripts/release-caller-credential-isolation.test.py
 platform	python3 scripts/release-caller-credential-isolation-parts.test.py
@@ -102,6 +106,7 @@ platform	python3 scripts/gate_coverage_audit_test.py
 platform	python3 scripts/org_secret_scope_audit_test.py
 platform	python3 scripts/provisioning_delegation_validate_test.py
 platform	python3 scripts/org_ruleset_conformance_test.py
+platform	python3 scripts/actions_paused_drift_test.py
 platform	python3 scripts/package_type_surface_ruleset_test.py
 platform	python3 scripts/github_identity_test.py
 platform	python3 scripts/authn_type_surface_ruleset_test.py
@@ -128,6 +133,7 @@ merge-gate	bash scripts/ci-gate/validate-ai-review-app-key.test.sh
 merge-gate	bash scripts/ci-gate/freshness.test.sh
 merge-gate	bash scripts/ci-gate/review-comment.test.sh
 merge-gate	bash scripts/ci-gate/review-context.test.sh
+merge-gate	bash scripts/ci-gate/review-git-fixture-isolation.test.sh
 merge-gate	bash scripts/ci-gate/read-pr-files.test.sh
 merge-gate	bash scripts/ci-gate/ai-review-retry.test.sh
 merge-gate	bash scripts/ci-gate/semantic-verdict.test.sh
@@ -158,9 +164,11 @@ merge-gate	bash scripts/ci-gate/post-merge-reconcile.test.sh
 merge-gate	bash scripts/ci-gate/gate-dispatch.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	bash scripts/ci-gate/gate-rearm-caller-contract.test.sh
+merge-gate	python3 scripts/ci-gate/local-arm-guard.test.py
 merge-gate	python3 scripts/ci-gate/arm-runner-acquisition-watchdog.test.py
 merge-gate	@budget=90 bash scripts/ci-gate/default-branch-uri-encoding.test.sh
 merge-gate	python3 scripts/ci-gate/label-delivery-bridge.test.py
+merge-gate	python3 scripts/ci-gate/required-arm-never-yields.test.py
 merge-gate	bash scripts/ci-gate/ai-review-caller-contract.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-caller-contract.test.sh
 merge-gate	bash scripts/ci-gate/privileged-lane-validation.test.sh
@@ -174,6 +182,10 @@ merge-gate	bash scripts/ci-gate/elide-lockfiles.test.sh
 merge-gate	bash scripts/ci-gate/rereview-skip.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-target-guard.test.sh
 merge-gate	bash scripts/ci-gate/target-visibility.test.sh
+# @exclusive: on the first concurrent actions-ci run this row and the required-checks
+# audit were the two CPU-heavy rows that exceeded the command budget while competing
+# with sibling rows, so each reserves the whole runner (ADR 0225 Context and Decision
+# 1; #1736, PR #1746). Re-measure under sibling load before dropping it.
 merge-gate	@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin-extractor-differential.test.sh
 merge-gate	bash scripts/ci-gate/require-secrets.test.sh
@@ -250,6 +262,7 @@ changelog-release-4	bash scripts/changelog-pr-gate-generator.test.sh
 changelog-release-1	bash scripts/changelog-migration.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
 changelog-release-2	bash scripts/changelog-release-permissions.test.sh
+changelog-release-2	python3 scripts/release-push-guard.test.py
 changelog-release-3	python3 scripts/changelog-release-app-token.test.py
 changelog-release-2	python3 scripts/release-app-canary.test.py
 changelog-release-3	bash scripts/changelog-release-branch-guard.test.sh
@@ -263,6 +276,12 @@ merge-gate	bash scripts/assert-no-deferred-checks.test.sh
 merge-gate	@budget=120 bash scripts/assert-mergeable-head.test.sh
 merge-gate	bash scripts/assert-mergeable-head.large-payload.test.sh
 merge-gate	bash scripts/assert-mergeable-head.concurrency-family.test.sh
+merge-gate	bash scripts/assert-mergeable-head.required-workflow.test.sh
+merge-gate	bash scripts/assert-mergeable-head.review-receipt.test.sh
+merge-gate	bash scripts/assert-mergeable-head.merge-admission.test.sh
+merge-gate	bash scripts/ci-gate/merge-admission.test.sh
+merge-gate	bash scripts/ci-gate/merge-admission-plan.test.sh
+merge-gate	python3 scripts/ci-gate/merge-admission-workflow.test.py
 merge-gate	python3 scripts/ci-gate/concurrency-family-map.test.py
 changelog-release-4	python3 scripts/ci-gate/exact-release-packages.test.py
 platform	python3 scripts/node_floor_ruleset_test.py
@@ -272,6 +291,8 @@ merge-gate	python3 scripts/codeowners_test.py
 merge-gate	python3 scripts/codeowners.py check
 platform	bash scripts/ci-gate/pipefail-sigpipe.test.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.test.sh
+platform	bash scripts/ci-gate/hub-changelog-validate-concurrent-deepen.test.sh
+platform	python3 scripts/shared_checkout_fetch_test.py
 platform	bash scripts/ci-gate/hub-changelog-validate.sh
 platform	python3 scripts/ci-gate/merge-gate-provenance-claims.test.py
 # locale-collation runs in actions-ci hosted-compatibility-tests on ubuntu-24.04:

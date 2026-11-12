@@ -713,3 +713,11 @@ Deleting caches needs `actions: write`. The job holds only that permission, no
 checkout and no secrets; the generated publication caller now grants `actions: write`
 (validation stays read-only) and no other publisher job gains it. Existing callers must
 regenerate; a caller still granting `actions: read` fails workflow validation.
+
+## Amendment (2026-11-12) — interim: the candidate must come from the release source commit (#1949, PR #1952)
+
+**Finding.** The promotion planner checked the candidate manifest and the release's `sourceCommit` separately and never required them to match. A release dispatched at one commit could therefore promote a candidate built from another, and then move the stable aliases to it.
+
+**Decision (interim).** `scripts/container_release_promotion.py` refuses to plan unless the candidate's `source.commit` equals `release.sourceCommit`. Both values must be 40-hex lowercase SHAs, and they must match exactly. A tagged retry compares against the source recorded in the release manifest, not the commit the retry was dispatched from. A retry of a release whose recorded sources already differ stops. A manual release dispatch is accepted only on `refs/heads/main`, so it must run while `main`'s HEAD is the commit of a successful candidate. Candidates publish on every push to `main`, so a later commit that gets a successful candidate makes a release possible again.
+
+**Scope.** This guard covers source identity only. It does not establish dispatch authorization, fragment selection, or registry transaction safety. Those remain with #1949 and the proposed source-bound release decision (PR #1950). The planner that runs is the adopter's own generated copy, written and digest-checked by `scripts/gen-container-release.sh`; repinning only the caller does not deliver the guard. Adopters receive it when they regenerate their full container-release adopter set (caller and planner) at a contract pin that includes it.
