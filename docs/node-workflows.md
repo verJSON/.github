@@ -496,11 +496,23 @@ only when its plan entry sets `requiresServices: true` (the standard `test`, `te
 `*:test` names have it by default, so omitting the flag does not guarantee network denial;
 the unprotected reusable keeps the caller's network policy). `browser-cache: true` stores the provisioned browsers
 but does not provision them, and `playwright install --with-deps` does not work inside the
-sandbox. An external adopter run on 2026-10-26 passed `e2e-full / build-test` after a
-Playwright browser-cache miss and downloaded the browsers from `cdn.playwright.dev`
+sandbox.
+
+**This route has not been verified in a live run.** It is derived from the
+script-plan semantics above. The live evidence covers a narrower path. An external adopter
+run on 2026-10-26 passed `e2e-full / build-test` after a Playwright browser-cache miss
 ([run 40380731114](https://github.com/terptechpub/self-publish-ai-app/actions/runs/40380731114)).
-That single run confirms this route can work; it does not guarantee CDN availability,
-so transient DNS failures such as `EAI_AGAIN` can still fail a cold browser install.
+Its `test:ci:e2e-full` script ran `playwright install chromium` itself, and the run
+called the source reusable `node-ci.yml`, which keeps the runner's network policy, so no
+script-plan network isolation was in force; `browser-cache: true` saved what that one
+script downloaded. That run listed no browser package in `secretless-skip-install-scripts`
+and had no separate provisioning entry. The parts specific to this route are
+still unproven: skipping a browser package's install script, provisioning in an
+earlier plan entry that sets `requiresServices: true`, the browsers surviving to
+a later script through the cache directory, and network isolation under the generated
+protected workflow. Treat the route as experimental until
+a run exercises it. No route guarantees CDN availability, so transient DNS
+failures such as `EAI_AGAIN` can still fail a cold browser install.
 
 ## Concurrency belongs to the caller
 
