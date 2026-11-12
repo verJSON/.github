@@ -37,7 +37,15 @@
 #           valid ADR 0202 independent-review receipt bound to this exact head,
 #           checked by the verifier the terminal merge runs (ADR 0257, #2031).
 #
-# Gates A and C set aside two shapes only. First, a non-passing check run whose
+# Gates A and C also set aside this assertion's own output: every `merge-admission` check
+# run produced by the AI review App, and the `merge-admission` context only where the
+# ruleset binds it to that App (ADR 0260, #1990). A same-named check from any other App
+# or a same-named commit status is never set aside.
+#
+# An optional third argument names the head the caller answers for; when the pull
+# request's head is another SHA the assertion exits 1 (ADR 0260).
+#
+# Beyond that, Gates A and C set aside two shapes only. First, a non-passing check run whose
 # workflow run was cancelled and then superseded by a later successful run of the same
 # workflow, event, and head that reports that check as SUCCESS -- or, for a CANCELLED
 # check only, not at all (ADR 0226, #1754; a non-CANCELLED conclusion such as an
@@ -120,12 +128,17 @@
 # an unguarded `$(...)` here.
 set -uo pipefail
 
-usage() { echo "usage: $0 <owner/repo> <pr-number>" >&2; exit 2; }
-[ "$#" -eq 2 ] || usage
+usage() { echo "usage: $0 <owner/repo> <pr-number> [expected-head-sha]" >&2; exit 2; }
+[ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage
 repo="$1"
 pr="$2"
+# Optional: the head the caller is answering for (ADR 0260). The merge-admission producer
+# creates its check run on one SHA, so a pull request whose head moved since then is not
+# evaluated on that check's behalf.
+expected_head="${3-}"
 [[ "$repo" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || usage
 [[ "$pr" =~ ^[0-9]+$ ]] || usage
+[ "$#" -eq 2 ] || [[ "$expected_head" =~ ^[0-9a-f]{40}$ ]] || usage
 
 # ADR 0178 fixes the job id. A caller renames its own job, not the reusable's,
 # so the deferral surfaces as `deferred-ci` or `<caller-job> / deferred-ci`, and
@@ -144,6 +157,15 @@ readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
 # scripts/assert-mergeable-head.review-receipt.test.sh fails when the two disagree.
 readonly ARM_WORKFLOW_REPOSITORY_ID=1269388380
 readonly ARM_WORKFLOW_PATH=.github/workflows/gate-rearm.yml
+# The merge-admission producer (ADR 0260, #1990) creates its `merge-admission` check run
+# in progress on the head before it runs this assertion, and leaves it in progress on
+# every refusal, so Gates A and C set aside exactly that context from exactly this App:
+# the AI review App, whose key the producer mints from. A same-named check run from any
+# other App (GitHub Actions included) and a same-named commit status, which carries no
+# App, stay in the inventory. scripts/ci-gate/merge-admission.sh binds the same id, and
+# scripts/assert-mergeable-head.merge-admission.test.sh fails when the two disagree.
+readonly MERGE_ADMISSION_CONTEXT=merge-admission
+readonly MERGE_ADMISSION_APP_ID=4528902
 # Declared concurrency families (ADR 0226, amendment 2026-10-15). A family is one
 # workflow-level concurrency group that a reusable workflow declares and every caller
 # inherits, so runs of DIFFERENT workflows displace each other from it. Membership is
@@ -307,6 +329,8 @@ pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRef
 head_sha="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
 [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] \
   || fault 1 "could not resolve a head SHA for $repo#$pr"
+[ -z "$expected_head" ] || [ "$head_sha" = "$expected_head" ] \
+  || fault 1 "$repo#$pr head $head_sha is not the expected head $expected_head; the head moved, so this assertion does not answer for $expected_head"
 base_ref="$(jq -r '.baseRefName // ""' <<<"$pr_json")"
 [ -n "$base_ref" ] \
   || fault 1 "could not resolve a base ref for $repo#$pr"
@@ -638,6 +662,17 @@ if [ "$nonpassing_count" -gt 0 ]; then
     || annotate notice "Gates A and C set aside non-passing check runs of cancelled runs superseded by a later successful run of the same workflow, event, and head, or cancelled check runs displaced by a later-created successful run of their declared concurrency family on this head, both bound to this pull request by head branch and head repository because GitHub reports neither a run's resolved concurrency group nor, for these runs, its pull request (ADR 0226): $dismissed"
 fi
 
+# ------------------------------------------------------- merge admission ----
+# ADR 0260. The producer's own `merge-admission` check runs are this assertion's output,
+# never its input. Only check runs whose App is the bound one are set aside; Gate B keeps
+# reading the raw inventory.
+admitted_checks="$scratch/admission-gated-checks.json"
+jq -c --arg context "$MERGE_ADMISSION_CONTEXT" --argjson app "$MERGE_ADMISSION_APP_ID" '
+  [ .[] | select((.kind == "check_run" and .name == $context and .app_id == $app) | not) ]' \
+  <"$gated_checks" >"$admitted_checks" \
+  || fault 1 "failed to set aside the merge-admission producer's own checks for $repo@$head_sha"
+gated_checks="$admitted_checks"
+
 # ---------------------------------------------------------------- Gate A ----
 # The required set is read from the ruleset that actually governs the pull
 # request's BASE REF. It is never inferred from the head: that is the same
@@ -733,10 +768,14 @@ fi
 # An earlier draft also matched a synthesized "<workflowName> / <name>", which
 # let any workflow satisfy a required context by naming a job after it.
 gate_a="$(jq -rn --argjson pass "$PASSING" --slurpfile required "$required" \
-  --slurpfile checks "$gated_checks" --slurpfile superseded "$superseded_names" --slurpfile runs "$runs" '
+  --slurpfile checks "$gated_checks" --slurpfile superseded "$superseded_names" --slurpfile runs "$runs" \
+  --arg admission "$MERGE_ADMISSION_CONTEXT" --argjson admission_app "$MERGE_ADMISSION_APP_ID" '
   $required[0] as $required | $checks[0] as $checks
   | $superseded[0] as $superseded | $runs[0] as $runs
   | [ $required[]
+    # ADR 0260: this assertion computes merge-admission, so it is not one of its inputs,
+    # but only where the ruleset binds that context to the producer App.
+    | select((.context == $admission and .integration_id == $admission_app) | not)
     | . as $req
     | ([ $checks[] | select(.name == $req.context) ]) as $named
     | if ($named | length) == 0 then "absent: \($req.context)"
