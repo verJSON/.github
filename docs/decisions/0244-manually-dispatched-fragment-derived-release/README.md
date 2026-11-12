@@ -1,7 +1,7 @@
 # 0244 — Derive manually dispatched release versions from fragments
 
 - **Date:** 2026-10-28
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-12): directed by the repository owner in [#1939](https://github.com/VerJSON/.github/issues/1939) and accepted after independent review of PR #1941; the push-guard limits below remain open under [#1942](https://github.com/VerJSON/.github/issues/1942)
 - **Issues:** [#1939](https://github.com/VerJSON/.github/issues/1939), [#1940](https://github.com/VerJSON/.github/issues/1940)
 - **Category:** release automation and GitHub write authority
 - **Supersedes:** [ADR 0218](../0218-require-explicit-release-dispatch-version/README.md), and the scheduled dispatch provision of [ADR 0101](../0101-explicit-release-proposal-autonomy/README.md)

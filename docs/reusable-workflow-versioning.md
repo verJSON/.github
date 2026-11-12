@@ -83,6 +83,8 @@ does not rewrite their workflow files.
    commit it authorizes as `expected_head`; preview the derived version offline
    with the pinned `release-plan` at that commit first. If `main` has moved, the
    run fails before checkout. A new namespace needs an explicit initial version.
+   A caller generated from an earlier contract still requires an explicit version
+   until it is regenerated at a contract that includes ADR 0244.
 3. Inspect the resolved version and selection in the release plan. The verification
    and publication jobs use the same
    dispatch commit. A concurrent change to `main` makes publication fail closed;
