@@ -1893,6 +1893,23 @@ class ChangelogContractTests(unittest.TestCase):
                 first.unlink()
                 second.unlink()
 
+    def occupy_minor_build_precedence(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        for version in ("v1.1.0", "v1.2.0+build.1"):
+            (snapshots / f"{version}.md").write_text("previous\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-feature.md", impact="minor")
+
+    def test_build_qualified_next_patch_does_not_recover_occupied_build_precedence(self) -> None:
+        self.occupy_minor_build_precedence()
+        with self.assertRaisesRegex(changelog.ChangelogError, "require a minor bump from v1.1.0 to v1.2.0; requested v1.2.1"):
+            changelog.release_plan(self.root, "v1.2.1+build.1", [])
+
+    def test_prerelease_next_patch_does_not_recover_occupied_build_precedence(self) -> None:
+        self.occupy_minor_build_precedence()
+        with self.assertRaisesRegex(changelog.ChangelogError, "require a minor bump from v1.1.0 to v1.2.0; requested v1.2.1"):
+            changelog.release_plan(self.root, "v1.2.1-rc.1", [])
+
     def test_other_namespace_or_unrelated_build_does_not_allow_overbump(self) -> None:
         snapshots = self.root / "CHANGELOG"
         snapshots.mkdir()
