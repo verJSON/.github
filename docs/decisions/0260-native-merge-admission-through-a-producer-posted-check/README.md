@@ -494,22 +494,21 @@ stale-SUCCESS window, scoped to two same-head classes plus the outage window:
   GitHub Actions check from a listed workflow, and a pull request opened or synchronized to
   a commit that already carries a `merge-admission` SUCCESS, including a push or force-push
   back to an earlier admitted commit. The window lasts until the superseding in-progress run
-  exists. **Ceiling: 10 minutes** from the change to that run.
+  exists. **Ceiling: 5 minutes** from the change to that run.
 - *Sweep-bounded:* a permission downgrade, a ruleset edit, and a later-failing check from a
   non-Actions App. The window lasts until the next sweep (15-minute target, best-effort, as
-  stated above) plus run latency. **Ceiling: 30 minutes.**
+  stated above) plus run latency. **Ceiling: 20 minutes.**
 - *Outage window:* unbounded in principle, bounded in practice by the C10 outage alert,
   which does not exist yet (below).
 
 A push to a commit that carries no `merge-admission` check run is outside the window: the
-required context is absent and blocks natively. The ceilings are this amendment's reading of
-the bounds this ADR already states (one trigger-to-run latency; one sweep interval plus an
-evaluation); the owner's act accepted that each class has a ceiling, not these numbers, so
-the owner may re-decide them before the canary. If a C3 canary measures a window above its
-class ceiling, or a canary merge gets through inside a window, the acceptance lapses for
-wider enrollment (C8) and the owner re-decides from the measurements; the canary ruleset may
-stay active meanwhile. The acceptance lapses at the #1964 switch and must be re-decided
-then.
+required context is absent and blocks natively. **The ceilings are the owner's decision**
+(user-attested, given in a Claude Code session on 2026-11-12): 5 minutes trigger-bounded and
+20 minutes sweep-bounded, which leaves about 5 minutes of run latency beyond the 15-minute
+sweep target. If a C3 canary measures a window above its class ceiling, or a canary merge
+gets through inside a window, the acceptance lapses for wider enrollment (C8) and the owner
+re-decides from the measurements; the canary ruleset may stay active meanwhile. The
+acceptance lapses at the #1964 switch and must be re-decided then.
 
 **C8, Decision 2's scope.** Amended inline above: the canary first (`repository_id`
 1269388380), then an explicit enrollment property set only after a repository's caller,

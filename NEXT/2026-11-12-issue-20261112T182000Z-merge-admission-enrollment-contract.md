@@ -34,7 +34,8 @@ not implemented yet. The variable's value is compared and never printed.
 `merge-admission` binding, so the three cannot drift apart (C10 (i)(a)).
 
 ADR 0260 gains a dated amendment recording the owner's user-attested C1 acceptance (with
-class ceilings and the #1964 lapse), C8's enrollment-property scope for Decision 2, C6's
-visible Renovate carve-out in Decision 6, C10 as adopted, C11's ordering edge, and the
-bundle items still to do: the outage alert, REST and hosted-minute budgets, caller
-generator, runbook, and C9 canary principal.
+the owner's class ceilings, 5 minutes trigger-bounded and 20 minutes sweep-bounded, and
+the #1964 lapse), C8's enrollment-property scope for Decision 2, C6's visible Renovate
+carve-out in Decision 6, C10 as adopted, C11's ordering edge, and the bundle items still
+to do: the outage alert, REST and hosted-minute budgets, caller generator, runbook, C9
+canary principal, and the C8 enrollment-scope audit check.
