@@ -130,16 +130,19 @@ rotation (ADR 0091).
 **Self-exclusion.** `assert-mergeable-head.sh` binds `MERGE_ADMISSION_APP_ID=4528902`
 (the AI review App, `ai-review-authorization`, read from the organization variable and
 `apps/ai-review-authorization` on 2026-11-12). Gates A and C set aside every
-`merge-admission` check run produced by that App that is still in progress or concluded
-success, including earlier in-progress ones, which every refusal leaves behind and which
-would otherwise block every later evaluation of the same head. The producer never
-concludes its check any other way, so a completed non-success from that App is not its
-output and stays a Gate C failure. Gate A skips the required context only where the
-ruleset binds it to that App. A same-named check run from any other App and a same-named
-commit status stay in the inventory. Gate B keeps reading the raw inventory. The
-assertion also takes an optional third argument, the expected head, and exits 1 when the
-pull request's head is another SHA, so an evaluation never answers for a head other than
-the one its check run belongs to.
+`merge-admission` check run produced by that App that is still in progress, concluded
+success, or concluded stale, including earlier in-progress ones, which every refusal
+leaves behind and which would otherwise block every later evaluation of the same head.
+Stale is the conclusion GitHub alone sets on a check run left incomplete for 14 days, so
+on an older head it is the same refusal residue; reading it as a failure would refuse
+that head forever, even after a later success. The producer never concludes its check
+any other way, so any other completed conclusion from that App is not its output and
+stays a Gate C failure. Gate A skips the required context only where the ruleset binds
+it to that App. A same-named check run from any other App and a same-named commit status
+stay in the inventory. Gate B keeps reading the raw inventory. The assertion also takes
+an optional third argument, the expected head, and exits 1 when the pull request's head
+is another SHA, so an evaluation never answers for a head other than the one its check
+run belongs to.
 
 **Evaluation is per head, not per pull request.** A check run attaches to a commit, so a
 `merge-admission` success on a head stands for every open pull request at that head,
@@ -279,11 +282,11 @@ behaviorally matched copy.
 ## Verification
 
 - `scripts/assert-mergeable-head.merge-admission.test.sh` (merge-gate): Gate C sets
-  aside the bound App's in-progress check but keeps its completed failure; Gate A sets
-  aside the context the ruleset binds to that App; a same-named GitHub Actions check
-  stays a Gate C failure; a context bound to GitHub Actions stays required; a mismatched
-  expected head exits 1, a matching one is evaluated, and a malformed one is a usage
-  error.
+  aside the bound App's in-progress and stale checks but keeps its completed failure;
+  Gate A sets aside the context the ruleset binds to that App; a same-named GitHub
+  Actions check stays a Gate C failure; a context bound to GitHub Actions stays
+  required; a mismatched expected head exits 1, a matching one is evaluated, and a
+  malformed one is a usage error.
 - `scripts/ci-gate/merge-admission.test.sh` (merge-gate): the in-progress check is created
   first with the App token and before the assertion; exit 0 with `true` completes that
   check run as success; exit 0 with any other output, exit 6, exit 5, and exit 1 leave it

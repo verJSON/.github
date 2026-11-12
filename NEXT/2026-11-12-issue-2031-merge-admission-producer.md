@@ -7,10 +7,11 @@ title: Merge admission sets aside its own producer's check and binds an expected
 
 `scripts/assert-mergeable-head.sh` now sets aside, in Gates A and C, every
 `merge-admission` check run produced by the AI review App (id 4528902) that is still in
-progress or concluded success, and the
+progress or concluded success or stale (GitHub's conclusion for a check left in progress 14
+days), and the
 `merge-admission` required context only where the ruleset binds it to that App. A
-same-named check from any other App, GitHub Actions included, a completed non-success
-from the AI review App, or a same-named commit status stays a failure. An optional third argument names the head the caller answers
+same-named check from any other App, GitHub Actions included, any other completed
+conclusion from the AI review App, or a same-named commit status stays a failure. An optional third argument names the head the caller answers
 for; a pull request whose head moved exits 1 (ADR 0260, #1990, #2031).
 
 `scripts/ci-gate/merge-admission.sh` performs one producer evaluation of one head: it

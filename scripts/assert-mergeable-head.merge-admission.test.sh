@@ -160,6 +160,15 @@ run
 expect "a merge-admission check from the bound AI review App that concluded failure stays a Gate C failure" 5 \
   "Gate C: $REPO#$PR head $HEAD_SHA has pending or non-passing checks outside the required set — merge-admission=FAILURE"
 
+# GitHub alone concludes an incomplete check run `stale` after 14 days, and the producer
+# leaves its check in progress on every refusal, so a stale one from the bound App is that
+# producer's own output. Reading it as a failure would refuse the head forever.
+reset_env
+with_checks "$ci_check" "$(check_run 2 merge-admission completed stale "$AI_REVIEW_APP_ID")" \
+  "$(check_run 3 merge-admission completed success "$AI_REVIEW_APP_ID")"
+run
+expect_true "a stale merge-admission check from the bound AI review App is set aside"
+
 if [ "$fails" -ne 0 ]; then
   printf '%s merge-admission self-exclusion case(s) failed\n' "$fails" >&2
   exit 1
