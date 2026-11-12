@@ -51,6 +51,8 @@ CASES: dict[str, list[list[str]]] = {
         ["--only-package-dir", "packages/a", "--only-package-dir", "packages/b"],
         ["--build-runner", "ubuntu-24.04-arm", "--build-runner", MACOS_LANE,
          "--approved-internal-package", "@verjson/cli-cloud"],
+        # A foreign organization's selected CODEOWNERS team (ADR 0247).
+        ["--codeowners-org", "Acme", "--codeowners-team", "platform"],
     ],
     "pr-gate": [["--untrusted-runner", "self-hosted,linux"]],
     "release-node": [
