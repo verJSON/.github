@@ -21,6 +21,7 @@ Reverse-chronological index of org-level decisions.
 | [0254](0254-audit-recognizes-the-main-protection-suspension/README.md) | 2026-11-03 | The arm audit recognizes the main-protection suspension as a reviewed state |
 | [0253](0253-generated-node-ci-callers-defer-drafts/README.md) | 2026-11-03 | Generated Node CI callers skip drafts and cancel only on new commits |
 | [0252](0252-exclude-actions-paused-repos-from-required-checks/README.md) | 2026-11-03 | Exclude Actions-paused repositories from required-check rulesets |
+| [0247](0247-portable-codeowners/README.md) | 2026-10-28 | Portable generated CODEOWNERS |
 | [0244](0244-manually-dispatched-fragment-derived-release/README.md) | 2026-10-28 | Derive manually dispatched release versions from fragments |
 | [0243](0243-agent-authored-changelog-context/README.md) | 2026-10-27 | Dependency updates require agent-authored changelog context |
 | [0242](0242-inline-required-workflow-app-key-validation/README.md) | 2026-10-27 | Inline app-key validation in the required gate workflow |

@@ -170,6 +170,9 @@ jobs:
       TARGET_REPO: ${{ github.repository }}
       ARM_RUN_ID: ${{ github.run_id }}
       ARM_RUN_ATTEMPT: ${{ github.run_attempt }}
+      # jq 1.6's fromdateiso8601 adds the process zone's daylight-saving offset,
+      # delaying the stall bound by up to an hour; pin UTC (#1958, ADR 0230).
+      TZ: UTC
       # Who invoked this arm, for the recovery advice only (ADR 0255 section 6): a
       # direct, org-required run has no caller input, and every generated caller
       # passes one. Neither value gates any job or step (ADR 0255 section 3).

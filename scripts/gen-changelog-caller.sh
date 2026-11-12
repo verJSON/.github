@@ -13,8 +13,8 @@
 #   scripts/gen-changelog-caller.sh adr-index-generator <sha> > scripts/gen-adr-index.sh
 #   scripts/gen-changelog-caller.sh adr-index-test <sha> > scripts/gen-adr-index.test.sh
 #   scripts/gen-changelog-caller.sh renderer <sha> > scripts/render-next.sh
-#   scripts/gen-changelog-caller.sh contract-test <sha> [--scope <scope>] [--node-version <version>] [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... > scripts/changelog-contract.test.sh
-#   scripts/gen-changelog-caller.sh codeowners <sha> > .github/CODEOWNERS
+#   scripts/gen-changelog-caller.sh contract-test <sha> [--codeowners-org <org> --codeowners-team <team>] [--scope <scope>] [--node-version <version>] [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... > scripts/changelog-contract.test.sh
+#   scripts/gen-changelog-caller.sh codeowners <sha> [--codeowners-org <org> --codeowners-team <team>] > .github/CODEOWNERS
 #   scripts/gen-changelog-caller.sh pr-gate <sha> [--untrusted-runner <label>[,<label>...]] > .github/workflows/changelog-contract.yml
 #   scripts/gen-changelog-caller.sh release-node <sha> [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--release-asset <path>]... > .github/workflows/release.yml
 #   scripts/gen-changelog-caller.sh release-artifact <sha> --build-runner <selector>... [--approved-internal-package <@verjson/name>]... [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] > .github/workflows/release.yml
@@ -72,7 +72,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
+  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--codeowners-org <org> --codeowners-team <team>] [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
   echo "required check: changelog / validate" >&2
   exit 2
 }
@@ -100,8 +100,18 @@ release_approved_internal_packages=()
 release_autonomy=""
 pr_gate_untrusted_runner=""
 pr_gate_untrusted_runner_set=false
+codeowners_org=""
+codeowners_team=""
+codeowners_org_set=false
+codeowners_team_set=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --codeowners-org)
+      [ "$#" -ge 2 ] && [ "$codeowners_org_set" = false ] || usage
+      codeowners_org="$2"; codeowners_org_set=true; shift 2 ;;
+    --codeowners-team)
+      [ "$#" -ge 2 ] && [ "$codeowners_team_set" = false ] || usage
+      codeowners_team="$2"; codeowners_team_set=true; shift 2 ;;
     --scope)
       [ "$#" -ge 2 ] || usage
       [ "$release_scope_set" = false ] || {
@@ -206,6 +216,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$codeowners_org_set" = true ] || [ "$codeowners_team_set" = true ]; then
+  if { [ "$mode" != codeowners ] && [ "$mode" != contract-test ]; } ||
+     ! [[ "$codeowners_org" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]{0,37}[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])?$ ]] ||
+     ! [[ "$codeowners_team" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]{0,98}[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])?$ ]]; then
+    echo "$(basename "$0"): --codeowners-org and --codeowners-team require valid GitHub names and are accepted together only for codeowners or contract-test" >&2
+    exit 2
+  fi
+fi
 if { [ "$release_scope_set" = true ] || [ "$release_node_version_set" = true ] \
   || [ "$release_package_dirs_set" = true ]; } \
   && [ "$mode" != release-node ] && [ "$mode" != release-artifact ] \
@@ -393,6 +411,7 @@ selected_package_dirs_json="$selected_package_dirs_json]"
 # index members inside `contract-test`) takes no options and states its own mode.
 generation_command() {
   local command="$mode $ref" release_caller_spec release_asset build_runner quoted_build_runner approved_package
+  [ -z "$codeowners_org" ] || command="$command --codeowners-org $codeowners_org --codeowners-team $codeowners_team"
   [ "$release_scope" = "@verjson" ] \
     || command="$command --scope $release_scope"
   [ "$release_node_version" = "24" ] \
@@ -633,12 +652,15 @@ resolve_adr_index_generator() {
 # reviewed source of truth and scripts/codeowners_test.py refuses drift between
 # the two (ADR 0210).
 codeowners_bytes() {
-  cat <<'CODEOWNERS'
-# Generated by verJSON/.github; do not edit by hand.
-# Regenerate from a reviewed immutable contract checkout:
-# scripts/gen-changelog-caller.sh codeowners <contract-sha> > .github/CODEOWNERS
-* @verJSON/devs
-CODEOWNERS
+  local regenerate='scripts/gen-changelog-caller.sh codeowners <contract-sha>' owner='@verJSON/devs'
+  if [ -n "$codeowners_org" ]; then
+    regenerate="$regenerate --codeowners-org $codeowners_org --codeowners-team $codeowners_team"
+    owner="@$codeowners_org/$codeowners_team"
+  fi
+  printf '%s\n' '# Generated by verJSON/.github; do not edit by hand.' \
+    '# Regenerate from a reviewed immutable contract checkout:' \
+    "# $regenerate > .github/CODEOWNERS" \
+    "* $owner"
 }
 codeowners_digest_at_ref() {
   codeowners_bytes | digest_of
@@ -2857,7 +2879,10 @@ digest_of_resolved() { # "$@" = the resolver command
 }
 
 emit_contract_test() {
-  local adr_index_sha256="" adr_index_test_sha256="" codeowners_sha256=""
+  local adr_index_sha256="" adr_index_test_sha256="" codeowners_sha256="" codeowners_assignments=""
+  if [ -n "$codeowners_org" ]; then
+    printf -v codeowners_assignments 'EXPECTED_CODEOWNERS_ORG="%s"\nEXPECTED_CODEOWNERS_TEAM="%s"' "$codeowners_org" "$codeowners_team"
+  fi
   codeowners_sha256="$(codeowners_digest_at_ref)" || {
     echo "$(basename "$0"): cannot digest the embedded CODEOWNERS member" >&2
     return 1
@@ -2995,6 +3020,7 @@ CONTRACT_SHA256="${contract_sha256}"
 ADR_INDEX_SHA256="${adr_index_sha256}"
 ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
+${codeowners_assignments}
 EXPECTED_RELEASE_SCOPE="${release_scope}"
 EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
 # Generator parameters and expected per-caller package selections.
@@ -3414,7 +3440,12 @@ echo "ok - every generated member of the adopter set pins $CONTRACT_REF"
 # generated, so it is held to the exact bytes the contract renders at
 # $CONTRACT_REF; a competing CODEOWNERS location would take precedence over the
 # canonical one and is refused as well.
-codeowners_remedy="Generate it with: scripts/gen-changelog-caller.sh codeowners $CONTRACT_REF > .github/CODEOWNERS (regenerate the whole adopter set at one commit)"
+codeowners_org="${EXPECTED_CODEOWNERS_ORG:-verJSON}"
+if [ -n "${GITHUB_REPOSITORY_OWNER:-}" ] &&
+   [ "${codeowners_org,,}" != "${GITHUB_REPOSITORY_OWNER,,}" ]; then
+  fail "CODEOWNERS organization does not match this repository owner"
+fi
+codeowners_remedy="Generate it with: scripts/gen-changelog-caller.sh codeowners $CONTRACT_REF ${EXPECTED_CODEOWNERS_ORG:+--codeowners-org $EXPECTED_CODEOWNERS_ORG --codeowners-team $EXPECTED_CODEOWNERS_TEAM } > .github/CODEOWNERS (regenerate the whole adopter set at one commit)"
 [ -n "$EXPECTED_CODEOWNERS_SHA256" ] \
   || fail "this suite carries no CODEOWNERS pin; regenerate it with scripts/gen-changelog-caller.sh contract-test $CONTRACT_REF"
 [ ! -L "$root/.github" ] && [ ! -L "$root/.github/CODEOWNERS" ] \
