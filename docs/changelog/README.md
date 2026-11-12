@@ -487,6 +487,10 @@ fails before the snapshot if that hook is missing. Dependency installation and
 version stamping run only when `package.json` exists. The configured Node
 version (`--node-version`) is installed either way, so a hook written in Node
 runs on the pinned runtime rather than whatever the runner provides (#1906).
+The generated contract test checks this by running the caller's `verify` steps
+on a package-less tree, including the runtime capture step's `/usr/bin/python3`,
+so the host running that test needs an executable `/usr/bin/python3`; without
+one it fails with that prerequisite named rather than a verdict on the caller.
 
 Reaching for `release-node` with a `"private": true` package is now refused
 before anything irreversible happens. node-release.yml only ever runs as

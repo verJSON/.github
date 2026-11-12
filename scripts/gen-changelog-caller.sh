@@ -6151,6 +6151,8 @@ for index, line in enumerate(lines):
 # read has already been refused there.
 PACKAGE_LESS_SELECTED = "steps.release-version.outputs.selected == 'true'"
 PACKAGE_LESS_FILE_PRESENT = re.compile(r"hashFiles\('([A-Za-z0-9_./-]+)'\) != ''")
+# The generated runtime capture step runs this interpreter by absolute path.
+PACKAGE_LESS_CAPTURE_PYTHON = "/usr/bin/python3"
 PACKAGE_LESS_REFUSAL = "::error::No package.json and no executable scripts/release-verify.sh"
 PACKAGE_LESS_NODE_VERSION = re.compile(r"\$\{\{ '([0-9]+(?:\.[0-9]+){0,2})' \}\}")
 
@@ -6294,6 +6296,13 @@ def package_less_verification(steps, root, with_hook):
 
 def check_package_less_verification(steps):
     expected = os.environ.get("EXPECTED_RELEASE_NODE_VERSION", "")
+    if not (os.path.isfile(PACKAGE_LESS_CAPTURE_PYTHON) and os.access(PACKAGE_LESS_CAPTURE_PYTHON, os.X_OK)):
+        problems.append(
+            "cannot be checked on a package-less tree: this host has no executable %s, which the"
+            " generated runtime capture step runs; install python3 there and re-run (#1906)"
+            % PACKAGE_LESS_CAPTURE_PYTHON
+        )
+        return
     try:
         with tempfile.TemporaryDirectory() as root:
             with_hook = package_less_verification(steps, root, with_hook=True)
