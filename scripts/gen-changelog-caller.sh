@@ -6330,6 +6330,11 @@ if release_mode == "release-snapshot":
         tree, runner_temp = package_less_tree(root)
         if run_verify_job(steps, tree, runner_temp).returncode == 0:
             refuse("lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)")
+# Printed here, not by the caller, so the line proves this check ran.
+print(
+    "ok - %s gives a package-less verification hook the configured Node %s (#1906)"
+    % (workflow_path, expected_node_version)
+)
 PACKAGE_LESS_VERIFICATION_PY
 
 # Every workflow that calls changelog-release.yml is a release caller, whatever
@@ -7077,7 +7082,6 @@ printf '%s\n' '#!/usr/bin/env bash' 'exit 23' \
   # require the hook to see the configured Node version (#1906).
   python3 "$work/package-less-verification.py" "$release_workflow" "$EXPECTED_RELEASE_NODE_VERSION" "$release_mode" \
     || fail "$release_workflow: see above"
-  echo "ok - $workflow_relative_path gives a package-less verification hook the configured Node $EXPECTED_RELEASE_NODE_VERSION (#1906)"
 done <<RELEASE_WORKFLOWS
 $release_workflows
 RELEASE_WORKFLOWS

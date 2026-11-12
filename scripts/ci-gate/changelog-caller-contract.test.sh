@@ -1354,14 +1354,19 @@ if text.count(old) != 1:
 open(path, "w", encoding="utf-8").write(text.replace(old, new))
 PY
 }
-gate_setup_node_on_package_json() {
+set_setup_node_condition() { # set_setup_node_condition <file> <condition>
+  local setup_node
+  setup_node="$(sed -n 's/^      - uses: \(actions\/setup-node@.*\)$/\1/p' "$1")"
   mutate_package_less_release "$1" \
-    "      - uses: $(sed -n 's/^      - uses: \(actions\/setup-node@.*\)$/\1/p' "$1")
+    "      - uses: $setup_node
         if: steps.release-version.outputs.selected == 'true'
 " \
-    "      - uses: $(sed -n 's/^      - uses: \(actions\/setup-node@.*\)$/\1/p' "$1")
-        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
+    "      - uses: $setup_node
+        if: $2
 "
+}
+gate_setup_node_on_package_json() {
+  set_setup_node_condition "$1" "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''"
 }
 expect_package_less_rejection() { # expect_package_less_rejection <label> <reason> <mutator>
   local label="$1" reason="$2" mutator="$3" mutated status=0
@@ -1398,6 +1403,41 @@ pass_package_less_tree_without_hook() {
 expect_package_less_rejection "a package-less tree without a verification hook passing verification" \
   "lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)" \
   pass_package_less_tree_without_hook
+# Order is the property: Node installed after the runtime is captured never
+# reaches the hook, however the check happens to collect the steps.
+install_node_after_runtime_capture() {
+  python3 - "$1" <<'PY'
+import sys
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+starts = [index for index, line in enumerate(lines) if line.startswith("      - ")]
+setup = next(index for index in starts if lines[index].startswith("      - uses: actions/setup-node@"))
+capture = starts[starts.index(setup) + 1]
+if lines[capture] != "      - name: Capture trusted release verification runtime":
+    raise SystemExit("setup-node is no longer directly followed by the runtime capture")
+after_capture = starts[starts.index(capture) + 1]
+lines[setup:after_capture] = lines[capture:after_capture] + lines[setup:capture]
+open(path, "w", encoding="utf-8").write("\n".join(lines))
+PY
+}
+expect_package_less_rejection "setup-node after the runtime capture" \
+  "does not give a package-less verification hook the configured Node $package_less_node_version (#1906)" \
+  install_node_after_runtime_capture
+install_other_node_version() {
+  mutate_package_less_release "$1" \
+    "          node-version: \${{ '$package_less_node_version' }}" \
+    "          node-version: \${{ '20' }}"
+}
+expect_package_less_rejection "setup-node installing another Node version" \
+  "does not give a package-less verification hook the configured Node $package_less_node_version (#1906)" \
+  install_other_node_version
+# A condition the check cannot evaluate is refused, never read as true.
+gate_setup_node_on_package_glob() {
+  set_setup_node_condition "$1" "steps.release-version.outputs.selected == 'true' && hashFiles('**/package.json') != ''"
+}
+expect_package_less_rejection "setup-node gated on a glob" \
+  "has a verify step condition the package-less check cannot evaluate" \
+  gate_setup_node_on_package_glob
 if generator_only_row; then
   [ "$fails" -eq 0 ] || exit 1
   echo "All generator contract assertions passed."
@@ -7121,7 +7161,7 @@ else
 fi
 # The check is exercised directly in the generator-only block; this shows the
 # emitted suite actually runs it on a discovered release caller (#1906).
-if grep -qxF 'ok - .github/workflows/release.yml gives a package-less verification hook the configured Node 24 (#1906)' "$ADOPTER_LOG"; then
+if grep -qE '^ok - .*/\.github/workflows/release\.yml gives a package-less verification hook the configured Node 24 \(#1906\)$' "$ADOPTER_LOG"; then
   pass "emitted suite runs the package-less Node verification check on the release caller"
 else
   fail "emitted suite never ran the package-less Node verification check on the release caller (#1906)"
