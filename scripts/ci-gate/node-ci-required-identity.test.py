@@ -124,7 +124,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             source_error = StringIO()
             with redirect_stderr(source_error), self.assertRaises(SystemExit):
                 generator.main(["--check"])
-            self.assertIn("source workflow exceeds 480000 UTF-8 bytes", source_error.getvalue())
+            self.assertIn("source workflow exceeds 490000 UTF-8 bytes", source_error.getvalue())
             self.assertEqual(sentinel, target.read_bytes())
             self.assertEqual(before_source_guard, target.stat().st_mtime_ns)
 
@@ -134,7 +134,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             output_error = StringIO()
             with redirect_stderr(output_error), self.assertRaises(SystemExit):
                 generator.main(["--check"])
-            self.assertIn("generated protected workflow exceeds 480000 UTF-8 bytes", output_error.getvalue())
+            self.assertIn("generated protected workflow exceeds 490000 UTF-8 bytes", output_error.getvalue())
             self.assertEqual(sentinel, target.read_bytes())
             self.assertEqual(before_output_guard, target.stat().st_mtime_ns)
 

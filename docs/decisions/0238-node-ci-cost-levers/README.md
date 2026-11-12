@@ -527,3 +527,19 @@ reused until it is reaped, so the peek and the targeted reap name the same proce
 Recording a stolen status back onto the `Popen` object was rejected: it depends on
 every reaping path remembering to forward the status, and a single omission fails open.
 `reaped` in the terminal record still counts the candidate once plus each adopted child.
+
+## Amendment 2026-11-12 — protected generator byte tripwire
+
+- **Issue:** [Verjson/.github#1875](https://github.com/Verjson/.github/issues/1875); pull request [Verjson/.github#1938](https://github.com/Verjson/.github/pull/1938).
+
+`scripts/gen-node-ci-protected.py` bounds the canonical `node-ci.yml` source and its
+generated protected twin. The 2026-10-25 build-once change set both bounds to 480,000
+bytes, about 4.5 KiB above the largest file reviewed at the time (the then 475,474-byte
+protected workflow); no platform limit was derived. Merging the Playwright profile with
+the Prisma engine staging and supervisor changes made the canonical source 483,271 bytes.
+Both bounds rise to 490,000 bytes, restoring a similar margin above the 483,271-byte
+source and the 467,757-byte protected output. The bounds remain growth tripwires:
+crossing one is a review point, not a routine bump. This raise is a labeled stopgap.
+The durable remedy is to move inline candidate-execution heredocs from the canonical
+workflow into the pinned trusted helper modules, so that per-feature workflow glue stays
+small and the files regain headroom.
