@@ -502,13 +502,15 @@ sandbox.
 script-plan semantics above. The live evidence covers a narrower path. An external adopter
 run on 2026-10-26 passed `e2e-full / build-test` after a Playwright browser-cache miss
 ([run 40380731114](https://github.com/terptechpub/self-publish-ai-app/actions/runs/40380731114)).
-Its `test:ci:e2e-full` script ran `playwright install chromium` itself, under the default
-egress of a `test:*` name, so `browser-cache: true` saved what that one script
-downloaded. That run listed no browser package in `secretless-skip-install-scripts`
+Its `test:ci:e2e-full` script ran `playwright install chromium` itself, and the run
+called the source reusable `node-ci.yml`, which keeps the runner's network policy, so no
+script-plan network isolation was in force; `browser-cache: true` saved what that one
+script downloaded. That run listed no browser package in `secretless-skip-install-scripts`
 and had no separate provisioning entry. The parts specific to this route are
 still unproven: skipping a browser package's install script, provisioning in an
-earlier plan entry that sets `requiresServices: true`, and the browsers surviving to
-a later script through the cache directory. Treat the route as experimental until
+earlier plan entry that sets `requiresServices: true`, the browsers surviving to
+a later script through the cache directory, and network isolation under the generated
+protected workflow. Treat the route as experimental until
 a run exercises it. No route guarantees CDN availability, so transient DNS
 failures such as `EAI_AGAIN` can still fail a cold browser install.
 
