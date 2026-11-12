@@ -166,8 +166,9 @@ readonly ARM_WORKFLOW_PATH=.github/workflows/gate-rearm.yml
 # every refusal, so Gates A and C set aside exactly that context from exactly this App:
 # the AI review App, whose key the producer mints from. A same-named check run from any
 # other App (GitHub Actions included) and a same-named commit status, which carries no
-# App, stay in the inventory. scripts/ci-gate/merge-admission.sh binds the same id, and
-# scripts/assert-mergeable-head.merge-admission.test.sh fails when the two disagree.
+# App, stay in the inventory. scripts/ci-gate/merge-admission.sh and the conformance
+# policy's merge_admission_binding bind the same id, and
+# scripts/assert-mergeable-head.merge-admission.test.sh fails when any of the three disagree.
 readonly MERGE_ADMISSION_CONTEXT=merge-admission
 readonly MERGE_ADMISSION_APP_ID=4528902
 # Declared concurrency families (ADR 0226, amendment 2026-10-15). A family is one
