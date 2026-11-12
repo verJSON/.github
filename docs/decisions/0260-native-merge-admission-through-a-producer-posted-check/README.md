@@ -167,6 +167,16 @@ head including drafts (the success would stand for a draft the moment it is mark
 ready), drops a head at which any pull request is unevaluable, and with an event head
 plans only that head.
 
+**Drafts at a shared head cost liveness, by design.** Including drafts fails closed: an
+unreviewed draft that shares a head with a ready pull request, such as a backport or a
+duplicate opened from the same commit, is refused by its own assertion, so it holds the
+shared `merge-admission` check in progress and blocks the ready pull request until the
+draft is closed or reviewed. Excluding drafts would instead leave a SUCCESS on the head
+that stands for the draft the moment it is marked ready, admitted without any evaluation
+for the window until the `ready_for_review` trigger's superseding check exists, and
+indefinitely during an outage of the producer. The blocked ready pull request is the
+visible, operator-recoverable failure; the unevaluated draft merge is not.
+
 **Serialization.** The evaluate job's concurrency group is per repository and head, with
 `cancel-in-progress: false`. GitHub keeps one pending run per group, so a pending
 evaluation can be replaced only by a newer one of the same head, which reads later state
@@ -217,21 +227,24 @@ checkout failure before the evaluation starts fails visibly too, and so does an 
 job that exceeds its 15-minute timeout. The evaluate job's concurrency group also
 cancels pending legs: GitHub keeps one pending job per group and cancels an older
 pending one when a newer one queues, so a burst of triggers on one head concludes the
-displaced legs as cancelled. Precondition (a) is therefore narrowed, not met as written:
-every one of these runs concludes red or cancelled on the default-branch commit, never
-on a pull-request head, so none enters a head's inventory or blocks a merge, but each
-adds noise to the default branch's CI signal. An evaluation they stop leaves the head's
-earlier `merge-admission` state as it was, which is the stale-SUCCESS window of
-precondition (b). One canonical environment admission is kept rather than a third
-behaviorally matched copy.
+displaced legs as cancelled. A sweep that plans more than 256 heads exceeds GitHub's
+matrix limit, so the evaluate job fails to start and the run concludes red; no cap is
+applied, because evaluating only some heads would leave the rest on their earlier result
+silently, while the red run is visible. Precondition (a) is therefore narrowed, not met
+as written: every one of these runs concludes red or cancelled on the default-branch
+commit, never on a pull-request head, so none enters a head's inventory or blocks a
+merge, but each adds noise to the default branch's CI signal. An evaluation they stop
+leaves the head's earlier `merge-admission` state as it was, which is the stale-SUCCESS
+window of precondition (b). One canonical environment admission is kept rather than a
+third behaviorally matched copy.
 
 ## Not performed by this change (rollout gates)
 
 - The owner's explicit acceptance of the stale-SUCCESS window (precondition (b)), which
   gates enabling the ruleset (item 7, second step), not shipping this unrequired producer.
 - ARB or owner acknowledgment of the narrowed precondition (a): configuration faults,
-  timeouts, and concurrency cancellations of pending evaluate legs conclude red or
-  cancelled on the default-branch commit.
+  timeouts, concurrency cancellations of pending evaluate legs, and a sweep over more than
+  256 heads conclude red or cancelled on the default-branch commit.
 - An alert, before enrollment, on every producer run that does not conclude success and on
   every evaluation that annotates `was not evaluated` (which precondition (a) lets
   succeed), so the unbounded outage window below is seen rather than silent.
