@@ -872,18 +872,10 @@ def _publish_safe_key_snapshot(root: Path) -> Path:
         key_path = Path(SAFE_KEY)
         if key_path.resolve(strict=True) != key_path:
             raise PlaywrightProfileError("Ubuntu archive signing key path is not canonical")
-        for parent in reversed(key_path.parents):
-            parent_metadata = os.lstat(parent)
-            if (
-                not stat.S_ISDIR(parent_metadata.st_mode)
-                or parent_metadata.st_uid != 0
-                or parent_metadata.st_mode & 0o022
-            ):
-                raise PlaywrightProfileError(
-                    "Ubuntu archive signing key parent is unsafe "
-                    f"({parent}, uid={parent_metadata.st_uid}, "
-                    f"mode={stat.S_IMODE(parent_metadata.st_mode):04o})"
-                )
+        # Parent directories are deliberately not mode-checked: GitHub-hosted
+        # Ubuntu 24.04 ships /usr/share as 0777. Whatever a writable parent can
+        # substitute is still read through one no-follow descriptor whose
+        # identity is re-checked and must match SAFE_KEY_SHA256 byte-for-byte.
         before = os.lstat(SAFE_KEY)
         if (
             not stat.S_ISREG(before.st_mode)

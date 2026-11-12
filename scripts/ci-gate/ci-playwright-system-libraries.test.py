@@ -1717,25 +1717,51 @@ class AuthenticatedKeySnapshotTests(unittest.TestCase):
                 os.close(writer)
                 self._restore_test_directories(root)
 
-    def test_non_root_or_writable_source_parents_are_rejected(self) -> None:
+    def test_world_writable_parent_admits_the_authentic_pinned_key(self) -> None:
         payload = b"reviewed archive key bytes"
         with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
             root = Path(temporary_directory)
             root.chmod(0o711)
             source = root / "host-key.gpg"
             source.write_bytes(payload)
-            writable_parent = source.parent.stat().st_mode | stat.S_IWGRP
-            overrides = {source.parent: (0, writable_parent)}
+            hosted_parent_mode = stat.S_IFDIR | 0o777
+            overrides = {source.parent: (0, hosted_parent_mode)}
+            try:
+                with self._root_owned_source_metadata(source, overrides=overrides), patch.object(
+                    playwright_profile, "SAFE_KEY", str(source)
+                ), patch.object(
+                    playwright_profile, "SAFE_KEY_SHA256", hashlib.sha256(payload).hexdigest()
+                ), patch.object(playwright_profile.os, "chown"):
+                    snapshot = playwright_profile._publish_safe_key_snapshot(root)
+                self.assertEqual(snapshot.read_bytes(), payload)
+            finally:
+                self._restore_test_directories(root)
+
+    def test_world_writable_parent_cannot_substitute_unpinned_key_bytes(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            source.write_bytes(b"substituted archive key bytes")
+            overrides = {source.parent: (0, stat.S_IFDIR | 0o777)}
             with self._root_owned_source_metadata(source, overrides=overrides), patch.object(
                 playwright_profile, "SAFE_KEY", str(source)
-            ):
-                with self.assertRaises(playwright_profile.PlaywrightProfileError) as raised:
+            ), patch.object(
+                playwright_profile, "SAFE_KEY_SHA256", hashlib.sha256(b"reviewed archive key bytes").hexdigest()
+            ), patch.object(playwright_profile.os, "chown"):
+                with self.assertRaisesRegex(
+                    playwright_profile.PlaywrightProfileError, "^Ubuntu archive signing key digest mismatch$"
+                ):
                     playwright_profile._publish_safe_key_snapshot(root)
-                self.assertEqual(
-                    str(raised.exception),
-                    f"Ubuntu archive signing key parent is unsafe ({source.parent}, uid=0, mode=0731)",
-                )
+            self.assertFalse((root / "keyrings").exists())
 
+    def test_non_root_source_key_is_rejected(self) -> None:
+        payload = b"reviewed archive key bytes"
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            source.write_bytes(payload)
             non_root_source = {source: (os.geteuid() + 1, source.stat().st_mode)}
             with self._root_owned_source_metadata(source, overrides=non_root_source), patch.object(
                 playwright_profile, "SAFE_KEY", str(source)
