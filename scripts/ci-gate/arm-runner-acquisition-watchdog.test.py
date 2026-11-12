@@ -351,11 +351,11 @@ def healthy_runs(prefix=""):
     ]
 
 
-def ghost_key_validation(prefix=""):
+def ghost_key_validation(prefix="", created_offset=0):
     n = lambda name: f"{prefix}{name}"
     return [snapshot(job(n("event-policy"), "completed", labels=("ubuntu-24.04",)),
                      job(n("app-key-policy / validate"), "completed", 5, ("ubuntu-24.04",)),
-                     job(n("app-key-policy / validate-ai-review-key"), "queued", 0))]
+                     job(n("app-key-policy / validate-ai-review-key"), "queued", created_offset))]
 
 
 def test_admitted_repository_whose_jobs_acquire_runners_exits_without_cancelling():
@@ -384,13 +384,15 @@ def test_unreachable_lane_cancels_then_force_cancels_and_names_the_stalled_job()
 
 
 def test_a_caller_outside_utc_sees_the_stall_deadline_a_hosted_runner_sees():
-    # Hosted runners run in UTC; jq 1.6's fromdateiso8601 honors TZ, so a caller's
-    # daylight-saving zone would move every job's age by its UTC offset (#1999).
-    caller = {**os.environ, "TZ": "America/New_York"}
-    completed, calls, elapsed = run_watchdog(ghost_key_validation(), caller_environment=caller)
-    assert completed.returncode != 0, completed.stdout
-    assert cancellations(calls) == ["cancel", "force-cancel"], calls
-    assert limit_seconds() <= elapsed <= limit_seconds() + 300, elapsed
+    # Hosted runners run in UTC; jq 1.6's fromdateiso8601 adds the process zone's
+    # daylight-saving offset, so a caller's zone would delay the deadline (#1958, #1999).
+    at_limit = ghost_key_validation(created_offset=-limit_seconds())
+    for zone in ("UTC", "America/New_York"):
+        caller = {**os.environ, "TZ": zone}
+        completed, calls, _ = run_watchdog(at_limit, caller_environment=caller)
+        assert completed.returncode != 0, (zone, completed.stdout)
+        assert posts(calls)[0][0] == START, (zone, calls)
+        assert cancellations(calls) == ["cancel", "force-cancel"], (zone, calls)
 
 
 RUNBOOK = "https://github.com/verJSON/.github/blob/main/docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen"
@@ -584,30 +586,6 @@ def test_a_queue_shorter_than_the_limit_is_tolerated():
     assert completed.returncode == 0, completed.stderr
     assert cancellations(calls) == [], calls
     assert elapsed < limit, elapsed
-
-
-def test_timezone_does_not_change_the_acquisition_deadline():
-    limit = limit_seconds()
-
-    def queued(created_offset):
-        return snapshot(
-            job("event-policy", "completed", labels=("ubuntu-24.04",)),
-            job("app-key-policy / validate", "completed", 5, ("ubuntu-24.04",)),
-            job("app-key-policy / validate-ai-review-key", "queued", created_offset),
-        )
-
-    for timezone in ("UTC", "America/New_York"):
-        caller = {**os.environ, "TZ": timezone}
-        before, calls, elapsed = run_watchdog(
-            [queued(1 - limit), healthy_runs()[-1]], caller_environment=caller
-        )
-        assert before.returncode == 0, (timezone, before.stderr, calls)
-        assert cancellations(calls) == [], (timezone, calls)
-        assert elapsed == env_seconds("POLL_INTERVAL_SECONDS"), (timezone, elapsed)
-        at_limit, calls, _ = run_watchdog([queued(-limit)], caller_environment=caller)
-        assert at_limit.returncode != 0, (timezone, at_limit.stderr)
-        assert posts(calls)[0][0] == START, (timezone, calls)
-        assert cancellations(calls) == ["cancel", "force-cancel"], (timezone, calls)
 
 
 def test_environment_approval_wait_is_not_a_runner_stall():
