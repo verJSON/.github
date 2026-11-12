@@ -1061,6 +1061,27 @@ release_download_artifact='actions/download-artifact@9000827ccba6bdab643e8b6fd33
 release_cache_save='actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 release_cache_restore='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 
+release_head_binding_step=$(cat <<'EOF'
+      - name: Bind a proposer dispatch to its exact derived head
+        env:
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+          SELECTOR_DIGEST: ${{ inputs.selector_digest }}
+        run: |
+          if [ -z "$EXPECTED_HEAD" ] && [ -z "$SELECTOR_DIGEST" ]; then
+            echo "Manual dispatch has no proposer receipt to bind."
+          elif [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]] ||
+            [[ ! "$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}$ ]]; then
+            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
+            exit 1
+          elif [ "$GITHUB_SHA" != "$EXPECTED_HEAD" ]; then
+            echo "::error::The default branch advanced from derived head $EXPECTED_HEAD to dispatch head $GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
+            exit 1
+          else
+            echo "Dispatch is bound to derived head $EXPECTED_HEAD and selector $SELECTOR_DIGEST."
+          fi
+EOF
+)
+
 release_plan_step=$(cat <<'EOF'
       - name: Resolve the release selection and version
         id: release-version
@@ -1348,23 +1369,7 @@ jobs:
             exit 1
           fi
           echo "Dispatched from \$DEFAULT_BRANCH; verifying its head."
-      - name: Bind a proposer dispatch to its exact derived head
-        env:
-          EXPECTED_HEAD: \${{ inputs.expected_head }}
-          SELECTOR_DIGEST: \${{ inputs.selector_digest }}
-        run: |
-          if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
-            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
-            exit 1
-          elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head \$EXPECTED_HEAD to dispatch head \$GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head \$EXPECTED_HEAD and selector \$SELECTOR_DIGEST."
-          fi
+${release_head_binding_step}
       - name: Check out the tree that will be released
         uses: ${release_checkout}
         with:
@@ -1984,23 +1989,7 @@ jobs:
             exit 1
           fi
           echo "Dispatched from \$DEFAULT_BRANCH; verifying its head."
-      - name: Bind a proposer dispatch to its exact derived head
-        env:
-          EXPECTED_HEAD: \${{ inputs.expected_head }}
-          SELECTOR_DIGEST: \${{ inputs.selector_digest }}
-        run: |
-          if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
-            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
-            exit 1
-          elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head \$EXPECTED_HEAD to dispatch head \$GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head \$EXPECTED_HEAD and selector \$SELECTOR_DIGEST."
-          fi
+${release_head_binding_step}
       - name: Check out the tree that will be released
         uses: ${release_checkout}
         with:
@@ -2415,23 +2404,7 @@ jobs:
             exit 1
           fi
           echo "Dispatched from \$DEFAULT_BRANCH; verifying its head."
-      - name: Bind a proposer dispatch to its exact derived head
-        env:
-          EXPECTED_HEAD: \${{ inputs.expected_head }}
-          SELECTOR_DIGEST: \${{ inputs.selector_digest }}
-        run: |
-          if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
-            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
-            exit 1
-          elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head \$EXPECTED_HEAD to dispatch head \$GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head \$EXPECTED_HEAD and selector \$SELECTOR_DIGEST."
-          fi
+${release_head_binding_step}
       - name: Check out the tree that will be released
         uses: ${release_checkout}
         with:
