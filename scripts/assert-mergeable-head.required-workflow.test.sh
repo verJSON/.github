@@ -237,7 +237,8 @@ expect "a local run reporting a job beyond guard and rearm is still the newest f
 # A rearm that ran reports its own jobs, not a SKIPPED `rearm`; a rearm reported as
 # anything but SKIPPED ran or failed. Either way the local run took part.
 for shape in "$(check_run 51 'guard' success 705),$(check_run 52 'rearm / event-policy' success 705),$(check_run 53 'rearm / arm' skipped 705)" \
-             "$(check_run 51 'guard' success 705),$(check_run 52 'rearm' failure 705)"; do
+             "$(check_run 51 'guard' success 705),$(check_run 52 'rearm' failure 705)" \
+             "$(check_run 51 'guard' success 705),$(check_run 52 'rearm' neutral 705)"; do
   f1r_env "$shape"; run
   expect "a local run whose rearm ran ($(jq -r '[.[] | "\(.name)=\(.conclusion)"] | join(", ")' <<<"[$shape]")) is still the newest family run, so Gate C refuses" 5 \
     "rearm / event-policy=CANCELLED"

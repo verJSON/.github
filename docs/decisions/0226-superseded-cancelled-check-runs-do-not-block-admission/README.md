@@ -520,6 +520,9 @@ reports only `SUCCESS`. With no such run, nothing is set aside. The guard-yielde
 run's own checks stay in the inventory and are judged as before (`SUCCESS` and
 `SKIPPED` are passing conclusions already). Gate W reads only the required
 workflow's own runs and is untouched, and Gate B still reads the raw inventory.
+Gate A reads the same set-aside inventory, as the 2026-10-15 amendment decided for
+Gates A and C; a required context set aside this way is then absent or must carry a
+`SUCCESS` of its own, so Gate A still refuses it.
 
 **What the exclusion is not.** It only removes displacer candidates. It is never
 arming evidence and never vouches for any check: Gate W alone decides whether the
@@ -582,7 +585,7 @@ section headed "F-1R: a guard-yielded local run is no family participant":
 | the yielding run created in the required run's second | exit `0`, `true` |
 | guard `FAILURE` / `CANCELLED` | exit `5`, `rearm / event-policy=CANCELLED` |
 | an extra `audit` check | exit `5`, same reason |
-| rearm ran (`rearm / event-policy`, `rearm / arm` skipped); `rearm` `FAILURE` | exit `5`, same reason |
+| rearm ran (`rearm / event-policy`, `rearm / arm` skipped); `rearm` `FAILURE`; `rearm` `NEUTRAL` | exit `5`, same reason |
 | `guard` `SUCCESS` plus a skipped `rearm / arm` (two checks, calling job not among them) | exit `5`, same reason |
 | no check in the suite; a skipped `rearm` alone | exit `5`, same reason |
 | yield-shaped run that concluded `failure`, in the required run's second | exit `5`, same reason |
@@ -611,6 +614,7 @@ Each condition was mutated out and a suite failed for its asserted reason:
 | drop the guard `SUCCESS` condition | guard `FAILURE`; guard `CANCELLED` |
 | drop the two-check count | extra `audit` check |
 | drop the calling job `SKIPPED` condition | `rearm` `FAILURE` |
+| accept any passing conclusion for the calling job instead of `SKIPPED` | `rearm` `NEUTRAL` |
 | match the calling job by any `SKIPPED` check (drop its name) | `guard` `SUCCESS` plus a skipped `rearm / arm` |
 | match the calling job by name prefix, keeping the two-check count | `guard` `SUCCESS` plus a skipped `rearm / arm` |
 | drop the run-level `success` condition | yield-shaped run that concluded `failure` |
