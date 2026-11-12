@@ -1774,10 +1774,11 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stderr)
 
     def test_merge_admission_bound_to_the_ai_review_app_is_conformant(self):
-        detail = ruleset(1, rules=[required_checks_rule(
+        detail = merge_admission_ruleset(
+            1,
             {"context": "shell-tests", "integration_id": 15368},
             {"context": "merge-admission", "integration_id": 4528902},
-        )])
+        )
 
         result, _ = self.run_audit([[{"id": 1}]], {1: detail})
 
@@ -1919,6 +1920,27 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             result.stderr,
         )
         self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_merge_admission_required_under_another_name_yields_no_receipt(self):
+        # The binding check accepts merge-admission on 4528902 in any ruleset, so an
+        # active ruleset under another name, or another case, with a reviewed contract
+        # for its bypass actors, would otherwise enforce the context while the receipt
+        # reports the ruleset absent (ARB-2031-2026-11-12 C5).
+        bound = {"context": "merge-admission", "integration_id": 4528902}
+        for name in ("merge-admission-gate", "Merge-Admission-Required"):
+            with self.subTest(name=name):
+                detail = merge_admission_ruleset(41, bound, enforcement="active")
+                detail["name"] = name
+
+                result, _ = self.run_audit([[{"id": 41}]], {41: detail})
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(
+                    f"ERROR: {name} (41): requires the merge-admission context but is not "
+                    "the policy's merge-admission ruleset merge-admission-required",
+                    result.stderr,
+                )
+                self.assertNotIn("merge-admission-receipt=", result.stdout)
 
     def test_app_id_variable_must_be_a_variable_name_before_it_reaches_an_api_path(self):
         for name in ("AI_REVIEW_APP_ID/../../rulesets", "ai_review_app_id", "AI REVIEW"):

@@ -782,10 +782,18 @@ def merge_admission_receipt(merge_admission: dict, rulesets: list[dict], app_id_
         f"context={context} app_id={app_id} "
         f"app_id_variable={merge_admission['app_id_variable']} ruleset={name}"
     )
+    # producer_binding_findings accepts the context in any ruleset, so one under another
+    # name would enforce it while this receipt reported the named ruleset absent.
+    findings = [
+        f"{ruleset['name']} ({ruleset['id']}): requires the {context} context but is not "
+        f"the policy's merge-admission ruleset {name}"
+        for ruleset in rulesets
+        if ruleset["name"] != name and requires_context(ruleset, context)
+    ]
     named = [ruleset for ruleset in rulesets if ruleset["name"] == name]
     if len(named) > 1:
-        return [f"merge-admission ruleset {name}: {len(named)} live rulesets share the name"], None
-    findings = []
+        findings.append(f"merge-admission ruleset {name}: {len(named)} live rulesets share the name")
+        return findings, None
     if named:
         [live] = named
         label = f"merge-admission ruleset {name} ({live['id']})"

@@ -21,9 +21,11 @@ The same audit now issues the two C10 receipts. Before the ruleset exists it fai
 the organization variable `AI_REVIEW_APP_ID` names the bound App and prints a
 `pre-creation` receipt that reports the ruleset as absent; once the ruleset exists, even
 disabled, it also requires the ruleset to require `merge-admission` bound to that App and
-prints a `full` receipt naming the ruleset id and enforcement. The pre-creation receipt
-gates creation; the full receipt gates activation and each enrollment edit. The variable's
-value is compared and never printed.
+prints a `full` receipt naming the ruleset id and enforcement. Any ruleset under another
+name, a case variant included, that requires `merge-admission` withholds both receipts,
+so neither can report the ruleset absent while another enforces the context. The
+pre-creation receipt gates creation; the full receipt gates activation and each enrollment
+edit. The variable's value is compared and never printed.
 
 `scripts/assert-mergeable-head.merge-admission.test.sh` and
 `scripts/ci-gate/merge-admission.test.sh` (merge-gate) now each fail when

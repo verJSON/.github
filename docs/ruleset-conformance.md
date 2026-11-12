@@ -56,6 +56,11 @@ The same run also reads the organization variable the binding names
   `merge-admission-receipt=full gates=activation,enrollment-edit … ruleset_id=<id> enforcement=<state>`.
   Two live rulesets with that name print no receipt.
 
+In either phase, a ruleset under any other name, a case variant included, that
+requires `merge-admission` fails the run and prints no receipt: the binding check
+accepts the context in any ruleset, so otherwise the receipt could report the named
+ruleset absent while another one enforces the context.
+
 A receipt is printed only on exit `0`. The pre-creation receipt gates creating the
 ruleset; the full receipt gates activating it and each enrollment edit. Neither is
 reusable across a later change: run the audit again immediately before each step.

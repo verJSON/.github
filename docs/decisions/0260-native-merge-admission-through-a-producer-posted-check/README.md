@@ -545,7 +545,10 @@ differs from it.
   exists, even disabled, it also fails unless the ruleset requires `merge-admission` bound to
   that id (unbound or 15368 fails), and prints
   `merge-admission-receipt=full gates=activation,enrollment-edit … ruleset_id=<id> enforcement=<state>`.
-  Two live rulesets with that name print no receipt. A receipt prints only on exit 0, so any
+  Two live rulesets with that name print no receipt, and in either phase neither does a
+  ruleset under any other name, a case variant included, that requires `merge-admission`:
+  the binding check accepts the context in any ruleset, so the receipt could otherwise
+  report the named ruleset absent while another enforces it. A receipt prints only on exit 0, so any
   other conformance finding withholds it. **The pre-creation receipt gates creation; the full
   receipt gates activation and each enrollment edit.** The scheduled
   `org-ruleset-conformance.yml` run repeats the check daily with its unchanged no-argument
