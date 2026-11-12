@@ -102,7 +102,12 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(checkout["path"], ".gate-trust")
         self.assertEqual(
             set(checkout["sparse-checkout"].split()),
-            {"scripts/assert-mergeable-head.sh", "scripts/ci-gate/independent-review-receipt.sh", "scripts/ci-gate/merge-admission.sh"},
+            {
+                "scripts/assert-mergeable-head.sh",
+                "scripts/ci-gate/independent-review-receipt.sh",
+                "scripts/ci-gate/merge-admission.sh",
+                "scripts/ci-gate/merge-admission-plan.sh",
+            },
         )
         self.assertIs(checkout["persist-credentials"], False)
 
@@ -116,15 +121,24 @@ class ProducerTests(unittest.TestCase):
         evaluate = self.step("evaluate", "Evaluate the head and post merge-admission")
         self.assertEqual(evaluate["env"]["APP_TOKEN"], "${{ steps.app-token.outputs.token }}")
         self.assertEqual(evaluate["env"]["GH_TOKEN"], "${{ github.token }}")
-        self.assertEqual(evaluate["env"]["PR_NUMBER"], "${{ matrix.pr }}")
         self.assertEqual(evaluate["env"]["HEAD_SHA"], "${{ matrix.head_sha }}")
-        self.assertEqual(
-            evaluate["run"].strip(),
-            'bash .gate-trust/scripts/ci-gate/merge-admission.sh "$REPOSITORY" "$PR_NUMBER" "$HEAD_SHA"',
-        )
         self.assertNotIn("continue-on-error", evaluate)
         # The job token reads; only the App writes the check.
         self.assertNotIn("write", self.evaluate["permissions"].values())
+
+    def test_one_evaluation_answers_for_every_pull_request_at_its_head(self):
+        # A check run belongs to the head, not to a pull request (ADR 0260), so the matrix
+        # leg is one head and hands the producer every pull request the plan found there.
+        evaluate = self.step("evaluate", "Evaluate the head and post merge-admission")
+        self.assertEqual(evaluate["env"]["PR_NUMBERS"], "${{ join(matrix.prs, ' ') }}")
+        self.assertEqual(
+            evaluate["run"].strip().splitlines(),
+            [
+                'read -ra prs <<<"$PR_NUMBERS"',
+                'bash .gate-trust/scripts/ci-gate/merge-admission.sh "$REPOSITORY" "$HEAD_SHA" "${prs[@]}"',
+            ],
+        )
+        self.assertNotIn("PR_NUMBER", evaluate["env"])
 
     def test_the_key_is_admitted_only_through_the_main_only_environment_policy(self):
         policy = self.doc["jobs"]["app-key-policy"]

@@ -134,29 +134,40 @@ AI review App, `ai-review-authorization`, read from the organization variable an
 success, including earlier in-progress ones, which every refusal leaves behind and which
 would otherwise block every later evaluation of the same head. The producer never
 concludes its check any other way, so a completed non-success from that App is not its
-output and stays a Gate C failure. Gate A skips the required context only where the ruleset binds it to
-that App. A same-named check run from any other App and a same-named commit status stay in
-the inventory. Gate B keeps reading the raw inventory. The assertion also takes an
+output and stays a Gate C failure. Gate A skips the required context only where the ruleset
+binds it to that App. A same-named check run from any other App and a same-named commit
+status stay in the inventory. Gate B keeps reading the raw inventory. The assertion also takes an
 optional third argument, the expected head, and exits 1 when the pull request's head is
 another SHA, so an evaluation never answers for a head other than the one its check run
 belongs to.
 
-**Evaluation.** `scripts/ci-gate/merge-admission.sh` creates the new check run in progress
-with the App token, continues only when GitHub reports the bound App as its producer and a
-numeric id, runs the assertion beside it with the job's read-only token, and completes
-the check run as success only on exit 0 with the exact output `true`. Every other outcome
-leaves it in progress and exits 0. The evaluate job checks out `Verjson/.github` at
+**Evaluation is per head, not per pull request.** A check run attaches to a commit, so a
+`merge-admission` success on a head stands for every open pull request at that head,
+whatever its base or branch. Evaluating pull requests one at a time would let the last
+evaluation of a shared head govern all of them: a pull request without a receipt could
+merge on another's success. `scripts/ci-gate/merge-admission.sh` therefore takes one head
+and every open pull request at it. It creates the new check run in progress with the App
+token, continues only when GitHub reports the bound App as its producer and a numeric id,
+runs the assertion beside it with the job's read-only token (the App token is removed from
+the assertion's environment) for each of those pull requests, re-lists the open pull
+requests at the head immediately before completing, and completes the check run as success
+only when every assertion exited 0 with the exact output `true` and that set is unchanged.
+Every other outcome, including one refusal among several pull requests or a set that
+changed or could not be read again, leaves it in progress and exits 0. The evaluate job checks out `Verjson/.github` at
 `job.workflow_sha`, the executing producer's own SHA, which the consumer pins in its
 `uses:` reference. The App token is minted with `permission-checks: write` only and the
-mint step tolerates failure. `scripts/ci-gate/merge-admission-plan.sh` lists the open
-pull requests that are not drafts (a draft cannot merge, and marking it ready is a
-trigger), or only those at the head an event names.
+mint step tolerates failure. `scripts/ci-gate/merge-admission-plan.sh` groups the open
+pull requests by head: it plans each head that has at least one pull request that is not a
+draft (a draft cannot merge, and marking it ready is a trigger), lists every open pull
+request at that head including drafts (the success would stand for a draft the moment it is
+marked ready), drops a head at which any pull request is unevaluable, and with an event
+head plans only that head.
 
 **Serialization.** The evaluate job's concurrency group is per repository and head, with
 `cancel-in-progress: false`. GitHub keeps one pending run per group, so a pending
 evaluation can be replaced only by a newer one of the same head, which reads later state
-and creates a newer check run. The sweep's matrix legs share the same groups as the
-event-driven evaluations.
+and creates a newer check run. The sweep's matrix legs, one per head, share the same groups
+as the event-driven evaluations.
 
 **Triggers (item 5).** This repository's caller (`merge-admission-caller.yml`) lists
 every workflow that reports a check on a pull-request head here, plus the trigger, under
@@ -216,7 +227,8 @@ kept rather than a third behaviorally matched copy.
   default) because the ADR 0235 checker finds that they read pull-request data. The
   sweep therefore costs, every 15 minutes, one planning job, the canonical environment
   admission's two jobs (one of them fixed on a GitHub-hosted runner), and one evaluation
-  job and environment deployment record per open non-draft pull request. On a private
+  job and environment deployment record per distinct head of the open non-draft pull
+  requests. On a private
   repository without an ephemeral self-hosted lane those are billed hosted minutes; the
   rollout must budget them before enrolling private repositories.
 - Rollback before enablement is deleting the caller and trigger; after enablement it is
@@ -225,20 +237,23 @@ kept rather than a third behaviorally matched copy.
 ## Verification
 
 - `scripts/assert-mergeable-head.merge-admission.test.sh` (merge-gate): Gate C sets aside
-  the bound App's in-progress check but keeps its completed failure; Gate A sets aside the context the ruleset binds to
-  that App; a same-named GitHub Actions check stays a Gate C failure; a context bound to
+  the bound App's in-progress check but keeps its completed failure; Gate A sets aside the
+  context the ruleset binds to that App; a same-named GitHub Actions check stays a Gate C failure; a context bound to
   GitHub Actions stays required; a mismatched expected head exits 1, a matching one is
   evaluated, and a malformed one is a usage error.
 - `scripts/ci-gate/merge-admission.test.sh` (merge-gate): the in-progress check is created
   first with the App token and before the assertion; exit 0 with `true` completes that
   check run as success; exit 0 with any other output, exit 6, exit 5, and exit 1 leave it
-  in progress while the producer exits 0; a check from another App, a non-numeric id, a
+  in progress while the producer exits 0; a refusal for any one pull request at the head,
+  or a pull-request set at the head that changed before completion, leaves it in progress;
+  the assertion runs without the App token; a check from another App, a non-numeric id, a
   failed creation, or no App token stops before the assertion; a failed completion is
   named; malformed arguments are refused before any call; the producer and the
   assertion bind the same App id.
 - `scripts/ci-gate/merge-admission-plan.test.sh` (merge-gate) and
   `scripts/ci-gate/merge-admission-workflow.test.py` (merge-gate) pin the plan and the
-  workflow contract: default-branch-only triggers, a sweep at most 15 minutes apart, the
+  workflow contract: one plan entry per head with every open pull request at it (drafts
+  included, a head with an unevaluable pull request dropped), default-branch-only triggers, a sweep at most 15 minutes apart, the
   trigger's events and its lack of credentials, per-head serialization without
   cancellation, the pinned canonical checkout, the App token's single permission, the
   read-only assertion token, the environment admission and its scheduled-run default

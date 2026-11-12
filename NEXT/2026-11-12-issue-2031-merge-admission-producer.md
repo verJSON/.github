@@ -13,20 +13,24 @@ same-named check from any other App, GitHub Actions included, a completed non-su
 from the AI review App, or a same-named commit status stays a failure. An optional third argument names the head the caller answers
 for; a pull request whose head moved exits 1 (ADR 0260, #1990, #2031).
 
-`scripts/ci-gate/merge-admission.sh` performs one producer evaluation: it creates a new
-`merge-admission` check run in progress on the exact head with the AI review App token,
-refuses to continue unless GitHub reports that App as its producer, runs the canonical
-assertion for that head with the read-only token, and completes the check as success
-only when the assertion exits 0 printing exactly `true`. Every refusal or error leaves
+`scripts/ci-gate/merge-admission.sh` performs one producer evaluation of one head: it
+creates a new `merge-admission` check run in progress on the exact head with the AI review
+App token, refuses to continue unless GitHub reports that App as its producer, runs the
+canonical assertion with the read-only token (never the App token) for every open pull
+request at that head, since a check run belongs to the commit and its success stands for
+each of them, re-lists the pull requests at the head, and completes the check as success
+only when every assertion exits 0 printing exactly `true` and that set is unchanged. Every refusal or error leaves
 the check in progress and exits 0 (ADR 0260 precondition (a)).
 
-`scripts/ci-gate/merge-admission-plan.sh` lists the heads one producer run evaluates:
-every open pull request that is not a draft, or only those at the head an event names.
+`scripts/ci-gate/merge-admission-plan.sh` lists the heads one producer run evaluates, each
+once with every open pull request at it: every head with an open pull request that is not
+a draft, or only the head an event names. A head with an unevaluable pull request at it is
+not planned.
 An unreadable listing plans nothing and a malformed entry is skipped, each named in a
 warning, so the producer's own job still succeeds.
 
 The reusable producer `.github/workflows/merge-admission.yml` runs these from this
-repository at its own executing SHA, one evaluation per head at a time without
+repository at its own executing SHA, one matrix leg and one evaluation per head at a time without
 cancellation, on the ephemeral lane, and only from `workflow_run`, `schedule`, or
 `workflow_dispatch`, so its runs stay outside every head's inventories. This repository
 adopts it through `merge-admission-caller.yml` (completion of each pull-request workflow

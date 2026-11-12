@@ -22,6 +22,7 @@ CHECK_ID=777001
 
 mkdir -p "$tmp/bin" "$tmp/tree/scripts/ci-gate"
 cp "$here/merge-admission.sh" "$tmp/tree/scripts/ci-gate/merge-admission.sh"
+cp "$here/merge-admission-plan.sh" "$tmp/tree/scripts/ci-gate/merge-admission-plan.sh"
 producer="$tmp/tree/scripts/ci-gate/merge-admission.sh"
 
 # The stub assertion records its arguments and the token it was handed, then answers.
@@ -29,6 +30,8 @@ cat >"$tmp/tree/scripts/assert-mergeable-head.sh" <<'ASSERT'
 #!/usr/bin/env bash
 printf 'assert %s token=%s\n' "$*" "${GH_TOKEN:-}" >>"$CALLS"
 printf '%s\n' "${APP_TOKEN-<unset>}" >"$ASSERT_APP_TOKEN"
+# ASSERT_REFUSE_PR names one pull request the assertion refuses; every other gets the default.
+if [ "$2" = "${ASSERT_REFUSE_PR:-}" ]; then printf 'false'; exit 0; fi
 printf '%s' "$ASSERT_STDOUT"
 exit "$ASSERT_RC"
 ASSERT
@@ -41,6 +44,9 @@ case "$*" in
   *"-X POST repos/"*"/check-runs "*)
     [ "${FAIL_CREATE:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
     printf '%s\n' "$CREATE_RESPONSE" ;;
+  *"repos/"*"/pulls?state=open&per_page=100"*)
+    [ "${FAIL_LIST:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
+    printf '%s\n' "$PULLS_RESPONSE" ;;
   *"-X PATCH repos/"*"/check-runs/"*)
     [ "${FAIL_COMPLETE:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
     printf '%s\n' "$COMPLETE_RESPONSE" ;;
@@ -52,14 +58,15 @@ export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" ASSERT_APP_TOKEN="$tmp/assert-ap
 
 reset_env() {
   : >"$CALLS"
-  unset FAIL_CREATE FAIL_COMPLETE
+  unset FAIL_CREATE FAIL_COMPLETE FAIL_LIST ASSERT_REFUSE_PR
   export APP_TOKEN=app-token GH_TOKEN=read-token
   export ASSERT_STDOUT=true ASSERT_RC=0
   export CREATE_RESPONSE="{\"id\":$CHECK_ID,\"name\":\"merge-admission\",\"head_sha\":\"$HEAD_SHA\",\"status\":\"in_progress\",\"conclusion\":null,\"app\":{\"id\":$AI_REVIEW_APP_ID}}"
+  export PULLS_RESPONSE="[{\"number\":$PR,\"draft\":false,\"head\":{\"sha\":\"$HEAD_SHA\"}}]"
   export COMPLETE_RESPONSE="{\"id\":$CHECK_ID,\"status\":\"completed\",\"conclusion\":\"success\",\"app\":{\"id\":$AI_REVIEW_APP_ID}}"
 }
 run() {
-  OUT="$(bash "$producer" "$REPO" "$PR" "$HEAD_SHA" 2>&1)"
+  OUT="$(bash "$producer" "$REPO" "$HEAD_SHA" "$PR" 2>&1)"
   RC=$?
 }
 nth_call() { sed -n "${1}p" "$CALLS"; }
@@ -95,13 +102,13 @@ fi
 # --- admission: exit 0 printing exactly true --------------------------------------------------
 reset_env
 run
-third="$(nth_call 3)"
+last="$(tail -n 1 "$CALLS")"
 if [ "$RC" -eq 0 ] \
-  && [[ "$third" == "gh api -X PATCH repos/$REPO/check-runs/$CHECK_ID "* ]] \
-  && [[ "$third" == *" -f status=completed "* ]] \
-  && [[ "$third" == *" -f conclusion=success "* ]] \
-  && [[ "$third" == *" token=app-token" ]] \
-  && [ "$(wc -l <"$CALLS")" -eq 3 ]; then
+  && [[ "$last" == "gh api -X PATCH repos/$REPO/check-runs/$CHECK_ID "* ]] \
+  && [[ "$last" == *" -f status=completed "* ]] \
+  && [[ "$last" == *" -f conclusion=success "* ]] \
+  && [[ "$last" == *" token=app-token" ]] \
+  && [ "$(grep -c -- '-X PATCH' "$CALLS")" -eq 1 ]; then
   pass "an assertion that exits 0 printing true completes that same check run as success with the App token"
 else
   fail "an assertion that exits 0 printing true completes that same check run as success with the App token (rc=$RC, calls: $(cat "$CALLS"), output: $OUT)"
@@ -122,6 +129,44 @@ for row in '0:false' '0:' '0:true false' '6:' '6:true' '1:' '5:'; do
     fail "an assertion exiting $ASSERT_RC printing '$ASSERT_STDOUT' leaves the check in progress and the producer succeeds (rc=$RC, calls: $(cat "$CALLS"), output: $OUT)"
   fi
 done
+
+# --- every pull request at the head answers -------------------------------------------------
+# The check belongs to the head, so its success stands for every open pull request there. One
+# refusal among them, even after another was admitted, leaves the check in progress.
+reset_env
+export ASSERT_REFUSE_PR=9
+OUT="$(bash "$producer" "$REPO" "$HEAD_SHA" 7 9 2>&1)"
+RC=$?
+if [ "$RC" -eq 0 ] && grep -qxF "assert $REPO 7 $HEAD_SHA token=read-token" "$CALLS" \
+  && grep -qxF "assert $REPO 9 $HEAD_SHA token=read-token" "$CALLS" && ! grep -q -- '-X PATCH' "$CALLS"; then
+  pass "a refusal for any pull request at the head leaves the check in progress"
+else
+  fail "a refusal for any pull request at the head leaves the check in progress (rc=$RC, calls: $(cat "$CALLS"), output: $OUT)"
+fi
+
+# --- the set of pull requests at the head is read again before completion ------------------------
+# A pull request opened at the head after the plan was read has had no evaluation, yet a
+# success on the head would stand for it, so a changed set leaves the check in progress.
+reset_env
+PULLS_RESPONSE="[{\"number\":$PR,\"draft\":false,\"head\":{\"sha\":\"$HEAD_SHA\"}},{\"number\":43,\"draft\":false,\"head\":{\"sha\":\"$HEAD_SHA\"}}]"
+run
+if [ "$RC" -eq 0 ] && grep -q 'pulls?state=open' "$CALLS" && ! grep -q -- '-X PATCH' "$CALLS" \
+  && grep -qF "::warning::merge-admission for $REPO#$PR head $HEAD_SHA stays in progress: the open pull requests at the head changed during the evaluation (evaluated: $PR; now: $PR 43)" <<<"$OUT"; then
+  pass "a pull request set at the head that changed before completion leaves the check in progress"
+else
+  fail "a pull request set at the head that changed before completion leaves the check in progress (rc=$RC, calls: $(cat "$CALLS"), output: $OUT)"
+fi
+
+# An unreadable listing is no evidence that the set is unchanged.
+reset_env
+export FAIL_LIST=1
+run
+if [ "$RC" -eq 0 ] && grep -q 'pulls?state=open' "$CALLS" && ! grep -q -- '-X PATCH' "$CALLS" \
+  && grep -qF "::warning::merge-admission for $REPO#$PR head $HEAD_SHA stays in progress: the open pull requests at the head changed during the evaluation (evaluated: $PR; now: none readable)" <<<"$OUT"; then
+  pass "an unreadable pull-request set at the head before completion leaves the check in progress"
+else
+  fail "an unreadable pull-request set at the head before completion leaves the check in progress (rc=$RC, calls: $(cat "$CALLS"), output: $OUT)"
+fi
 
 # --- the created check must be the bound App's ---------------------------------------------------
 # A token minted from another App's key would post a check the ruleset does not bind and
@@ -165,7 +210,7 @@ fi
 reset_env
 export FAIL_COMPLETE=1
 run
-if [ "$RC" -eq 0 ] && [ "$(wc -l <"$CALLS")" -eq 3 ] \
+if [ "$RC" -eq 0 ] && grep -q -- '-X PATCH' "$CALLS" \
   && grep -qF "::warning::merge-admission for $REPO#$PR head $HEAD_SHA was admitted, but check run $CHECK_ID could not be completed as success, so it stays in progress" <<<"$OUT"; then
   pass "a failed completion is named and the producer succeeds"
 else
@@ -187,7 +232,7 @@ fi
 # --- usage --------------------------------------------------------------------------------------
 # The repository, number, and head are spent in API paths and the check run's head, so a
 # malformed one is refused before any call.
-for args in "$REPO $PR ${HEAD_SHA^^}" "$REPO 0 $HEAD_SHA" "not/a/repo $PR $HEAD_SHA" "$REPO $PR"; do
+for args in "$REPO ${HEAD_SHA^^} $PR" "$REPO $HEAD_SHA 0" "not/a/repo $HEAD_SHA $PR" "$REPO $HEAD_SHA"; do
   reset_env
   # shellcheck disable=SC2086 # each row is deliberately split into arguments
   OUT="$(bash "$producer" $args 2>&1)"

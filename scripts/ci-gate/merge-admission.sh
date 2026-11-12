@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # One merge-admission evaluation for one pull-request head (ADR 0260, #1990, #2031).
 #
-#   merge-admission.sh <owner/repo> <pr-number> <head-sha>
+#   merge-admission.sh <owner/repo> <head-sha> <pr-number>...
+#
+# The pull-request numbers are every open pull request at the head: a check run belongs to
+# the commit, so its success stands for each of them, and each must be admitted.
 #
 # Environment: APP_TOKEN, an AI review App installation token with Checks write, used only
 # for the merge-admission check run; GH_TOKEN, the read-only token the assertion reads
@@ -9,23 +12,28 @@
 #
 # Order is the contract (ADR 0260, action 4). First, a NEW `merge-admission` check run is
 # created in progress on the exact head, superseding any earlier result. Then the
-# canonical assertion beside this script runs for that head.
+# canonical assertion beside this script runs for each pull request at that head.
 set -uo pipefail
 
-usage() { echo "usage: $0 <owner/repo> <pr-number> <head-sha>" >&2; exit 2; }
-[ "$#" -eq 3 ] || usage
+usage() { echo "usage: $0 <owner/repo> <head-sha> <pr-number>..." >&2; exit 2; }
+[ "$#" -ge 3 ] || usage
 repo="$1"
-pr="$2"
-head_sha="$3"
+head_sha="$2"
+shift 2
+prs=("$@")
 [[ "$repo" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || usage
-[[ "$pr" =~ ^[123456789][0123456789]*$ ]] || usage
+for pr in "${prs[@]}"; do [[ "$pr" =~ ^[123456789][0123456789]*$ ]] || usage; done
 [[ "$head_sha" =~ ^[0123456789abcdef]{40}$ ]] || usage
+# Named in messages as `owner/repo#7,#9`.
+printf -v pr '%s,#' "${prs[@]}"
+pr="${pr%,#}"
 
 # The AI review App, the only producer whose merge-admission checks the assertion sets
 # aside. It equals MERGE_ADMISSION_APP_ID in scripts/assert-mergeable-head.sh, and
 # scripts/ci-gate/merge-admission.test.sh fails when the two disagree.
 readonly MERGE_ADMISSION_APP_ID=4528902
 assertion="$(dirname "${BASH_SOURCE[0]}")/../assert-mergeable-head.sh"
+planner="$(dirname "${BASH_SOURCE[0]}")/merge-admission-plan.sh"
 
 # Precondition (a) of ADR 0260: a producer that cannot evaluate says why and succeeds; the
 # check it may have left in progress is the only blocking signal.
@@ -46,15 +54,30 @@ check_id="$(jq -r 'if (.id? | type) == "number" then .id else "" end' <<<"$creat
 [[ "$check_id" =~ ^[123456789][0123456789]*$ ]] \
   || skip "the created check run carries no numeric id"
 
-# Admission is exit 0 AND the exact output `true`; anything else leaves the check in
-# progress, which blocks natively (ADR 0260, action 4). The assertion reads with GH_TOKEN
-# alone; the App token, which can write check runs, is withheld from it.
-verdict="$(env -u APP_TOKEN bash "$assertion" "$repo" "$pr" "$head_sha" </dev/null)"
-assertion_status=$?
-if [ "$assertion_status" -eq 0 ] && [ "$verdict" = true ]; then
-  GH_TOKEN="$APP_TOKEN" gh api -X PATCH "repos/$repo/check-runs/$check_id" \
-    -f status=completed -f conclusion=success </dev/null >/dev/null \
-    || printf '::warning::merge-admission for %s#%s head %s was admitted, but check run %s could not be completed as success, so it stays in progress\n' \
-      "$repo" "$pr" "$head_sha" "$check_id" >&2
+# Admission is exit 0 AND the exact output `true` for EVERY pull request at the head; anything
+# else leaves the check in progress, which blocks natively (ADR 0260, action 4). The
+# assertion reads with GH_TOKEN alone; the App token, which can write check runs, is
+# withheld from it.
+for one_pr in "${prs[@]}"; do
+  verdict="$(env -u APP_TOKEN bash "$assertion" "$repo" "$one_pr" "$head_sha" </dev/null)"
+  assertion_status=$?
+  if [ "$assertion_status" -ne 0 ] || [ "$verdict" != true ]; then
+    printf '::notice::merge-admission for %s#%s head %s stays in progress: #%s was not admitted\n' "$repo" "$pr" "$head_sha" "$one_pr" >&2
+    exit 0
+  fi
+done
+# The set is read again immediately before completion: a pull request that reached the head
+# since the plan was read has had no evaluation, and an unreadable listing is no evidence.
+now="$(env -u APP_TOKEN bash "$planner" "$repo" "$head_sha" </dev/null \
+  | jq -r --arg head "$head_sha" '[ .[] | select(.head_sha == $head) | .prs[] ] | sort | map(tostring) | join(" ")' 2>/dev/null)"
+evaluated="$(printf '%s\n' "${prs[@]}" | sort -n | paste -sd' ')"
+if [ "$now" != "$evaluated" ]; then
+  printf '::warning::merge-admission for %s#%s head %s stays in progress: the open pull requests at the head changed during the evaluation (evaluated: %s; now: %s)\n' \
+    "$repo" "$pr" "$head_sha" "$evaluated" "${now:-none readable}" >&2
+  exit 0
 fi
+GH_TOKEN="$APP_TOKEN" gh api -X PATCH "repos/$repo/check-runs/$check_id" \
+  -f status=completed -f conclusion=success </dev/null >/dev/null \
+  || printf '::warning::merge-admission for %s#%s head %s was admitted, but check run %s could not be completed as success, so it stays in progress\n' \
+    "$repo" "$pr" "$head_sha" "$check_id" >&2
 exit 0

@@ -3,8 +3,9 @@ name: Merge admission producer
 # The merge-admission producer (ADR 0260, #1990, #2031). For each pull-request head an
 # event or the sweep names, it creates a NEW `merge-admission` check run in progress with
 # the AI review App, runs the canonical scripts/assert-mergeable-head.sh from this
-# repository at the executing workflow's own SHA, and completes the check as success only
-# when that assertion exits 0 printing `true`. A refusal or an error leaves the check in
+# repository at the executing workflow's own SHA for every open pull request at that head,
+# and completes the check as success only when each assertion exits 0 printing `true` and
+# the set of pull requests at the head is unchanged immediately before completion. A refusal or an error leaves the check in
 # progress, which blocks a merge once a ruleset requires the context, and this workflow's
 # own jobs still succeed (precondition (a)).
 #
@@ -124,6 +125,7 @@ jobs:
             scripts/assert-mergeable-head.sh
             scripts/ci-gate/independent-review-receipt.sh
             scripts/ci-gate/merge-admission.sh
+            scripts/ci-gate/merge-admission-plan.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
       # A schedule event carries no repository record, so the token's single repository
@@ -163,7 +165,10 @@ jobs:
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ matrix.pr }}
+          # Every open pull request at the head shares the check run posted on it.
+          PR_NUMBERS: ${{ join(matrix.prs, ' ') }}
           HEAD_SHA: ${{ matrix.head_sha }}
           DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: bash .gate-trust/scripts/ci-gate/merge-admission.sh "$REPOSITORY" "$PR_NUMBER" "$HEAD_SHA"
+        run: |
+          read -ra prs <<<"$PR_NUMBERS"
+          bash .gate-trust/scripts/ci-gate/merge-admission.sh "$REPOSITORY" "$HEAD_SHA" "${prs[@]}"

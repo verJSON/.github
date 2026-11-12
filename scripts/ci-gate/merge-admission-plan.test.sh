@@ -50,10 +50,10 @@ run() {
 # A draft cannot be merged, and marking it ready is itself a trigger, so the sweep skips it.
 reset_env
 run "$REPO"
-if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"pr\":7,\"head_sha\":\"$SHA_A\"},{\"pr\":9,\"head_sha\":\"$SHA_C\"}]" ]; then
-  pass "a sweep plans every open pull request that is not a draft, by number and head"
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_A\",\"prs\":[7]},{\"head_sha\":\"$SHA_C\",\"prs\":[9]}]" ]; then
+  pass "a sweep plans the head of every open pull request that is not a draft"
 else
-  fail "a sweep plans every open pull request that is not a draft, by number and head (rc=$RC, output: $OUT, stderr: $ERR)"
+  fail "a sweep plans the head of every open pull request that is not a draft (rc=$RC, output: $OUT, stderr: $ERR)"
 fi
 
 # --- one event head -----------------------------------------------------------------------------
@@ -61,10 +61,34 @@ fi
 # evaluated, since the event changed nothing on any other.
 reset_env
 run "$REPO" "$SHA_C"
-if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"pr\":9,\"head_sha\":\"$SHA_C\"}]" ]; then
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_C\",\"prs\":[9]}]" ]; then
   pass "an event head plans only the open pull requests at that head"
 else
   fail "an event head plans only the open pull requests at that head (rc=$RC, output: $OUT, stderr: $ERR)"
+fi
+
+# --- one plan entry per head -------------------------------------------------------------------
+# A check run belongs to a commit, not a pull request, so every open pull request at one head
+# shares the merge-admission result posted there. The plan names each head once, with every
+# open pull request at it, so one evaluation answers for all of them (ADR 0260).
+reset_env
+PULLS_FIXTURE="[$(pull 10 "$SHA_A" false),$(pull 9 "$SHA_C" false),$(pull 7 "$SHA_A" false)]"
+run "$REPO"
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_A\",\"prs\":[7,10]},{\"head_sha\":\"$SHA_C\",\"prs\":[9]}]" ]; then
+  pass "pull requests sharing a head are planned as one head with every one of their numbers"
+else
+  fail "pull requests sharing a head are planned as one head with every one of their numbers (rc=$RC, output: $OUT, stderr: $ERR)"
+fi
+
+# A draft is never the reason a head is planned, but a merge-admission success on a head it
+# shares would stand for it the moment it is marked ready, so it is evaluated with the rest.
+reset_env
+PULLS_FIXTURE="[$(pull 7 "$SHA_A" false),$(pull 8 "$SHA_A" true)]"
+run "$REPO"
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_A\",\"prs\":[7,8]}]" ]; then
+  pass "a draft at a planned head is evaluated with the other pull requests at that head"
+else
+  fail "a draft at a planned head is evaluated with the other pull requests at that head (rc=$RC, output: $OUT, stderr: $ERR)"
 fi
 
 # --- an unreadable listing plans nothing, and the producer succeeds -----------------------------
@@ -86,11 +110,24 @@ fi
 reset_env
 PULLS_FIXTURE="[$(pull '"7"' "$SHA_A" false),$(pull 8 "${SHA_B^^}" false),$(pull 9 "$SHA_C" false)]"
 run "$REPO"
-if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"pr\":9,\"head_sha\":\"$SHA_C\"}]" ] \
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_C\",\"prs\":[9]}]" ] \
   && grep -qF "::warning::merge-admission skipped 2 open pull request(s) of $REPO whose number or head SHA is malformed" <<<"$ERR"; then
   pass "an open pull request with a malformed number or head is skipped and named"
 else
   fail "an open pull request with a malformed number or head is skipped and named (rc=$RC, output: $OUT, stderr: $ERR)"
+fi
+
+# A head is planned only with its complete set of pull requests: an entry at that head whose
+# number is malformed cannot be evaluated, so planning the rest would admit the head on
+# behalf of a pull request no evaluation read.
+reset_env
+PULLS_FIXTURE="[$(pull 7 "$SHA_A" false),$(pull '"8"' "$SHA_A" false),$(pull 9 "$SHA_C" false)]"
+run "$REPO"
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_C\",\"prs\":[9]}]" ] \
+  && grep -qF "::warning::merge-admission skipped 1 open pull request(s) of $REPO whose number or head SHA is malformed" <<<"$ERR"; then
+  pass "a head shared with a pull request whose number is malformed is not planned"
+else
+  fail "a head shared with a pull request whose number is malformed is not planned (rc=$RC, output: $OUT, stderr: $ERR)"
 fi
 
 # A page that is not an array, such as an error body, is no listing at all.
@@ -111,7 +148,7 @@ reset_env
 PULLS_FIXTURE="[$(pull 7 "$SHA_A" false)]
 [$(pull 9 "$SHA_C" false)]"
 run "$REPO"
-if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"pr\":7,\"head_sha\":\"$SHA_A\"},{\"pr\":9,\"head_sha\":\"$SHA_C\"}]" ] && [ -z "$ERR" ]; then
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"head_sha\":\"$SHA_A\",\"prs\":[7]},{\"head_sha\":\"$SHA_C\",\"prs\":[9]}]" ] && [ -z "$ERR" ]; then
   pass "a paginated listing plans the open pull requests of every page"
 else
   fail "a paginated listing plans the open pull requests of every page (rc=$RC, output: $OUT, stderr: $ERR)"
