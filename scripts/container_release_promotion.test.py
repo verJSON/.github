@@ -5,8 +5,8 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
