@@ -39,6 +39,7 @@ jobs:
             config/capability-floors.json
             scripts/gen-ai-review-caller.sh
             scripts/gen-ai-review-label-rearm-caller.sh
+            scripts/gen-ai-review-lifecycle-rearm-caller.sh
             scripts/gen-changelog-caller.sh
             scripts/gen-gate-rearm-caller.sh
             scripts/gen-privileged-merge-caller.sh
