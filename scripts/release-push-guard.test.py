@@ -193,6 +193,17 @@ class ReleasePushGuardTest(unittest.TestCase):
         self.assertEqual(self.remote_ref('refs/heads/main'), self.dispatch)
         self.assertIsNone(self.remote_ref('refs/tags/bad'))
 
+    def test_parent_line_in_commit_message_cannot_forge_release_parent(self):
+        tree = self.git(self.repo, 'rev-parse', f'{self.release}^{{tree}}').stdout.strip()
+        bad = self.git(self.repo, 'commit-tree', tree,
+                       '-m', f'forge\n\nparent {self.dispatch}').stdout.strip()
+        self.git(self.repo, 'tag', '-a', 'bad', bad, '-m', 'bad')
+        self.allow_remote_history_rewrite()
+        result = self.push(release=bad, tag='bad')
+        self.assert_rejected_for_wrong_parent(result)
+        self.assertEqual(self.remote_ref('refs/heads/main'), self.dispatch)
+        self.assertIsNone(self.remote_ref('refs/tags/bad'))
+
     def test_merge_commit_cannot_satisfy_single_parent_guard(self):
         tree = self.git(self.repo, 'rev-parse', f'{self.release}^{{tree}}').stdout.strip()
         merge = self.git(self.repo, 'commit-tree', tree, '-p', self.dispatch,
