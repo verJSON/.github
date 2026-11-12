@@ -6151,6 +6151,7 @@ for index, line in enumerate(lines):
 # read has already been refused there.
 PACKAGE_LESS_SELECTED = "steps.release-version.outputs.selected == 'true'"
 PACKAGE_LESS_FILE_PRESENT = re.compile(r"hashFiles\('([A-Za-z0-9_./-]+)'\) != ''")
+PACKAGE_LESS_REFUSAL = "::error::No package.json and no executable scripts/release-verify.sh"
 PACKAGE_LESS_NODE_VERSION = re.compile(r"\$\{\{ '([0-9]+(?:\.[0-9]+){0,2})' \}\}")
 
 
@@ -6313,6 +6314,13 @@ def check_package_less_verification(steps):
             if without_hook.returncode == 0:
                 problems.append(
                     "lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)"
+                )
+                return
+            # Any other failure is incidental, not the refusal the snapshot relies on.
+            if not any(line.startswith(PACKAGE_LESS_REFUSAL) for line in without_hook.stdout.splitlines()):
+                problems.append(
+                    "does not refuse a package-less tree without scripts/release-verify.sh before the snapshot (#1206): %s"
+                    % without_hook.stdout.strip()[-400:]
                 )
                 return
     except PackageLessUnreadable as unreadable:

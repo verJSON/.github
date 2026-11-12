@@ -7138,6 +7138,21 @@ pass_package_less_tree_without_hook() {
 expect_release_mode_rejection release-snapshot \
   "release-snapshot passing a package-less tree without a verification hook (#1906)" pass_package_less_tree_without_hook \
   'lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)'
+# Failing is not refusing: a caller that runs the absent hook anyway fails on a
+# package-less tree for an incidental reason (no such file), which must not
+# count as the refusal the snapshot depends on.
+run_absent_hook_on_package_less_tree() {
+  mutate_snapshot_release "$1" \
+    '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
+            exit 1
+' \
+    '            verification_status=0
+            run_clean scripts/release-verify.sh || verification_status=$?
+'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot failing a package-less tree without its refusal (#1906)" run_absent_hook_on_package_less_tree \
+  'does not refuse a package-less tree without scripts/release-verify.sh before the snapshot (#1206)'
 # The suite runs with the step's own env:, never one the check supplies: a
 # verification PATH that does not come from the runtime capture never sees the
 # configured Node, whatever the check would have injected.
