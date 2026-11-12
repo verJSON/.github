@@ -129,8 +129,20 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
                 caller = load(text)
                 with self.subTest(caller=source):
                     jobs = caller.get("jobs", {})
-                    self.assertEqual(len(jobs), 1, f"{source} must be a pure caller: exactly one job")
-                    (job,) = jobs.values()
+                    # Exactly one job joins the family by calling the declaring workflow. The
+                    # generated gate re-arm caller adds a guard job ahead of it (ADR 0255,
+                    # amendment 2026-11-06); any such other job calls no workflow and holds no
+                    # group, so it can neither join this family nor displace a member of it.
+                    calling = [job for job in jobs.values()
+                               if isinstance(job, dict) and calls_declarer(job.get("uses", ""), declaring_path)]
+                    self.assertEqual(len(calling), 1,
+                                     f"{source} must call {declaring_path} from exactly one job")
+                    for other in jobs.values():
+                        if other is calling[0]:
+                            continue
+                        self.assertNotIn("uses", other, f"{source} must call no other workflow")
+                        self.assertNotIn("concurrency", other, f"{source} must hold no group outside the family")
+                    (job,) = calling
                     self.assertNotIn("steps", job, f"{source} must only call the declaring workflow")
                     self.assertTrue(calls_declarer(job.get("uses", ""), declaring_path),
                                     f"{source} must call {declaring_path}")

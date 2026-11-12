@@ -27,6 +27,41 @@ publisher="Verjson/.github/.github/workflows/container-candidate-publish.yml@$re
 with_publisher() { # with_publisher <fixture> <output>
   jq --arg publisher "$publisher" '.images[].provenance.builderIdentity = $publisher' "$1" >"$2"
 }
+# Requires <command...> to refuse with <status> and to name <reason> in its
+# output, which goes to files of its own. A crash, or a refusal by another
+# check, no longer counts as the refusal a case is named for.
+refuses() { # <message if accepted> <status> <reason> <command...>
+  local accepted="$1" expected_status="$2" reason="$3" status=0
+  shift 3
+  "$@" >"$tmp/refusal.out" 2>"$tmp/refusal.err" || status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "$accepted" >&2; exit 1
+  fi
+  if [ "$status" -ne "$expected_status" ] || ! grep -qF -- "$reason" "$tmp/refusal.out" "$tmp/refusal.err"; then
+    echo "refused (exit $status, expected $expected_status) without the reason: $reason; if accepted: $accepted" >&2
+    sed 's/^/diag - /' "$tmp/refusal.out" "$tmp/refusal.err" >&2
+    exit 1
+  fi
+}
+# `!` exempts a command from `set -e`, so a bare `! grep` can never fail the
+# run; and a grep that cannot read its input exits 2, which a negation would
+# take for absence.
+assert_absent() {
+  local search_status=0
+  grep "$@" || search_status=$?
+  [ "$search_status" -eq 1 ] && return 0
+  if [ "$search_status" -eq 0 ]; then
+    printf 'FAIL - %s: found what must be absent: grep %s\n' "${0##*/}" "$*" >&2
+  else
+    printf 'FAIL - %s: could not search (grep exit %s): grep %s\n' "${0##*/}" "$search_status" "$*" >&2
+  fi
+  exit 1
+}
+# Each generated assertion fails with exit 1 and names itself, so a case runs
+# the generated test once and asserts the one assertion that must refuse it.
+generated_contract_refuses() { # <message if accepted> <consumer> <reason>
+  refuses "$1" 1 "ERROR: $3" bash "$2/scripts/container-candidate-contract.test.sh"
+}
 
 for fixture in single multi; do
   consumer="$tmp/$fixture"
@@ -43,34 +78,67 @@ for fixture in single multi; do
   chmod +x "$consumer/scripts/"*.sh "$consumer/scripts/"*.py
   jq -e '.images | length > 0' "$consumer/container-candidate.json" >/dev/null
   bash "$consumer/scripts/container-candidate-contract.test.sh"
-  cp "$consumer/.github/workflows/container-candidate.yml" "$consumer/.github/workflows/container-candidate.yml.clean"
-  sed -i '0,/^    with:$/s//    secrets: inherit\n&/' "$consumer/.github/workflows/container-candidate.yml"
-  if bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null 2>&1; then
-    echo "generated contract accepted credential-routing tampering" >&2
-    exit 1
-  fi
-  mv "$consumer/.github/workflows/container-candidate.yml.clean" "$consumer/.github/workflows/container-candidate.yml"
-  cp "$consumer/.github/workflows/container-candidate.yml" "$consumer/.github/workflows/container-candidate.yml.clean"
-  sed -i '0,/^      actions: read$/d' "$consumer/.github/workflows/container-candidate.yml"
-  if bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null 2>&1; then
-    echo "generated contract accepted an unsatisfied reusable Actions permission" >&2
-    exit 1
-  fi
-  mv "$consumer/.github/workflows/container-candidate.yml.clean" "$consumer/.github/workflows/container-candidate.yml"
-  cp "$consumer/.github/workflows/container-candidate.yml" "$consumer/.github/workflows/container-candidate.yml.clean"
-  sed -i 's#container-candidate-publish.yml#container-candidate.yml#' "$consumer/.github/workflows/container-candidate.yml"
-  if bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null 2>&1; then
-    echo "generated contract accepted publication through the read-only entrypoint" >&2
-    exit 1
-  fi
-  mv "$consumer/.github/workflows/container-candidate.yml.clean" "$consumer/.github/workflows/container-candidate.yml"
-  cp "$consumer/.github/workflows/container-candidate.yml" "$consumer/.github/workflows/container-candidate.yml.clean"
-  sed -i '/^  validate:/,/^  publish:/ s/^      contents: read$/      contents: write/' "$consumer/.github/workflows/container-candidate.yml"
-  if bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null 2>&1; then
-    echo "generated contract accepted write authority in pull-request validation" >&2
-    exit 1
-  fi
-  mv "$consumer/.github/workflows/container-candidate.yml.clean" "$consumer/.github/workflows/container-candidate.yml"
+  caller="$consumer/.github/workflows/container-candidate.yml"
+  generated_test="$consumer/scripts/container-candidate-contract.test.sh"
+  cp "$caller" "$tmp/caller.clean"
+  cp "$generated_test" "$tmp/generated-test.clean"
+  clean_caller_digest="$(sha256sum "$caller" | cut -d' ' -f1)"
+  # <label> <sed expression> <pinned|repinned> <reason>. The assertions after the
+  # caller's digest pin are reachable only by re-pinning that digest to the
+  # mutant, which is what regenerating at a contract that emitted it would do.
+  reject_caller_mutation() {
+    local label="$1" mutation="$2" pin="$3" reason="$4" mutant_digest
+    sed -i "$mutation" "$caller"
+    if cmp -s "$tmp/caller.clean" "$caller"; then
+      echo "caller mutation did not apply, so its verdict proves nothing: $label" >&2; exit 1
+    fi
+    if [ "$pin" = repinned ]; then
+      [ "$(grep -c "$clean_caller_digest" "$generated_test")" = 1 ] \
+        || { echo "generated test does not pin the caller digest exactly once" >&2; exit 1; }
+      mutant_digest="$(sha256sum "$caller" | cut -d' ' -f1)"
+      sed -i "s/$clean_caller_digest/$mutant_digest/" "$generated_test"
+    fi
+    generated_contract_refuses "generated contract accepted $label" "$consumer" "$reason"
+    cp "$tmp/caller.clean" "$caller"
+    cp "$tmp/generated-test.clean" "$generated_test"
+  }
+  credential_routing='0,/^    with:$/s//    secrets: inherit\n&/'
+  reject_caller_mutation 'caller byte drift' "$credential_routing" pinned 'generated caller was edited'
+  # The credential guard sits behind the digest pin, which no fixture reached.
+  reject_caller_mutation 'credential-routing tampering' "$credential_routing" repinned \
+    'caller may not inherit credentials or inject registry namespaces or environments'
+  reject_caller_mutation 'an environment binding' '0,/^    with:$/s//    environment: production\n&/' repinned \
+    'caller may not inherit credentials or inject registry namespaces or environments'
+  reject_caller_mutation 'an injected registry namespace' '0,/^    with:$/s//&\n      registry-namespace: ghcr.io\/attacker/' repinned \
+    'caller may not inherit credentials or inject registry namespaces or environments'
+  # Only the first permission line: `0,/re/d` deleted the whole header with it,
+  # so the contract pin, not the permission check, refused the old mutant.
+  reject_caller_mutation 'an unsatisfied reusable Actions permission' '0,/^      actions: read$/{/^      actions: read$/d}' pinned \
+    'pull-request validation requires Actions reads'
+  reject_caller_mutation 'publication through the read-only entrypoint' 's#container-candidate-publish.yml#container-candidate.yml#' pinned \
+    'validation does not use the pinned read-only reusable workflow'
+  reject_caller_mutation 'write authority in pull-request validation' \
+    '/^  validate:/,/^  publish:/ s/^      contents: read$/      contents: write/' pinned \
+    'both event paths require source reads'
+  # A public-only caller names neither the package token nor package reads; each
+  # alternative is refused on its own.
+  reject_caller_mutation 'package reads in a public-only caller' '0,/^      contents: read$/s//&\n      packages: read/' repinned \
+    'public-only caller exposes package credentials or read authority'
+  reject_caller_mutation 'the package token in a public-only caller' '$a\      # NODE_AUTH_TOKEN' repinned \
+    'public-only caller exposes package credentials or read authority'
+  # Each generated helper refuses its own byte drift. The caller is clean, so
+  # each helper's pin is reachable on its own.
+  for pinned_helper in 'container_release_manifest.py|generated validator was edited' \
+    'container_registry_destinations.py|generated destination helper was edited'; do
+    cp "$consumer/scripts/${pinned_helper%%|*}" "$tmp/helper.clean"
+    printf '#\n' >>"$consumer/scripts/${pinned_helper%%|*}"
+    generated_contract_refuses "generated contract accepted byte drift in ${pinned_helper%%|*} ($fixture)" "$consumer" "${pinned_helper#*|}"
+    cp "$tmp/helper.clean" "$consumer/scripts/${pinned_helper%%|*}"
+  done
+  mv "$consumer/container-candidate.json" "$tmp/config.aside"
+  generated_contract_refuses "generated contract accepted a missing candidate config ($fixture)" "$consumer" \
+    'candidate config container-candidate.json is missing'
+  mv "$tmp/config.aside" "$consumer/container-candidate.json"
   # The publisher refuses an identity other than its own entrypoint at this pin,
   # but only after building and publishing. The generated contract catches a
   # stale or wrong identity in pull-request CI instead.
@@ -84,10 +152,8 @@ for fixture in single multi; do
     "absent identity|del(.images[0].provenance.builderIdentity)" \
     "no images|.images = []"; do
     jq "${identity_case#*|}" "$consumer/container-candidate.json.clean" >"$consumer/container-candidate.json"
-    if bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null 2>&1; then
-      echo "generated contract accepted a builderIdentity with a ${identity_case%%|*} ($fixture)" >&2
-      exit 1
-    fi
+    generated_contract_refuses "generated contract accepted a builderIdentity with a ${identity_case%%|*} ($fixture)" "$consumer" \
+      "every image in container-candidate.json must declare provenance.builderIdentity $publisher, the publishing entrypoint at this contract"
   done
   mv "$consumer/container-candidate.json.clean" "$consumer/container-candidate.json"
   bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null
@@ -131,16 +197,42 @@ assert publish["secrets"] == {
 }, "trusted publication must retain the narrowly scoped package credential"
 PY
 bash "$private_consumer/scripts/container-candidate-contract.test.sh"
+# A private-package caller routes the package token exactly once, to trusted
+# publication. These sit behind the caller's digest pin, so each is re-pinned.
+consumer="$private_consumer"
+fixture=private
+caller="$consumer/.github/workflows/container-candidate.yml"
+generated_test="$consumer/scripts/container-candidate-contract.test.sh"
+cp "$caller" "$tmp/caller.clean"
+cp "$generated_test" "$tmp/generated-test.clean"
+clean_caller_digest="$(sha256sum "$caller" | cut -d' ' -f1)"
+reject_caller_mutation 'a private-package caller without the package token' '/NODE_AUTH_TOKEN: /d' repinned \
+  'private-package caller must route its acquisition token only to trusted publication'
+reject_caller_mutation 'a private-package caller routing the package token twice' '/NODE_AUTH_TOKEN: /p' repinned \
+  'private-package caller must route its acquisition token only to trusted publication'
+# Pull-request validation runs PR code, so it gets neither the token, secrets,
+# nor package reads. Moving the token keeps its count at one, so only the
+# validation-job check refuses these.
+validation_exposure='private-package pull-request validation exposes package credentials or contents'
+reject_caller_mutation 'the package token moved into pull-request validation' \
+  '/NODE_AUTH_TOKEN: /d; 0,/^      contents: read$/s//&\n    secrets:\n      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}/' repinned \
+  "$validation_exposure"
+reject_caller_mutation 'package reads in pull-request validation' '0,/^      contents: read$/s//&\n      packages: read/' repinned \
+  "$validation_exposure"
+reject_caller_mutation 'the package token passed as a pull-request validation input' \
+  '0,/^    with:$/s//&\n      package-token: ${{ secrets.NODE_AUTH_TOKEN }}/' repinned \
+  "$validation_exposure"
+reject_caller_mutation 'a secrets map in pull-request validation' '0,/^      contents: read$/s//&\n    secrets:\n      OTHER: ${{ secrets.OTHER }}/' repinned \
+  "$validation_exposure"
 
 invalid_cleanup_consumer="$tmp/invalid-cleanup-generated"
 mkdir -p "$invalid_cleanup_consumer/.github/workflows"
 jq '.cleanupUnusedDockerImages = "true"' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$invalid_cleanup_consumer/container-candidate.json"
-if (cd "$invalid_cleanup_consumer" && "$generator" workflow "$ref" container-candidate.json) >/dev/null 2>&1; then
-  echo "candidate generator accepted a non-boolean cleanup setting" >&2
-  exit 1
-fi
+# jq's `error` exits 5; the message is the generator's own.
+(cd "$invalid_cleanup_consumer" && refuses 'candidate generator accepted a non-boolean cleanup setting' 5 \
+  'cleanupUnusedDockerImages must be a boolean' "$generator" workflow "$ref" container-candidate.json)
 
 workflow="$root/.github/workflows/container-candidate.yml"
 publish_workflow="$root/.github/workflows/container-candidate-publish.yml"
@@ -775,10 +867,8 @@ jobs:
         run: |
           exit 0
 YAML
-if extract_config_run "$missing_run_fixture" "$tmp/missing-run.sh" 2>/dev/null; then
-  echo "config extraction accepted a missing run block" >&2
-  exit 1
-fi
+refuses 'config extraction accepted a missing run block' 1 'prepare job ended before its config run block' \
+  extract_config_run "$missing_run_fixture" "$tmp/missing-run.sh"
 
 malformed_run_fixture="$tmp/config-step-malformed-run.yml"
 cat >"$malformed_run_fixture" <<'YAML'
@@ -790,10 +880,8 @@ jobs:
         run: >
           exit 0
 YAML
-if extract_config_run "$malformed_run_fixture" "$tmp/malformed-run.sh" 2>/dev/null; then
-  echo "config extraction accepted a malformed run block" >&2
-  exit 1
-fi
+refuses 'config extraction accepted a malformed run block' 1 'config step run block is not a literal block' \
+  extract_config_run "$malformed_run_fixture" "$tmp/malformed-run.sh"
 
 empty_run_fixture="$tmp/config-step-empty-run.yml"
 cat >"$empty_run_fixture" <<'YAML'
@@ -804,10 +892,8 @@ jobs:
         run: |
 
 YAML
-if extract_config_run "$empty_run_fixture" "$tmp/empty-run.sh" 2>/dev/null; then
-  echo "config extraction accepted an empty run block" >&2
-  exit 1
-fi
+refuses 'config extraction accepted an empty run block' 1 'config step run block is empty' \
+  extract_config_run "$empty_run_fixture" "$tmp/empty-run.sh"
 
 blank_line_fixture="$tmp/config-step-blank-line.yml"
 printf '%s\n' \
@@ -950,8 +1036,10 @@ grep -qx 'has-gar=false' "$case_variant_output"
 run_invalid_config() {
   local config_path=$1
   local output=$2
+  local reason=$3
+  local status=0
 
-  if (
+  (
     cd "$first_adoption"
       CONFIG_RELATIVE_PATH="$config_path" \
       CONTAINER_DESTINATION_HELPER="$tmp/contract/scripts/container_registry_destinations.py" \
@@ -968,8 +1056,14 @@ run_invalid_config() {
       PATH="$mock_bin:$PATH" \
       SOURCE_PATH=. \
       bash "$prepare_script"
-  ) >/dev/null 2>&1; then
+  ) >"$tmp/invalid-config.out" 2>"$tmp/invalid-config.err" || status=$?
+  if [ "$status" -eq 0 ]; then
     echo "candidate config unexpectedly passed: $config_path" >&2
+    exit 1
+  fi
+  if [ "$status" -ne 1 ] || ! grep -qxF -- "::error::$reason" "$tmp/invalid-config.out"; then
+    echo "candidate config $config_path was refused (exit $status, expected 1) without the reason: $reason" >&2
+    sed 's/^/diag - /' "$tmp/invalid-config.out" "$tmp/invalid-config.err" >&2
     exit 1
   fi
 }
@@ -977,26 +1071,28 @@ run_invalid_config() {
 jq '.cleanupUnusedDockerImages = true' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$first_adoption/cleanup-setting-mismatch.json"
-run_invalid_config cleanup-setting-mismatch.json "$tmp/cleanup-setting-mismatch-output"
+run_invalid_config cleanup-setting-mismatch.json "$tmp/cleanup-setting-mismatch-output" \
+  'invalid or unauthorized candidate configuration'
 jq '.cleanupUnusedDockerImages = "true"' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$first_adoption/cleanup-setting-invalid-type.json"
-run_invalid_config cleanup-setting-invalid-type.json "$tmp/cleanup-setting-invalid-type-output"
+run_invalid_config cleanup-setting-invalid-type.json "$tmp/cleanup-setting-invalid-type-output" \
+  'invalid or unauthorized candidate configuration'
 
 cp "$root/scripts/fixtures/container-candidate/single.json" "$tmp/outside-candidate.json"
-run_invalid_config ../outside-candidate.json "$tmp/traversal-output"
+run_invalid_config ../outside-candidate.json "$tmp/traversal-output" \
+  'config-path must be a normalized repository-relative JSON path'
 ln -s "$tmp/outside-candidate.json" "$first_adoption/escape.json"
-run_invalid_config escape.json "$tmp/symlink-output"
+run_invalid_config escape.json "$tmp/symlink-output" 'candidate config escapes isolated source'
 for field in context file; do
   jq --arg field "$field" '.images[0][$field] = "../../outside"' \
     "$root/scripts/fixtures/container-candidate/single.json" \
     > "$first_adoption/malicious-$field.json"
-  run_invalid_config "malicious-$field.json" "$tmp/malicious-$field-output"
+  run_invalid_config "malicious-$field.json" "$tmp/malicious-$field-output" \
+    'invalid or unauthorized candidate configuration'
 done
-if (cd "$first_adoption" && "$generator" workflow "$ref" 'a/../../outside.json') >/dev/null 2>&1; then
-  echo "generator accepted traversal-bearing config-path" >&2
-  exit 1
-fi
+(cd "$first_adoption" && refuses 'generator accepted traversal-bearing config-path' 2 \
+  'config-path must be a repository-relative JSON path' "$generator" workflow "$ref" 'a/../../outside.json')
 
 build_paths_script="$tmp/validate-build-paths.sh"
 BUILD_PATHS_SCRIPT="$build_paths_script" WORKFLOW="$workflow" python3 - <<'PY'
@@ -1022,26 +1118,23 @@ GITHUB_OUTPUT="$tmp/valid-build-paths-output" SOURCE_PATH="$build_source" \
 grep -qx "context=$(realpath -e "$build_source/context")" "$tmp/valid-build-paths-output"
 grep -qx "file=$(realpath -e "$build_source/Dockerfile")" "$tmp/valid-build-paths-output"
 ln -s "$outside_build/context" "$build_source/escaped-context"
-if GITHUB_OUTPUT="$tmp/escaped-context-output" SOURCE_PATH="$build_source" \
+GITHUB_OUTPUT="$tmp/escaped-context-output" SOURCE_PATH="$build_source" \
   CONTEXT_RELATIVE_PATH=escaped-context FILE_RELATIVE_PATH=Dockerfile \
-  bash "$build_paths_script" >/dev/null 2>&1; then
-  echo "candidate context symlink escape unexpectedly passed" >&2
-  exit 1
-fi
+  refuses 'candidate context symlink escape unexpectedly passed' 1 '::error::candidate context escapes isolated source' \
+  bash "$build_paths_script"
 ln -s "$outside_build/Dockerfile" "$build_source/escaped-Dockerfile"
-if GITHUB_OUTPUT="$tmp/escaped-file-output" SOURCE_PATH="$build_source" \
+GITHUB_OUTPUT="$tmp/escaped-file-output" SOURCE_PATH="$build_source" \
   CONTEXT_RELATIVE_PATH=context FILE_RELATIVE_PATH=escaped-Dockerfile \
-  bash "$build_paths_script" >/dev/null 2>&1; then
-  echo "candidate Dockerfile symlink escape unexpectedly passed" >&2
-  exit 1
-fi
+  refuses 'candidate Dockerfile symlink escape unexpectedly passed' 1 '::error::candidate Dockerfile escapes isolated source' \
+  bash "$build_paths_script"
 
 repository_marker="$tmp/repository-injection-executed"
 jq --arg repository "ghcr.io/verjson/x'; touch $repository_marker; #'" \
   '.images[0].repository = $repository' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$first_adoption/malicious-repository.json"
-run_invalid_config malicious-repository.json "$tmp/malicious-repository-output"
+run_invalid_config malicious-repository.json "$tmp/malicious-repository-output" \
+  'invalid or unauthorized candidate configuration'
 [ ! -e "$repository_marker" ] || {
   echo "repository configuration executed as shell source" >&2
   exit 1
@@ -1052,7 +1145,8 @@ jq --arg os "linux'; touch $platform_marker; #'" \
   '.images[0].platforms[0].os = $os' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$first_adoption/malicious-platform.json"
-run_invalid_config malicious-platform.json "$tmp/malicious-platform-output"
+run_invalid_config malicious-platform.json "$tmp/malicious-platform-output" \
+  'invalid or unauthorized candidate configuration'
 [ ! -e "$platform_marker" ] || {
   echo "platform configuration executed as shell source" >&2
   exit 1
@@ -1063,7 +1157,8 @@ jq '.images[0].platforms = [
   {"os":"linux","architecture":"amd64","variant":"v8"}
 ]' "$root/scripts/fixtures/container-candidate/single.json" \
   > "$first_adoption/colliding-platform-fields.json"
-run_invalid_config colliding-platform-fields.json "$tmp/colliding-platform-fields-output"
+run_invalid_config colliding-platform-fields.json "$tmp/colliding-platform-fields-output" \
+  'duplicate matrix or artifact identity, or unknown base variant'
 
 jq '
   .images[0].variant = "a-b"
@@ -1073,7 +1168,8 @@ jq '
   | .images[1].platforms = [{"os":"b-linux","architecture":"amd64"}]
 ' "$root/scripts/fixtures/container-candidate/multi.json" \
   > "$first_adoption/colliding-image-platform-fields.json"
-run_invalid_config colliding-image-platform-fields.json "$tmp/colliding-image-platform-fields-output"
+run_invalid_config colliding-image-platform-fields.json "$tmp/colliding-image-platform-fields-output" \
+  'duplicate matrix or artifact identity, or unknown base variant'
 
 lifecycle="$tmp/lifecycle"
 mkdir -p "$lifecycle/package"
@@ -1091,7 +1187,7 @@ grep -q "github.event_name == 'push'" "$publish_workflow"
 grep -q 'github.event.repository.default_branch' "$publish_workflow"
 grep -q 'packages: write' "$publish_workflow"
 grep -q 'id-token: write' "$publish_workflow"
-! grep -Eq 'attestations: write|actions/attest|gh attestation verify' "$publish_workflow"
+assert_absent -Eq 'attestations: write|actions/attest|gh attestation verify' "$publish_workflow"
 grep -q 'sigstore/cosign-installer@[0123456789abcdef]\{40\} # v4.1.2' "$publish_workflow"
 grep -q 'oras-project/setup-oras@[0123456789abcdef]\{40\} # v2.0.2' "$publish_workflow"
 grep -q '"attest-blob"' "$root/scripts/container_cosign_provenance.py"
@@ -1112,7 +1208,7 @@ grep -q "needs.prepare.outputs.has-gar == 'true'" <<<"$mirror_gar_job"
 grep -q 'id-token: write' <<<"$mirror_gar_job"
 grep -q 'google-github-actions/auth@[0123456789abcdef]\{40\}' <<<"$mirror_gar_job"
 grep -q 'steps.gar-auth.outputs.access_token' <<<"$mirror_gar_job"
-! grep -q 'steps.gar-auth.outputs.auth_token' <<<"$mirror_gar_job"
+assert_absent -q 'steps.gar-auth.outputs.auth_token' <<<"$mirror_gar_job"
 grep -qF '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant))' "$publish_workflow"
 grep -q -- '"cp", "--recursive"' "$root/scripts/container_registry_destinations.py"
 grep -q 'destination digest differs from the candidate digest' "$root/scripts/container_registry_destinations.py"
@@ -1217,8 +1313,169 @@ base_approved="$(git -C "$bootstrap" show "$base_sha:container-candidate.json" |
 }
 
 grep -qF 'npm ci --ignore-scripts' <<<"$acquisition_job"
-! grep -Eq 'npm (install|run|exec|rebuild)|pnpm (run|exec|rebuild)|yarn' <<<"$acquisition_job"
-! grep -Eq 'subprocess|os\.system|extract(all)?\(' "$root/scripts/container_private_dependencies.py"
+# The acquisition job holds NODE_AUTH_TOKEN and must install with lifecycle
+# scripts off. No text scan of its shell can prove that (`n""pm`, `np\m`, a line
+# continuation, `"$PACKAGE_MANAGER" install`, a PATH shim), and an earlier step,
+# a job-level `env:` or `defaults:`, or a workflow-level one can change how the
+# install step runs. So the job is pinned byte for byte instead: one sha256 over
+# the job `acquire-private-node-dependencies` of container-candidate-publish.yml,
+# as YAML parses it -- every key of it, including `if:`, `needs:`, `env:`,
+# `defaults:` and every step in order -- together with the workflow's top-level
+# `env:` and `defaults:`. Both are absent today, and the pin records that they
+# are absent, so adding either fails it. The parsed value is serialized as
+# sorted-key JSON. The loader refuses a repeated key and a `<<` merge key, as
+# GitHub's does, so no other copy of the job or a key can be the one hashed.
+# Any edit to that job, legitimate or not, fails here until a reviewer re-pins
+# reviewed_acquisition_job_sha256.
+reviewed_acquisition_job_sha256=ef498b200f1f0f20992682a1d9e6618643c948d6349d51008dc369591e63a150
+acquisition_job_sha256() { # <workflow file>
+  python3 -B - "$1" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+import yaml
+
+name = os.path.basename(sys.argv[1])
+
+
+class Refused(Exception):
+    pass
+
+
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+
+def strict_mapping(loader, node):
+    seen = set()
+    for key_node, _ in node.value:
+        line = key_node.start_mark.line + 1
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            raise Refused(f"acquisition pin: {name} uses a YAML merge key at line {line}, which GitHub rejects")
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise Refused(f"acquisition pin: {name} repeats the key {key!r} at line {line}, which GitHub rejects")
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, strict_mapping)
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        workflow = yaml.load(stream, Loader=StrictLoader)
+except Refused as error:
+    raise SystemExit(str(error))
+job = workflow.get("jobs", {}).get("acquire-private-node-dependencies")
+if not isinstance(job, dict):
+    raise SystemExit(f"acquisition pin: {name} has no acquire-private-node-dependencies job")
+pinned = {"job": job}
+pinned.update({key: workflow[key] for key in ("env", "defaults") if key in workflow})
+text = json.dumps(pinned, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+print(hashlib.sha256(text.encode("utf-8")).hexdigest())
+PY
+}
+acquisition_job_is_reviewed() { # <workflow file>
+  local observed status=0
+  observed="$(acquisition_job_sha256 "$1")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'FAIL - %s: could not read the private-dependency acquisition job from %s (exit %s)\n' \
+      "${0##*/}" "$1" "$status" >&2
+    return 1
+  fi
+  [ "$observed" = "$reviewed_acquisition_job_sha256" ] && return 0
+  printf 'FAIL - %s: the private-dependency acquisition job (acquire-private-node-dependencies in %s, with the workflow-level env and defaults) differs from its reviewed pin: expected sha256 %s, observed sha256 %s. It holds NODE_AUTH_TOKEN, so a legitimate edit needs a reviewed re-pin of reviewed_acquisition_job_sha256 in this test.\n' \
+    "${0##*/}" "${1##*/}" "$reviewed_acquisition_job_sha256" "$observed" >&2
+  return 1
+}
+acquisition_job_is_reviewed "$publish_workflow" || exit 1
+publish_workflow_text="$(cat "$publish_workflow")"
+mutant_workflow="$tmp/container-candidate-publish.yml"
+reviewed_install_command='--frozen-lockfile --ignore-scripts'
+reviewed_install_close="; fi'"
+reviewed_install_command_end="$reviewed_install_command$reviewed_install_close"
+reviewed_install_environment_end='            PATH="$PATH" \'
+npm_home_line='          mkdir -p "$npm_home"'
+token_env_line='          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}'
+# The transfer digest check also ends two other jobs' steps, so the anchor
+# includes the install step that follows it in this job.
+transfer_check_line="          printf '%s  %s\n' \"\$TRANSFER_SHA256\" \"\$transfer\" | sha256sum --check --strict"
+transfer_check_line="$transfer_check_line"$'\n''      - id: package-node-modules'
+acquisition_job_line='  acquire-private-node-dependencies:'
+acquisition_step_name_line='        name: Acquire exact lockfile packages without lifecycle execution'
+jobs_line=$'\n''jobs:'
+# <form>|<placement>|<injected text>|<reason>. `command` appends inside the
+# reviewed install command's quotes, `environment` adds a line to its env -i
+# list, `line` adds run lines after the npm home is created (`<NL>` starts
+# another), and `step-env` adds an entry to the install step's `env:`. The
+# other placements take the text as written, `<BR>` starting a line:
+# `earlier-step` appends to the step before it, `job-start` adds job keys,
+# `step-name` adds install-step keys, `before-job` precedes the job, and
+# `before-jobs` adds top-level keys. The reason is the pin (empty), or the
+# loader's refusal of a repeated or merge key.
+while IFS='|' read -r form placement injected reason; do
+  injected="${injected//<NL>/$'\n'"          "}"
+  injected="${injected//<BR>/$'\n'}"
+  case "$placement" in
+    command) mutant="${publish_workflow_text/"$reviewed_install_command_end"/"$reviewed_install_command$injected$reviewed_install_close"}" ;;
+    environment) mutant="${publish_workflow_text/"$reviewed_install_environment_end"/"$reviewed_install_environment_end"$'\n'"            $injected \\"}" ;;
+    line) mutant="${publish_workflow_text/"$npm_home_line"/"$npm_home_line"$'\n'"          $injected"}" ;;
+    step-env) mutant="${publish_workflow_text/"$token_env_line"/"$token_env_line"$'\n'"          $injected"}" ;;
+    earlier-step) mutant="${publish_workflow_text/"$transfer_check_line"/"${transfer_check_line%$'\n'*}"$'\n'"$injected"$'\n'"${transfer_check_line#*$'\n'}"}" ;;
+    job-start) mutant="${publish_workflow_text/"$acquisition_job_line"/"$acquisition_job_line"$'\n'"$injected"}" ;;
+    step-name) mutant="${publish_workflow_text/"$acquisition_step_name_line"/"$acquisition_step_name_line"$'\n'"$injected"}" ;;
+    before-job) mutant="${publish_workflow_text/"$acquisition_job_line"/"$injected"$'\n'"$acquisition_job_line"}" ;;
+    before-jobs) mutant="${publish_workflow_text/"$jobs_line"/$'\n'"$injected$jobs_line"}" ;;
+  esac
+  [ "$mutant" != "$publish_workflow_text" ] || { echo "acquisition mutant was not built: $form" >&2; exit 1; }
+  printf '%s\n' "$mutant" >"$mutant_workflow"
+  if acquisition_job_is_reviewed "$mutant_workflow" 2>"$tmp/acquisition-mutant.err"; then
+    echo "private dependency acquisition accepted $form" >&2; exit 1
+  fi
+  case "$reason" in
+    '') expected='private-dependency acquisition job (acquire-private-node-dependencies in container-candidate-publish.yml, with the workflow-level env and defaults) differs from its reviewed pin' ;;
+    *) expected="acquisition pin: container-candidate-publish.yml $reason" ;;
+  esac
+  grep -qF -- "$expected" "$tmp/acquisition-mutant.err" || {
+    echo "private dependency acquisition refused $form without the reason: $expected" >&2
+    sed 's/^/diag - /' "$tmp/acquisition-mutant.err" >&2
+    exit 1
+  }
+done <<'FORMS'
+a silent pnpm install after the reviewed one|command|; corepack pnpm --silent install
+a second pnpm install with an empty-string-split lifecycle override|command|; corepack pnpm install --frozen-lockfile --ignore-scripts"" --config.ignore-scripts=fals""e
+an NPM_CONFIG_IGNORE_SCRIPTS="false" environment entry|environment|NPM_CONFIG_IGNORE_SCRIPTS="false"
+an npm_config_ignore_scripts='false' environment entry|environment|npm_config_ignore_scripts='false'
+npm install with two spaces|line|npm  install
+pnpm add|line|pnpm add evil
+npm add|line|npm add evil
+npx|line|npx evil
+pnpm dlx|line|pnpm dlx evil
+pnpm update|line|pnpm update
+npm test|line|npm test
+pnpm build|line|pnpm build
+a lifecycle setting in the user npm config|line|printf 'ignore-scripts=false\n' >>"$user_config"
+an exported lifecycle setting|line|export NPM_CONFIG_IGNORE_SCRIPTS=false
+a second env -i install environment|line|env -i \
+an empty-string-split package manager|line|n""pm install
+a backslash-split package manager|line|np\m install
+a package manager split across a line continuation|line|pn\<NL>pm install
+the package manager named by a variable|line|"$PACKAGE_MANAGER" install
+the package manager named by a parameter expansion|line|${PM} install
+the package manager resolved by command substitution|line|"$(command -v "$PACKAGE_MANAGER")" install
+a PATH shim before env -i|line|PATH="$RUNNER_TEMP/shim:$PATH"
+a PATH override in the step environment|step-env|PATH: /tmp/shim:/usr/bin:/bin
+a second NODE_AUTH_TOKEN exposure in the step environment|step-env|NPM_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+an earlier step adding a shim directory to GITHUB_PATH|earlier-step|          echo "$RUNNER_TEMP/shim" >> "$GITHUB_PATH"|
+a job-level BASH_ENV|job-start|    env:<BR>      BASH_ENV: /tmp/evil.sh|
+a job-level default shell|job-start|    defaults:<BR>      run:<BR>        shell: bash --rcfile /tmp/evil.sh -e {0}|
+a top-level env|before-jobs|env:<BR>  BASH_ENV: /tmp/evil.sh|
+a duplicate run key with the malicious copy first|step-name|        run: npm install evil|repeats the key 'run' at line
+a duplicate job key with the malicious copy first|before-job|  acquire-private-node-dependencies:<BR>    runs-on: ubuntu-24.04<BR>    steps:<BR>      - run: npm install evil|repeats the key 'acquire-private-node-dependencies' at line
+a merge key in the install step environment|step-env|<<: {NODE_AUTH_TOKEN: evil}|uses a YAML merge key at line
+FORMS
+assert_absent -Eq 'subprocess|os\.system|extract(all)?\(' "$root/scripts/container_private_dependencies.py"
 grep -qF 'transfer-cache-key: ${{ steps.create-node-modules-cache-key.outputs.cache-key }}' <<<"$acquisition_job"
 grep -qF 'openssl rand -hex 32' <<<"$acquisition_job"
 grep -qF '[[ "$nonce" =~ ^[0123456789abcdef]{64}$ ]]' <<<"$acquisition_job"
@@ -1356,10 +1613,8 @@ PY
 )
 [ -d "$non_node_runner_temp/container-node-modules-context" ]
 [ -z "$(find "$non_node_runner_temp/container-node-modules-context" -mindepth 1 -print -quit)" ]
-if RUNNER_TEMP="$non_node_runner_temp" bash "$tmp/non-node-context.sh" >/dev/null 2>&1; then
-  echo "dependency context preparation accepted a pre-existing reserved path" >&2
-  exit 1
-fi
+RUNNER_TEMP="$non_node_runner_temp" refuses 'dependency context preparation accepted a pre-existing reserved path' 1 \
+  '::error::reserved container dependency context exists' bash "$tmp/non-node-context.sh"
 [ ! -e "$tmp/single/package.json" ]
 [ ! -e "$tmp/single/package-lock.json" ]
 [ ! -e "$tmp/single/node_modules" ]
@@ -1376,12 +1631,21 @@ before="$(sha256sum "$root/scripts/gen-changelog-caller.sh" "$root/.github/workf
 (cd "$tmp/single" && "$generator" workflow "$ref") >/dev/null
 after="$(sha256sum "$root/scripts/gen-changelog-caller.sh" "$root/.github/workflows/generated-artifacts.yml")"
 [ "$before" = "$after" ] || { echo "container generator drifted changelog contract artifacts" >&2; exit 1; }
-if "$generator" validator "$(printf 'a%.0s' {1..40})" >/dev/null 2>&1; then
-  echo "candidate validator generation resolved a nonexistent pin from local files" >&2
+# Git, not the generator, refuses the lookup, so the pin itself is the reason.
+missing_pin="$(printf 'a%.0s' {1..40})"
+LC_ALL=C refuses 'candidate validator generation resolved a nonexistent pin from local files' 128 "$missing_pin" \
+  "$generator" validator "$missing_pin"
+# The generated header names the pin on stdout before Git runs; only Git's
+# refusal names it on stderr.
+grep -qF -- "$missing_pin" "$tmp/refusal.err" || {
+  echo "candidate validator generation refused a nonexistent pin without Git naming it" >&2
+  sed 's/^/diag - /' "$tmp/refusal.err" >&2
   exit 1
-fi
+}
 
-bash "$root/scripts/container-contract-coexistence.test.sh"
+# container-contract-coexistence.test.sh runs once, from
+# container-release-contract.test.sh in the same CI group; running it here too
+# regenerated all three contracts a second time for no added assertion.
 
 PUBLISHER="$root/.github/workflows/container-candidate-publish.yml" \
 DISK_HELPER="$root/scripts/container_candidate_disk_usage.sh" \

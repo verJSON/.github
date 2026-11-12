@@ -11,7 +11,7 @@
 # for an opaque `false` is to widen the accepted-conclusion list, which is
 # precisely how `Verjson/verjson-cli#251`'s unexercised-head class returns.
 #
-# This script answers three separable questions and names which one failed, so
+# This script answers five separable questions and names which one failed, so
 # that relaxing any of them is a deliberate, reviewable act rather than an
 # allowlist edit made under time pressure:
 #
@@ -21,11 +21,21 @@
 #           being silently satisfied by its own absence. Every required context
 #           needs a SUCCESS of its own (a skip is not evidence its work ran), and
 #           any workflow run on the head that has not finished is pending (ADR 0229).
+#   Gate W  every required workflow a ruleset `workflows` rule names for the base ref
+#           has a successful provider-recorded run on the head, created after that
+#           ruleset last changed; only a later run of the SAME required workflow
+#           supersedes a cancelled one, and no set-aside below ever satisfies it
+#           (ADR 0255, #1905). A precondition only: it is not AI-authorization
+#           evidence, and merge admission stays with #1945.
 #   Gate B  positive evidence that verification actually executed: the head
 #           carries no ADR 0178 `deferred-ci` check that ran, and no ADR 0156
 #           deferral annotation. This is the gate a deferred Renovate head
 #           fails, and it says so in those words.
 #   Gate C  no other check on the head is pending or non-passing.
+#   Gate R  on a promotion-enabled repository (its base ref's workflows rules name the
+#           organization's arm, verJSON/.github gate-rearm.yml), the head carries a
+#           valid ADR 0202 independent-review receipt bound to this exact head,
+#           checked by the verifier the terminal merge runs (ADR 0257, #2031).
 #
 # Gates A and C set aside two shapes only. First, a non-passing check run whose
 # workflow run was cancelled and then superseded by a later successful run of the same
@@ -40,7 +50,7 @@
 # repository (ADR 0226 amendment 2026-10-15, verjson-agents#432).
 # No conclusion is added to the passing set, and Gate B always reads the raw inventory.
 #
-# Prints "true" and exits 0 only when all three hold. Every other outcome is a
+# Prints "true" and exits 0 only when all five hold. Every other outcome is a
 # fault: a `::error::` naming the gate, and a distinct exit code — never a bare
 # "false", and never a zero exit on an unanswered question.
 #
@@ -49,6 +59,15 @@
 # of the required set. Workflow runs (`actions/runs`) are read for every head (ADR 0229):
 # an unfinished run is pending, and ADR 0226 places cancelled check runs in their runs.
 # The job listing of a cancelled concurrency-family run is read under that same grant.
+# Gate R, on a promotion-enabled repository only, runs scripts/ci-gate/
+# independent-review-receipt.sh beside this script, which reads the pull request's
+# reviews (Pull requests read) and each candidate reviewer's live collaborator
+# permission (repository read). The script must therefore run from a canonical
+# checkout; without the verifier it exits 1.
+# Gate W reads `repos/{owner}/{repo}/rulesets/{id}` for each ruleset carrying a
+# `workflows` rule, for its `updated_at`; like the rules endpoint it needs only
+# repository read (verified 2026-11-03: `repos/verJSON/.github/rulesets/20722935`
+# answers a wholly unauthenticated caller).
 # A caller missing any read cannot evaluate the assertion, and
 # this script refuses rather than falling back to partial data. `administration` is
 # NOT required, and an organization-level ruleset is returned through this repository
@@ -78,9 +97,16 @@
 # than asserting either cause, because the two remedies are opposite (#1437).
 #
 #   2  usage error
-#   3  Gate A failed (required contexts absent, misattributed, pending, or not passing)
+#   3  Gate A failed (required contexts absent, misattributed, pending, or not passing),
+#      or Gate W failed (a required workflow's run absent, unbound, stale, ambiguous,
+#      undated, cancelled without a same-workflow successor, or not successful; a
+#      workflows rule changed between reads, unreadable, or sharing a path). Each Gate W
+#      refusal ends with the runbook's recovery for every reason it names.
 #   4  Gate B failed (the head was deferred; nothing on it was verified)
 #   5  Gate C failed (some other check is pending or non-passing)
+#   6  Gate R failed (no valid exact-head independent-review receipt on a
+#      promotion-enabled repository; the refusal names the verifier's reason). A
+#      review or permission read that fails is exit 1, not 6.
 #   1  the assertion could not be evaluated (API failure, unresolvable state)
 #
 # There is deliberately NO environment override for any gate's matching rule.
@@ -111,6 +137,13 @@ pr="$2"
 readonly DEFERRED_JOB_PATTERN='(^|[/ ])deferred-ci([ (/]|$)'
 readonly DEFERRED_ANNOTATION_PATTERN='^CI deferred$'
 readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
+# The organization's required authorization arm (ADR 0091, ADR 0255): verJSON/.github's
+# gate-rearm.yml. A base ref whose workflows rules name it is promotion-enabled, and
+# Gate R demands its independent-review receipt (ADR 0257). The values equal the
+# reviewed arm ruleset image in config/ai-review-required-workflow-rollout.json, and
+# scripts/assert-mergeable-head.review-receipt.test.sh fails when the two disagree.
+readonly ARM_WORKFLOW_REPOSITORY_ID=1269388380
+readonly ARM_WORKFLOW_PATH=.github/workflows/gate-rearm.yml
 # Declared concurrency families (ADR 0226, amendment 2026-10-15). A family is one
 # workflow-level concurrency group that a reusable workflow declares and every caller
 # inherits, so runs of DIFFERENT workflows displace each other from it. Membership is
@@ -118,6 +151,11 @@ readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
 # scripts/ci-gate/concurrency-family-map.test.py derives it from the workflows and
 # generators that declare and inherit the group, failing when the two disagree.
 readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml","name":"AI review authorization arm"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
+# The recovery for each Gate W refusal reason, keyed by the label the refusal opens
+# with. docs/arm-recovery-runbook.md's "Recovery by refusal reason" table is the source
+# of truth; scripts/assert-mergeable-head.required-workflow.test.sh fails when the two
+# disagree, with the runbook's links rendered as "label (path#anchor)".
+readonly GATE_W_REMEDIES='{"cancelled":"Interim recovery (docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen), or push a new head.","stale":"Re-arm sweep (docs/arm-recovery-runbook.md#re-arm-sweep-after-a-ruleset-edit): one close-and-reopen under the interim rules.","absent":"The head has no required run. Check that the repository is enrolled and the base ref carries the rule. Then use the interim recovery.","not successful":"The required run failed or skipped. Read its log and fix the cause before re-arming.","unbound":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","ambiguous":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","undated":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","changed":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","unreadable rule":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","duplicate paths":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message."}'
 # The jq definitions every program reading CONCURRENCY_FAMILIES shares (passed as
 # $families), so the candidate read and the verdict cannot disagree on membership.
 # "Owner/Repo/path@ref" -> "owner/repo/path": owner and repository are
@@ -195,6 +233,18 @@ permission_help() {
     "has been checked."
 }
 
+# The recovery the runbook gives for each distinct Gate W refusal reason, in order.
+# Total by design: a reason the table lacks is still a Gate W refusal (exit 3, never
+# exit 1's "fix access and retry"), so it escalates rather than guessing a recovery.
+readonly GATE_W_NO_RECOVERY='no runbook recovery recorded for this reason; escalate on #1905'
+gate_w_recovery() { # reason-labels-json
+  local heading='Recovery by refusal reason (docs/arm-recovery-runbook.md#recovery-by-refusal-reason): '
+  jq -rn --argjson reasons "$1" --argjson remedies "$GATE_W_REMEDIES" --arg none "$GATE_W_NO_RECOVERY" --arg heading "$heading" '
+    reduce $reasons[] as $reason ([]; if any(.[]; . == $reason) then . else . + [$reason] end)
+    | map("[\(.)] \($remedies[.] // $none)")
+    | $heading + join(" ")' 2>/dev/null \
+    || printf '%s%s\n' "$heading" "$GATE_W_NO_RECOVERY"
+}
 permission_fault() {
   local message="$1" fine_grained="$2" actions="$3"
   fault 1 "$message; if authorization failed, this endpoint needs fine-grained $fine_grained (read) or Actions permissions.$actions: read. Full caller requirements: $(permission_help)"
@@ -251,7 +301,7 @@ scratch="$(mktemp -d)" \
   || fault 1 "could not allocate a scratch directory for the API responses this assertion reads"
 trap 'rm -rf "$scratch"' EXIT
 
-pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository </dev/null)" \
+pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository,author </dev/null)" \
   || permission_fault "failed to fetch pull request metadata for $repo#$pr" "Pull requests" "pull-requests"
 
 head_sha="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
@@ -754,6 +804,126 @@ unbound="$(jq -rn --slurpfile required "$required" '
 [ -z "$unbound" ] \
   || annotate warning "Gate A matched these required contexts on display name alone, because $base_ref binds them to no app: $unbound"
 
+# ---------------------------------------------------------------- Gate W ----
+# ADR 0255 (#1905). A ruleset `workflows` rule blocks the merge unless its required
+# workflow succeeded on the head, and nothing above reads it: Gate A reads only
+# `required_status_checks`, and the ADR 0226 family set-aside dismisses exactly the run
+# such a rule needs. Gate W is a fail-closed precondition, never authorization evidence.
+required_workflows="$scratch/required-workflows.json"
+# Types are checked, never truthiness: a rule whose shape Gate W cannot read must not
+# read as a ref with no required workflow, which is the vacuous pass.
+jq -ce '
+  [ .[]? | select(type == "object" and .type == "workflows") ]
+  | if all(.[]; (.ruleset_id | type) == "number" and .ruleset_id >= 1 and (.ruleset_id | floor) == .ruleset_id
+                and (.parameters.workflows | type) == "array" and (.parameters.workflows | length) > 0
+                and all(.parameters.workflows[]; type == "object" and (.path | type) == "string" and .path != ""))
+    then [ .[] | .ruleset_id as $ruleset | .parameters.workflows[] | { ruleset_id: $ruleset, path: .path, entry: . } ]
+    else false end
+' <<<"$rules_json" >"$required_workflows" \
+  || fault 3 "Gate W: the workflows rules of $base_ref carry a rule it cannot read (each needs a numeric ruleset_id and a non-empty parameters.workflows list of entries with a path), so the required workflows of $repo#$pr cannot be established; Gate W refuses rather than read the ref as requiring none. $(gate_w_recovery '["unreadable rule"]')"
+# A run reports its path but not the repository its workflow came from, so two required
+# workflows at one path could each be satisfied by the other's run.
+duplicate_paths="$(jq -r '[ group_by(.path)[] | select(length > 1) | "\(length) required workflows at \(.[0].path)" ] | join(", ")' \
+  <"$required_workflows")" \
+  || fault 1 "failed to check the workflows rules of $repo@$base_ref for shared paths"
+[ -z "$duplicate_paths" ] \
+  || fault 3 "Gate W: the workflows rules of $base_ref name $duplicate_paths, and a run binds to its rule only by path, so no run on $repo#$pr head $head_sha can be attributed to one of them; this is ambiguous, not missing evidence, and Gate W refuses rather than guess. $(gate_w_recovery '["duplicate paths"]')"
+
+# No provider field binds a run to the rule's pinned SHA, so a run created before the
+# ruleset last changed is stale (owner timing rule, ADR 0255). Each ruleset's change
+# time is read from the repository endpoint, which needs no grant beyond repository read.
+ruleset_ids="$scratch/ruleset-ids.txt"
+jq -r '[ .[].ruleset_id ] | unique | .[]' <"$required_workflows" >"$ruleset_ids" \
+  || fault 1 "failed to list the rulesets carrying workflows rules for $repo@$base_ref"
+rulesets="$scratch/rulesets.json"
+printf '{}\n' >"$rulesets" \
+  || fault 1 "failed to record the empty ruleset inventory for $repo@$base_ref"
+while IFS= read -r ruleset_id; do
+  ruleset_raw="$scratch/ruleset-$ruleset_id.json"
+  gh api "repos/$repo/rulesets/$ruleset_id" </dev/null >"$ruleset_raw" \
+    || permission_fault "Gate W failed to read ruleset $ruleset_id of $repo, which dates its workflows rule" "Metadata" "contents"
+  jq -c --slurpfile acc "$rulesets" --arg id "$ruleset_id" '
+    if type == "object" and .id == ($id | tonumber) then
+      $acc[0] + { ($id): { updated_at: .updated_at,
+                           workflows: [ .rules[]? | select(type == "object" and .type == "workflows")
+                                        | .parameters.workflows[]? ] } }
+    else error("not the ruleset requested") end' \
+    <"$ruleset_raw" >"$rulesets.next" \
+    || fault 1 "the response for ruleset $ruleset_id of $repo is not that ruleset, so it cannot date the workflows rule; it cannot be reasoned over"
+  mv "$rulesets.next" "$rulesets" \
+    || fault 1 "failed to record ruleset $ruleset_id of $repo"
+done <"$ruleset_ids"
+
+gate_w="$(jq -cn --slurpfile required "$required_workflows" --slurpfile runs "$runs" --slurpfile rulesets "$rulesets" \
+  --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" \
+  --arg pr_head_ref "$pr_head_ref" --arg pr_head_repo "$pr_head_repo" "$FAMILY_JQ_DEFS"'
+  $required[0] as $required | $runs[0] as $runs | $rulesets[0] as $rulesets
+  # An ISO 8601 instant, with optional fractional seconds and a Z or +-HH:MM offset, as
+  # epoch seconds; null when absent or unreadable. The rulesets endpoint reports both
+  # `16:39:01.138Z` and `11:39:01.138-05:00` for the same instant.
+  | def instant:
+      if type != "string" then null
+      else (capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<frac>[.][0-9]+)?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$") // null)
+        | if . == null then null
+          else ((.base + "Z") | try fromdateiso8601 catch null) as $seconds
+          | if $seconds == null then null
+            else $seconds + ((.frac // ".0") | "0" + . | tonumber)
+              - (if .zone == "Z" then 0
+                 else (if .zone[0:1] == "-" then -1 else 1 end)
+                      * ((.zone[1:3] | tonumber) * 3600 + (.zone[4:6] | tonumber) * 60) end) end end end;
+  [ $required[]
+      | . as $rule
+      | $rulesets["\($rule.ruleset_id)"].updated_at as $changed_at
+      | ($changed_at | instant) as $changed
+      # Runs at the path that GitHub records as SOME required workflow. A repository-local
+      # caller shares the path, never the required-workflow URL.
+      | [ $runs[] | select(.path == $rule.path and (.workflow_url | type) == "string"
+                           and (.workflow_url | test("/actions/required_workflows/[0-9]+$"))) ] as $at_path
+      # Provider fields only (ADR 0255): a required-workflow URL naming the workflow id of the run
+      # itself, which a repository cannot forge, the event, and the head branch
+      # and repository of this pull request. The run name is never read: a caller
+      # chooses it.
+      | [ $at_path[]
+          | .workflow_id as $id
+          | select((.event == "pull_request" or .event == "pull_request_target")
+                   and (.workflow_url | type) == "string"
+                   and (.workflow_url | endswith("/actions/required_workflows/\($id)"))
+                   and bound_to_pr) ] as $bound
+      | [ $bound[] | select((.created_at | instant) > $changed) ] as $fresh
+      | ($fresh | max_by(.run_number)) as $newest
+      | if (any($rulesets["\($rule.ruleset_id)"].workflows[]?; . == $rule.entry) | not) then
+          "changed: ruleset \($rule.ruleset_id) no longer reports the required workflow \($rule.path)@\($rule.entry.sha // $rule.entry.ref // "an unpinned ref") that the branch rules returned, so its change time does not date that rule"
+        elif $changed == null then
+          "undated: ruleset \($rule.ruleset_id) reports no readable change time, so a run of \($rule.path) cannot be shown to postdate the current rule"
+        elif ($at_path | length) == 0 then
+          "absent: no run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) is recorded on this head; a repository-local run at that path is not one"
+        elif ($bound | length) == 0 then
+          "unbound: run \($at_path | map(.id | tostring) | join(", ")) at \($rule.path) is not bound to ruleset \($rule.ruleset_id)'"'"'s required workflow for this pull request: none is a run from pull_request or pull_request_target that GitHub names by a required-workflow URL for its own workflow id, on this pull request'"'"'s head branch and repository"
+        elif any($bound[]; (.created_at | instant) == null) then
+          ([ $bound[] | select((.created_at | instant) == null) | .id | tostring ] | join(", ")) as $undated
+          | "undated: run \($undated) of required workflow \($rule.path) reports no readable creation time, so it cannot be ordered against the change of ruleset \($rule.ruleset_id)"
+        elif ($fresh | length) == 0 then
+          "stale: every run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) on this head was created at or before the ruleset last changed at \($changed_at), so none is evidence under the current rule"
+        # Only fresh runs can vouch, so only they can be ambiguous: a required-workflow
+        # id seen only before the ruleset changed is no candidate for this rule.
+        elif ($fresh | map(.workflow_id) | unique | length) > 1 then
+          ($fresh | map(.workflow_id) | unique) as $ids
+          | "ambiguous: runs of \($ids | length) required workflows (\($ids | map(tostring) | join(", "))) at \($rule.path) bind to ruleset \($rule.ruleset_id), and no field the rule carries tells which one it requires"
+        elif $newest.status == "completed" and $newest.conclusion == "success" then empty
+        elif $newest.conclusion == "cancelled" then
+          "cancelled: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) was cancelled and no later run of the same required workflow on this head succeeded"
+        else "not successful: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) is \($newest.status)/\($newest.conclusion)" end ]')" \
+  || fault 1 "failed to evaluate the required workflows of $repo#$pr"
+
+if [ "$gate_w" != "[]" ]; then
+  # Stating the refusal never changes its exit: every fallback below still faults 3.
+  gate_w_reasons="$(jq -r 'join("; ")' <<<"$gate_w")" || gate_w_reasons="$gate_w"
+  gate_w_labels="$(jq -c 'map((capture("^(?<reason>[^:]+): ") // { reason: "unlabeled" }).reason)' <<<"$gate_w")" \
+    || gate_w_labels='["unlabeled"]'
+  gate_w_recovery="$(gate_w_recovery "$gate_w_labels")"
+  fault 3 "Gate W: $repo#$pr head $head_sha does not carry a successful run of every required workflow of $base_ref — $gate_w_reasons. GitHub's workflows rule blocks this merge whatever Gates A and C say. A required run cannot be re-run (gh run rerun answers 404) and must never be bypassed, and this gate is never widened. $gate_w_recovery"
+fi
+
 # ---------------------------------------------------------------- Gate B ----
 # A check entry proves a check REPORTED; it does not prove the check did work.
 # ADR 0178's `deferred-ci` runs only on a defer, so its having RUN at all — any
@@ -813,5 +983,55 @@ gate_c="$(jq -rn --argjson pass "$PASSING" --slurpfile checks "$gated_checks" '
 
 [ -z "$gate_c" ] \
   || fault 5 "Gate C: $repo#$pr head $head_sha has pending or non-passing checks outside the required set — $gate_c"
+
+# ---------------------------------------------------------------- Gate R ----
+# ADR 0257 (#2031). A promotion-enabled repository is one whose base ref carries the
+# organization's required authorization arm: a `workflows` rule naming
+# verJSON/.github's gate-rearm.yml. Reading the effective rule, not a property, keeps
+# this true under either arm selector (ADR 0206) and false where ADR 0252 excludes a
+# paused repository. There, an autonomous merge needs the ADR 0202 independent-review
+# receipt for this exact head, checked by the same verifier the terminal merge runs.
+# Types are checked, never truthiness: an entry at the arm's path whose repository is
+# unreadable would otherwise read as "not promotion-enabled", the direction that skips
+# the receipt.
+promotion_enabled="$(jq -r --argjson id "$ARM_WORKFLOW_REPOSITORY_ID" --arg path "$ARM_WORKFLOW_PATH" '
+  [ .[]? | select(type == "object" and .type == "workflows") | .parameters.workflows[]?
+    | select(type == "object" and .path == $path) ]
+  | if all(.[]; (.repository_id | type) == "number") then any(.[]; .repository_id == $id)
+    else error("unclassifiable arm entry") end' <<<"$rules_json")" \
+  || fault 1 "Gate R cannot establish whether $repo@$base_ref is promotion-enabled: a workflows rule names $ARM_WORKFLOW_PATH without a numeric repository_id"
+if [ "$promotion_enabled" = true ]; then
+  receipt_verifier="$(dirname "${BASH_SOURCE[0]}")/ci-gate/independent-review-receipt.sh"
+  [ -r "$receipt_verifier" ] \
+    || fault 1 "Gate R cannot evaluate $repo#$pr: its receipt verifier $receipt_verifier is missing; run the assertion from a canonical verJSON/.github checkout"
+  # Only the verifier's documented results are trusted: 0 passes, 1 refuses the receipt
+  # (exit 6), and 3 means a read failed, so the receipt is unanswered, an evaluation
+  # fault like every other API failure here. Any other status, a usage error or a
+  # signal, is an evaluation fault too, never a refusal and never a pass.
+  receipt_status=0
+  bash "$receipt_verifier" "$repo" "$pr" "$head_sha" "$scratch/receipt.tsv" </dev/null >"$scratch/receipt.out" 2>&1 \
+    || receipt_status=$?
+  receipt_reason="$(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
+  case "$receipt_status" in
+    0) ;;
+    1) fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $receipt_reason" ;;
+    3) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: $receipt_reason" ;;
+    *) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: its receipt verifier exited with unexpected status $receipt_status" ;;
+  esac
+  # A pass is believed only with the result it promises. This script runs without -e,
+  # so an unread or malformed result must fault here rather than reach `echo true`.
+  IFS=$'\t' read -r receipt_id receipt_reviewer <"$scratch/receipt.tsv" \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: could not read the verifier's result"
+  [[ "$receipt_id" =~ ^[123456789][0123456789]*$ ]] && [ -n "$receipt_reviewer" ] \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: the verifier's result is malformed"
+  # ADR 0257's time-boxed exception: until #1964 issues separate identities, agents
+  # author and review through one account. Such a receipt still counts, but is named so
+  # it is never presented as plain independent review. Visibility only: it gates
+  # nothing, and its absence does not prove distinct identity, because pushers and
+  # committers of the head range are not compared until the #1964 switch-on.
+  pr_author="$(jq -r '.author.login? // "" | strings' <<<"$pr_json")" || pr_author=""
+  [ -z "$pr_author" ] || [ "$receipt_reviewer" != "$pr_author" ] \
+    || annotate notice "Gate R: receipt $receipt_id on $repo#$pr head $head_sha is a shared-identity-review: its reviewer $receipt_reviewer is the pull request's author, accepted only as ADR 0257's time-boxed exception until #1964 issues distinct identities, not as independent review"
+fi
 
 echo true

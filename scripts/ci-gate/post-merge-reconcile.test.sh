@@ -132,14 +132,17 @@ expect_noop() {
   fi
 }
 expect_rejected() {
-  local label="$1"
-  if ! run_evidence && ! grep -q '/artifacts' "$EVIDENCE_LOG"; then
+  local label="$1" reason="$2"
+  if ! run_evidence && ! grep -q '/artifacts' "$EVIDENCE_LOG" && grep -qF -- "$reason" "$tmp/evidence.out"; then
     printf 'ok   - %s\n' "$label"
   else
-    printf 'FAIL - %s\n' "$label"
+    printf 'FAIL - %s: expected %s, got: %s\n' "$label" "$reason" "$(tail -1 "$tmp/evidence.out")"
     exit 1
   fi
 }
+not_actions_check='::error::AI authorization check is not a successful exact-head GitHub Actions check'
+bad_marker='::error::AI authorization marker is malformed, stale, or forged'
+one_dispatch_job='expected one dispatch-merge job'
 expect_legacy_noop() {
   local label="$1"
   if run_evidence && grep -qx 'eligible=false' "$GITHUB_OUTPUT" \
@@ -164,7 +167,8 @@ done
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-approve -->'
 expect_noop "ai-approve post-merge path is a successful no-op"
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-approve -->' completed failure
-expect_rejected "unsuccessful ai-approve evidence fails closed"
+expect_rejected "unsuccessful ai-approve evidence fails closed" \
+  "$not_actions_check"
 
 write_valid_ai_evidence
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-merge -->'
@@ -193,7 +197,8 @@ else
   exit 1
 fi
 write_valid_ai_evidence .github/workflows/ai-review-merge-dispatch-lookalike.yml
-expect_rejected "canonical lookalike dispatch path rejected"
+expect_rejected "canonical lookalike dispatch path rejected" \
+  '::error::review run is not a successful default-branch dispatch of the trusted review workflow'
 TARGET_REPO=Verjson/example
 AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
 AI_REVIEW_LEGACY_DISPATCH_WORKFLOW=
@@ -210,7 +215,8 @@ fi
 
 write_valid_ai_evidence
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-merge -->' completed success "$EXPECTED_APP_ID" "$EXPECTED_APP_SLUG"
-expect_rejected "legacy review-App-owned authorization is rejected after compatibility retirement"
+expect_rejected "legacy review-App-owned authorization is rejected after compatibility retirement" \
+  "$not_actions_check"
 
 write_valid_ai_evidence
 write_check $'Legacy AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111 -->'
@@ -228,24 +234,32 @@ fi
 write_dispatch_job skipped
 expect_legacy_noop "legacy ai-approve marker with skipped dispatch is a successful no-op"
 write_dispatch_job failure
-expect_rejected "legacy marker with failed dispatch evidence fails closed"
+expect_rejected "legacy marker with failed dispatch evidence fails closed" \
+  '::error::legacy AI authorization lacks a successful ai-merge dispatch'
 printf '{"jobs":[]}\n' >"$JOBS_FILE"
-expect_rejected "legacy marker without dispatch evidence fails closed"
+expect_rejected "legacy marker without dispatch evidence fails closed" \
+  "$one_dispatch_job"
 printf '{"jobs":[{"name":"dispatch-merge","status":"completed","conclusion":"success"},{"name":"dispatch-merge","status":"completed","conclusion":"success"}]}\n' >"$JOBS_FILE"
-expect_rejected "ambiguous legacy dispatch evidence fails closed"
+expect_rejected "ambiguous legacy dispatch evidence fails closed" \
+  "$one_dispatch_job"
 
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:2222222222222222222222222222222222222222:ai-merge -->'
-expect_rejected "stale AI authorization marker fails closed"
+expect_rejected "stale AI authorization marker fails closed" \
+  "$bad_marker"
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9999:1111111111111111111111111111111111111111:ai-merge -->'
-expect_rejected "forged AI authorization marker fails closed"
+expect_rejected "forged AI authorization marker fails closed" \
+  "$bad_marker"
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:not-a-check:1111111111111111111111111111111111111111:ai-merge -->'
-expect_rejected "malformed AI authorization marker fails closed"
+expect_rejected "malformed AI authorization marker fails closed" \
+  "$bad_marker"
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-merge -->' completed failure
-expect_rejected "unsuccessful check cannot carry AI merge evidence"
+expect_rejected "unsuccessful check cannot carry AI merge evidence" \
+  "$not_actions_check"
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-merge -->'
 jq '.[0].body="<!-- ai-review-authorization:9999 -->\n<!-- ai-review-run:8001 -->"' \
   "$REVIEWS_FILE" >"$tmp/changed-reviews.json" && mv "$tmp/changed-reviews.json" "$REVIEWS_FILE"
-expect_rejected "approval bound to another authorization check fails closed"
+expect_rejected "approval bound to another authorization check fails closed" \
+  '::error::exact-head approval is bound to another authorization check'
 
 PATH="${PATH#*:}"
 mkdir "$tmp/bin"

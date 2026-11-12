@@ -89,22 +89,25 @@ jobs:
           ENVIRONMENT: ${{ inputs.ai_review_environment || 'ai-review-app' }}
         run: |
           set -euo pipefail
-          case "$ROLE" in release|merge|ai-review) ;; *) exit 1 ;; esac
-          [ "$ENVIRONMENT" = "$ROLE-app" ]
-          [ "$REF" = refs/heads/main ]
-          [ "$DEFAULT_BRANCH" = main ]
-          environment_record=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT")
+          fail() { echo "::error::$1" >&2; exit 1; }
+          case "$ROLE" in release|merge|ai-review) ;; *) fail "App key role is not a canonical role" ;; esac
+          [ "$ENVIRONMENT" = "$ROLE-app" ] || fail "App key environment is not the role's own environment"
+          [ "$REF" = refs/heads/main ] || fail "App key job ref is not refs/heads/main"
+          [ "$DEFAULT_BRANCH" = main ] || fail "repository default branch is not main"
+          environment_record=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT") ||
+            fail "App key environment metadata is unavailable"
           jq -e --arg name "$ENVIRONMENT" '
             .name == $name and (.id | type == "number" and . > 0) and
             .deployment_branch_policy.protected_branches == false and
             .deployment_branch_policy.custom_branch_policies == true
-          ' <<<"$environment_record" >/dev/null
-          policies=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies?per_page=100")
+          ' <<<"$environment_record" >/dev/null || fail "App key environment does not use explicit main-only branch admission"
+          policies=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies?per_page=100") ||
+            fail "App key environment branch policies are unavailable"
           jq -e '
             .total_count == 1 and (.branch_policies | length) == 1 and
             .branch_policies[0].name == "main" and
             .branch_policies[0].type == "branch"
-          ' <<<"$policies" >/dev/null
+          ' <<<"$policies" >/dev/null || fail "App key environment permits a ref other than the main branch"
   validate-ai-review-key:
     needs: app-key-policy
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || 'ubuntu-24.04') }}
@@ -169,6 +172,11 @@ jobs:
       ARM_RUN_ATTEMPT: ${{ github.run_attempt }}
       # jq 1.6 parses ISO timestamps in the process timezone on some systems.
       TZ: UTC
+      # Who invoked this arm, for the recovery advice only (ADR 0255 section 6): a
+      # direct, org-required run has no caller input, and every generated caller
+      # passes one. Neither value gates any job or step (ADR 0255 section 3).
+      ARM_WORKFLOW_REF: ${{ github.workflow_ref }}
+      ARM_CALLER_ENVIRONMENT: ${{ inputs.ai_review_environment }}
       ACQUISITION_LIMIT_SECONDS: '900'
       POLL_INTERVAL_SECONDS: '15'
       CANCEL_GRACE_SECONDS: '120'
@@ -218,7 +226,27 @@ jobs:
                     echo "stalled_job_id=$stalled_job_id"
                     echo 'stalled=true'
                   } >>"$GITHUB_OUTPUT"
-                  jq -r --arg run "$ARM_RUN_ID" '"::error title=Runner acquisition stalled::\(.name) waited \(.age)s for a runner labelled [\(.labels)], past the \(env.ACQUISITION_LIMIT_SECONDS)s limit. Cancelling arm run \($run) to release this pull request'"'"'s arm concurrency group; re-run the arm or push to re-arm."' <<<"$verdict"
+                  # The recovery differs by invocation (ADR 0255 section 6). A required
+                  # run and a label or lifecycle delivery cannot be re-run, so only a
+                  # caller head run is advised to, and only where no organization arm is
+                  # required (amended 2026-11-06); recovery is possible, never assured.
+                  runbook="https://github.com/verJSON/.github/blob/main/docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen"
+                  reopen="close and reopen the pull request (a human or App actor only, at most 2 attempts per head, only when no run of its arm family is queued or in progress, never a bypass), or push a new head; see $runbook"
+                  if [ -z "${ARM_CALLER_ENVIRONMENT:-}" ]; then
+                    recovery="This is the org-required arm, which cannot be re-run (gh run rerun answers 404): $reopen."
+                  else
+                    case "${ARM_WORKFLOW_REF:-}" in
+                      "$TARGET_REPO/.github/workflows/gate-rearm.yml@"*)
+                        recovery="This is the repository's gate re-arm caller run: push a new head, or re-run this run only where the base ref requires no organization arm. Where it does, a re-run joins the arm's concurrency group and can displace the pending required run, and it never restores a cancelled one; see $runbook." ;;
+                      "$TARGET_REPO/.github/workflows/ai-review-label-rearm.yml@"*)
+                        recovery="This is a label delivery, which refuses a second attempt: remove and re-apply the label." ;;
+                      "$TARGET_REPO/.github/workflows/ai-review-lifecycle-rearm.yml@"*)
+                        recovery="This is a lifecycle delivery, which refuses a second attempt: repeat the lifecycle transition (for example convert to draft and mark ready again), or push a new head." ;;
+                      *)
+                        recovery="This is an unrecognized arm invocation: $reopen." ;;
+                    esac
+                  fi
+                  jq -r --arg run "$ARM_RUN_ID" --arg recovery "$recovery" '"::error title=Runner acquisition stalled::\(.name) waited \(.age)s for a runner labelled [\(.labels)], past the \(env.ACQUISITION_LIMIT_SECONDS)s limit. Cancelling arm run \($run) to release the arm concurrency group of this pull request. \($recovery)"' <<<"$verdict"
                   gh api --method POST "repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/cancel" >/dev/null ||
                     echo "::warning::cancel request for arm run $ARM_RUN_ID was not accepted"
                   exit 1
@@ -458,7 +486,10 @@ jobs:
           fi
 
           meta="$(GH_TOKEN="$ACTIONS_TOKEN" gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" \
-            --json id,state,isDraft,title,labels,headRefOid,headRepositoryOwner,autoMergeRequest)"
+            --json id,state,isDraft,title,labels,headRefOid,headRepositoryOwner,autoMergeRequest)" || {
+            echo "::error::current PR metadata could not be read"
+            exit 1
+          }
           state="$(jq -r '.state' <<<"$meta")"
           head_sha="$(jq -r '.headRefOid // ""' <<<"$meta")"
           head_owner="$(jq -r '.headRepositoryOwner.login // ""' <<<"$meta")"
@@ -862,9 +893,15 @@ jobs:
                    $p[2] == $repo and $p[3] == $pr and $p[4] == $head and
                    ($p[5] | test("^[1-9][0-9]*$")) and
                    ($p[6] | test("^[1-9][0-9]*$")) and ($p[7] | test("^[0-9a-f]{64}$")) then $p[5] else "" end' <<<"$latest")"
-            [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]] || exit 1
+            [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]] || {
+              echo "::error::the approved authorization check does not name an arm run for this exact pull request head; refusing re-promotion"
+              exit 1
+            }
             arm_run_attempt="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id" --jq '.run_attempt // ""')"
-            [[ "$arm_run_attempt" =~ ^[123456789][0123456789]*$ ]] || exit 1
+            [[ "$arm_run_attempt" =~ ^[123456789][0123456789]*$ ]] || {
+              echo "::error::the approved authorization's arm run attempt is unavailable or malformed; refusing re-promotion"
+              exit 1
+            }
             receipt_name="ai-review-arm-$arm_run_id-$arm_run_attempt"
             receipt_count="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id/artifacts?per_page=100" \
               --jq "[.artifacts[] | select(.name == \"$receipt_name\" and .expired == false)] | length")"
@@ -916,6 +953,7 @@ jobs:
                 'The pending authorization cannot be tied to a live exact arm receipt. An administrator must recover the authorization without dispatching another model review.')"
               GH_TOKEN="$ACTIONS_TOKEN" gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" \
                 --body "$notice_body"
+              echo "::error::the pending authorization cannot be tied to a live exact arm receipt; administrator recovery is required"
               exit 1
             fi
             notice_body="$(printf '<!-- ai-review-hold-clear:%s -->\n%s' "$head_sha" \
@@ -1535,7 +1573,9 @@ jobs:
           fi
           patched="$(GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \
             -f status=completed -f conclusion="$conclusion" \
-            -f "output[title]=$title" -f "output[summary]=$summary")"
+            -f "output[title]=$title" -f "output[summary]=$summary")" || {
+              echo "::error::authorization check completion request failed"; exit 1;
+            }
           jq -e --argjson id "$CHECK_ID" --arg conclusion "$conclusion" \
             '.id == $id and .status == "completed" and .conclusion == $conclusion' <<<"$patched" >/dev/null || {
               echo "::error::authorization check completion was not confirmed"; exit 1;
@@ -1551,7 +1591,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
+          [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || {
+            echo "::error::default branch is not a safe review dispatch ref"
+            exit 1
+          }
           fail_authorization() {
             local title="$1" summary="$2"
             GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \

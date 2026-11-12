@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,10 @@ REPOSITORY = "ghcr.io/verjson/example"
 DIGEST = "sha256:" + "a" * 64
 BASE_REPOSITORY = "ghcr.io/verjson/base"
 BASE_DIGEST = "sha256:" + "b" * 64
+
+
+def exactly(reason):
+    return "^" + re.escape(reason) + "$"
 
 
 def evidence():
@@ -109,9 +114,15 @@ class RetryEvidenceTests(unittest.TestCase):
         )
 
     def test_rejects_missing_duplicate_or_malformed_verification(self):
-        for value in ([], evidence() * 2, {}, [None]):
+        unique = "exactly one verified provenance attestation is required"
+        for value, reason in (
+            ([], unique),
+            (evidence() * 2, unique),
+            ({}, unique),
+            ([None], "verified provenance must be an object"),
+        ):
             with self.subTest(value=value):
-                with self.assertRaises(MODULE.RetryEvidenceError):
+                with self.assertRaisesRegex(MODULE.RetryEvidenceError, exactly(reason)):
                     MODULE.validate_verified_provenance(
                         value, repository=REPOSITORY, digest=DIGEST
                     )
@@ -403,7 +414,9 @@ class CosignProvenancePolicyTests(unittest.TestCase):
             with self.subTest(identity=identity, claim=claim):
                 statement = candidate_statement()
                 statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"][identity][claim] = value
-                with self.assertRaises(MODULE.RetryEvidenceError):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, exactly(f"Cosign provenance {identity} authorization differs")
+                ):
                     MODULE.validate_cosign_provenance(
                         statement,
                         buildkit_provenance=buildkit_provenance(),
@@ -421,15 +434,18 @@ class CosignProvenancePolicyTests(unittest.TestCase):
                     )
 
     def test_rejects_multiple_subjects_wrong_digest_and_wrong_predicate(self):
-        for mutate in (
-            lambda value: value["subject"].append(copy.deepcopy(value["subject"][0])),
-            lambda value: value["subject"][0]["digest"].update({"sha256": "e" * 64}),
-            lambda value: value.update({"predicateType": "https://example.invalid/provenance"}),
+        for mutate, reason in (
+            (lambda value: value["subject"].append(copy.deepcopy(value["subject"][0])),
+             "Cosign provenance must name exactly one subject"),
+            (lambda value: value["subject"][0]["digest"].update({"sha256": "e" * 64}),
+             "Cosign provenance subject digest differs"),
+            (lambda value: value.update({"predicateType": "https://example.invalid/provenance"}),
+             "Cosign provenance predicate type differs"),
         ):
             with self.subTest(mutate=mutate):
                 statement = candidate_statement()
                 mutate(statement)
-                with self.assertRaises(MODULE.RetryEvidenceError):
+                with self.assertRaisesRegex(MODULE.RetryEvidenceError, exactly(reason)):
                     MODULE.validate_cosign_provenance(
                         statement,
                         buildkit_provenance=buildkit_provenance(),
@@ -613,9 +629,16 @@ class SameRepositoryPublisherTests(unittest.TestCase):
                     build_statement(same_repository_claims(job_workflow_ref=publisher))
 
     def test_rejects_malformed_publisher_shas_even_when_the_ref_matches(self):
-        for sha in ("C" * 40, "c" * 39, "c" * 41, "", "g" * 40):
+        malformed = "GitHub OIDC publisher workflow SHA must be a 40-hex commit"
+        for sha, reason in (
+            ("C" * 40, malformed),
+            ("c" * 39, malformed),
+            ("c" * 41, malformed),
+            ("", "GitHub OIDC job_workflow_sha must be a non-empty string"),
+            ("g" * 40, malformed),
+        ):
             with self.subTest(sha=sha):
-                with self.assertRaises(MODULE.RetryEvidenceError):
+                with self.assertRaisesRegex(MODULE.RetryEvidenceError, exactly(reason)):
                     build_statement(
                         same_repository_claims(
                             job_workflow_ref=f"Verjson/.github/.github/workflows/container-candidate-publish.yml@{sha}",

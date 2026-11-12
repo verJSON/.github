@@ -238,12 +238,26 @@ class JobResult:
         self.stderr = stderr
 
 
-def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None, ambient_timezone=None):
+# How the arm was invoked, as the runner resolves `github.workflow_ref` and the caller's
+# `ai_review_environment` input: a direct (org-required) run has no input, and every
+# generated caller passes one (ADR 0255 §6).
+REQUIRED_INVOCATION = {"ARM_WORKFLOW_REF": "verJSON/.github/.github/workflows/gate-rearm.yml@refs/heads/main",
+                       "ARM_CALLER_ENVIRONMENT": ""}
+
+
+def caller_invocation(path):
+    return {"ARM_WORKFLOW_REF": f"{REPOSITORY}/{path}@refs/heads/main", "ARM_CALLER_ENVIRONMENT": "ai-review-app"}
+
+
+def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None, invocation=None,
+                 caller_environment=None):
     """Run the job's steps in order, honoring each step's `if` the way the runner would.
 
     `preset_outputs` runs every step unconditionally with those step outputs, to exercise a
-    step's own guard in isolation.
+    step's own guard in isolation. `invocation` overrides the default required invocation.
+    `caller_environment` replaces the process environment the harness starts from.
     """
+    caller_environment = os.environ if caller_environment is None else caller_environment
     job_definition = watchdog_job()
     with tempfile.TemporaryDirectory() as directory:
         stub_dir = Path(directory)
@@ -258,13 +272,11 @@ def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=N
         (stub_dir / "polls").write_text("0\n", encoding="utf-8")
         (stub_dir / "clock").write_text(f"{START}\n", encoding="utf-8")
         (stub_dir / "calls").write_text("", encoding="utf-8")
-        env = {key: value for key, value in os.environ.items()
+        env = {key: value for key, value in caller_environment.items()
                if not key.startswith(("GITHUB_", "RUNNER_"))}
-        if ambient_timezone is not None:
-            env["TZ"] = ambient_timezone
         env.update({key: str(value) for key, value in job_definition["env"].items()})
         env.update({
-            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{bin_dir}{os.pathsep}{caller_environment['PATH']}",
             "STUB_DIR": str(stub_dir),
             "TARGET_REPO": REPOSITORY,
             "ARM_RUN_ID": RUN_ID,
@@ -273,6 +285,7 @@ def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=N
             "STUB_RUN_ID": RUN_ID,
             "STUB_RUN_ATTEMPT": "1",
         })
+        env.update(invocation or REQUIRED_INVOCATION)
         failed = False
         stdout = stderr = ""
         outputs = dict(preset_outputs or {})
@@ -368,6 +381,74 @@ def test_unreachable_lane_cancels_then_force_cancels_and_names_the_stalled_job()
     assert "app-key-policy / validate-ai-review-key" in completed.stdout, completed.stdout
     assert "self-hosted,general" in completed.stdout, completed.stdout
     assert limit_seconds() <= elapsed <= limit_seconds() + 300, elapsed
+
+
+def test_a_caller_outside_utc_sees_the_stall_deadline_a_hosted_runner_sees():
+    # Hosted runners run in UTC; jq 1.6's fromdateiso8601 honors TZ, so a caller's
+    # daylight-saving zone would move every job's age by its UTC offset (#1999).
+    caller = {**os.environ, "TZ": "America/New_York"}
+    completed, calls, elapsed = run_watchdog(ghost_key_validation(), caller_environment=caller)
+    assert completed.returncode != 0, completed.stdout
+    assert cancellations(calls) == ["cancel", "force-cancel"], calls
+    assert limit_seconds() <= elapsed <= limit_seconds() + 300, elapsed
+
+
+RUNBOOK = "https://github.com/verJSON/.github/blob/main/docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen"
+
+
+def stall_message(invocation):
+    completed, calls, _ = run_watchdog(ghost_key_validation(), invocation=invocation)
+    assert cancellations(calls)[:1] == ["cancel"], calls
+    lines = [line for line in completed.stdout.splitlines()
+             if line.startswith("::error title=Runner acquisition stalled::")]
+    assert len(lines) == 1, completed.stdout
+    return lines[0]
+
+
+def test_a_stalled_required_run_advises_close_and_reopen_under_the_interim_rules_never_a_rerun():
+    message = stall_message(REQUIRED_INVOCATION)
+    assert "the org-required arm, which cannot be re-run (gh run rerun answers 404)" in message, message
+    assert ("close and reopen the pull request (a human or App actor only, at most 2 attempts per head, "
+            "only when no run of its arm family is queued or in progress, never a bypass), or push a new head") in message, message
+    assert RUNBOOK in message, message
+    assert "re-run the arm" not in message, message
+
+
+def test_a_stalled_caller_head_run_advises_a_new_head_and_a_rerun_only_where_no_org_arm_is_required():
+    # ADR 0255 section 6 as amended 2026-11-06 (F-1R): a re-run of the caller joins the
+    # arm's group outside the quiet-family check and can displace a pending required run.
+    message = stall_message(caller_invocation(".github/workflows/gate-rearm.yml"))
+    assert ("the repository's gate re-arm caller run: push a new head, or re-run this run only where "
+            "the base ref requires no organization arm") in message, message
+    assert "a re-run joins the arm's concurrency group and can displace the pending required run" in message, message
+    assert RUNBOOK in message, message
+    assert "re-run this run, or push" not in message, message
+    assert "close and reopen" not in message, message
+
+
+def test_a_stalled_label_delivery_advises_removing_and_reapplying_the_label():
+    message = stall_message(caller_invocation(".github/workflows/ai-review-label-rearm.yml"))
+    assert "a label delivery, which refuses a second attempt: remove and re-apply the label" in message, message
+    assert "re-run" not in message.replace("cannot be re-run", ""), message
+
+
+def test_a_stalled_lifecycle_delivery_advises_repeating_the_transition():
+    message = stall_message(caller_invocation(".github/workflows/ai-review-lifecycle-rearm.yml"))
+    assert ("a lifecycle delivery, which refuses a second attempt: repeat the lifecycle transition "
+            "(for example convert to draft and mark ready again), or push a new head") in message, message
+
+
+def test_an_unrecognized_caller_gets_only_the_recovery_that_works_for_every_kind():
+    message = stall_message(caller_invocation(".github/workflows/some-other-caller.yml"))
+    assert "an unrecognized arm invocation: close and reopen the pull request" in message, message
+    assert RUNBOOK in message, message
+    assert "re-run this run" not in message, message
+
+
+def test_the_recovery_advice_reads_only_runner_resolved_invocation_identity():
+    env = watchdog_job()["env"]
+    assert env["ARM_WORKFLOW_REF"] == "${{ github.workflow_ref }}", env
+    assert env["ARM_CALLER_ENVIRONMENT"] == "${{ inputs.ai_review_environment }}", env
 
 
 def test_a_cancel_that_takes_effect_is_not_escalated_over_the_failure_reporting_arm():
@@ -516,13 +597,14 @@ def test_timezone_does_not_change_the_acquisition_deadline():
         )
 
     for timezone in ("UTC", "America/New_York"):
+        caller = {**os.environ, "TZ": timezone}
         before, calls, elapsed = run_watchdog(
-            [queued(1 - limit), healthy_runs()[-1]], ambient_timezone=timezone
+            [queued(1 - limit), healthy_runs()[-1]], caller_environment=caller
         )
         assert before.returncode == 0, (timezone, before.stderr, calls)
         assert cancellations(calls) == [], (timezone, calls)
         assert elapsed == env_seconds("POLL_INTERVAL_SECONDS"), (timezone, elapsed)
-        at_limit, calls, _ = run_watchdog([queued(-limit)], ambient_timezone=timezone)
+        at_limit, calls, _ = run_watchdog([queued(-limit)], caller_environment=caller)
         assert at_limit.returncode != 0, (timezone, at_limit.stderr)
         assert posts(calls)[0][0] == START, (timezone, calls)
         assert cancellations(calls) == ["cancel", "force-cancel"], (timezone, calls)

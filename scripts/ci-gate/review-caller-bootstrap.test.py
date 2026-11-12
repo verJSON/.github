@@ -9,6 +9,8 @@ the real named workflow steps; the stub `gh` serves fixture API responses.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
+import functools
 import hashlib
 import json
 import os
@@ -16,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import yaml
@@ -58,17 +61,27 @@ def policy(authority: str | None) -> str:
     return encoded.rstrip("=")
 
 failures = 0
+failures_lock = threading.Lock()
+# Each concurrent check collects its report lines here; run_checks prints them in
+# submission order, so the log reads exactly as a serial run would.
+check_output = threading.local()
 
 
 def report(ok: bool, name: str, result: subprocess.CompletedProcess | None = None) -> None:
     global failures
-    print(("ok   - " if ok else "FAIL - ") + name)
+    lines = [("ok   - " if ok else "FAIL - ") + name]
     if not ok:
-        failures += 1
+        with failures_lock:
+            failures += 1
         if result is not None:
             # JSON-escaped so step output (which quotes untrusted paths) cannot emit commands.
             tail = (result.stdout + result.stderr)[-600:]
-            print(f"       exit={result.returncode} output-tail={json.dumps(tail)}")
+            lines.append(f"       exit={result.returncode} output-tail={json.dumps(tail)}")
+    sink = getattr(check_output, "lines", None)
+    if sink is None:
+        print("\n".join(lines))
+    else:
+        sink.extend(lines)
 
 
 def generate_caller(sha: str) -> bytes:
@@ -290,6 +303,13 @@ sys.stdout.write(json.dumps(routes[path]))
 
 
 STEP_ENVIRONMENT_ALLOWLIST = frozenset({"PATH", "LD_LIBRARY_PATH", "LANG", "TMPDIR", "pythonLocation"})
+BOOTSTRAP_PROGRAM = "review-caller-bootstrap.py"
+
+# complete() runs the same bootstrap step against the same consumer for nearly
+# every case, and only its outputs and the proof program it writes to RUNNER_TEMP
+# reach bootstrap-complete. Keyed by everything that step reads (#1997).
+bootstrap_cache: dict[tuple[str, str, str], tuple[dict[str, str], bytes | None]] = {}
+bootstrap_cache_lock = threading.Lock()
 
 
 class Harness:
@@ -318,7 +338,7 @@ class Harness:
     def complete(self, consumer: Consumer, authority: str | None = "ai-merge", later: Consumer | None = None,
                  **overrides: str):
         self.reset_state()
-        _, outputs = self.run_step("bootstrap", consumer)
+        outputs = self.bootstrap_outputs(consumer)
         consumer = later or consumer
         env = {
             "EXPECTED_EXTERNAL_ID": EXTERNAL_ID,
@@ -335,6 +355,31 @@ class Harness:
         env.update(overrides)
         result, completion = self.run_step("bootstrap-complete", consumer, env)
         return result, completion, self.recorded()
+
+    def bootstrap_outputs(self, consumer: Consumer) -> dict[str, str]:
+        step = self.steps.get("bootstrap")
+        if step is None:
+            raise AssertionError("arm step 'bootstrap' is missing")
+        key = (step["run"], json.dumps(consumer.routes(), sort_keys=True), self.path_prefix)
+        program = self.tmp / BOOTSTRAP_PROGRAM
+        with bootstrap_cache_lock:
+            cached = bootstrap_cache.get(key)
+        if cached is None:
+            # The program bootstrap-complete runs is the one this step wrote, or
+            # none: never a stale copy from an earlier step in this harness.
+            program.unlink(missing_ok=True)
+            result, outputs = self.run_step("bootstrap", consumer)
+            cached = (outputs, program.read_bytes() if program.exists() else None)
+            # A failed run is not cached, so a transient failure costs one case
+            # rather than every case that shares the key.
+            if result.returncode == 0:
+                with bootstrap_cache_lock:
+                    bootstrap_cache.setdefault(key, cached)
+        elif cached[1] is None:
+            program.unlink(missing_ok=True)
+        else:
+            program.write_bytes(cached[1])
+        return dict(cached[0])
 
     def run_step(self, step_id: str, consumer: Consumer, extra_env: dict[str, str] | None = None):
         step = self.steps.get(step_id)
@@ -817,171 +862,226 @@ def poison_outer_environment() -> Path:
     return hostile
 
 
+
+
+def worker_count() -> int:
+    """The CPUs actions-ci grants this row (ADR 0225), else this host's."""
+    granted = os.environ.get("ACTIONS_CI_AVAILABLE_CPUS", "")
+    return int(granted) if granted.isdecimal() and int(granted) > 0 else os.cpu_count() or 2
+
+
+worker_state = threading.local()
+
+
+def worker_harness() -> Harness:
+    """One Harness per worker: run_step rewrites its harness's fixed scratch files."""
+    if not hasattr(worker_state, "harness"):
+        worker_state.harness = Harness()
+    return worker_state.harness
+
+
+def run_checks(checks) -> None:
+    """Run independent checks concurrently, then report each in submission order.
+
+    Every step runs in its own subprocesses, so worker threads overlap their waits.
+    A check that raises still prints what it reported first, then fails the suite.
+    """
+    def run(check):
+        check_output.lines = []
+        try:
+            check(worker_harness())
+            return check_output.lines, None
+        except Exception as error:  # re-raised in submission order below
+            return check_output.lines, error
+        finally:
+            del check_output.lines
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count()) as pool:
+        for lines, error in pool.map(run, checks):
+            if lines:
+                print("\n".join(lines), flush=True)
+            if error is not None:
+                pool.shutdown(cancel_futures=True)
+                raise error
+
+
 def main() -> int:
     poison_outer_environment()
-    harness = Harness()
-    # Classification calls gh from Python, so only the completion step's bash
-    # invocations of gh can observe a shadowing function.
-    result, _ = harness.run_step("bootstrap", Consumer())
-    completed, _, _ = harness.complete(Consumer())
-    report("hostile-gh" not in result.stdout + result.stderr + completed.stdout + completed.stderr
-           and completed.returncode == 0,
-           "an outer BASH_ENV, ENV, or exported gh function never reaches a step", completed)
 
-    result, outputs = harness.run_step("bootstrap", Consumer())
-    report(result.returncode == 0 and outputs.get("eligible") == "true" and outputs.get("stale_sha") == STALE
-           and outputs.get("contract_sha") == CONTRACT,
-           "a byte-exact generated stale caller update is classified as a bootstrap", result)
-    runner_bootstrap = Consumer()
-    runner_bootstrap.base[CALLER] = generate_caller("2d1ea177fdafe361f9369526cbab8bc05f9e476d")
-    runner_bootstrap.canonical = {
-        f"{FLOOR}...2d1ea177fdafe361f9369526cbab8bc05f9e476d": "behind",
-        f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
-        f"2d1ea177fdafe361f9369526cbab8bc05f9e476d...{CONTRACT}": "ahead",
-        f"{CONTRACT}...main": "ahead",
-    }
-    report(harness.eligible(runner_bootstrap), "the runner fleet's stale 2d1ea177 caller can bootstrap", harness.last)
-    report(harness.eligible(with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})),
-           "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
-    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
-           "a reusable node-ci caller that only moves its pin to the contract revision is a companion", harness.last)
-    ci_mirror = lambda node, review: f"const canonicalNodeCiPin = '{node}';\n".encode() + mirror(review)
-    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
-                                          "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
-           "a contract test mirroring the reusable CI pin may swap it with the caller", harness.last)
-    # verjson-cli's contract test binds both callers to one pin, so neither can move alone (ADR 0231).
-    report(harness.eligible(with_files(**{
-        CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
-        ".github/workflows/actionlint.yml": (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml")),
-        "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
-        "node-ci and actionlint callers bound to one pin move together", harness.last)
-    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
-                                          ".github/workflows/ci-push.yml": (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
-           "every reusable CI caller is proven on its own, so two pin-only callers are companions", harness.last)
-    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE, owner="verJSON/.github"),
-                                                      ci_caller(CONTRACT, owner="verJSON/.github"))})),
-           "the canonical repository matches in any letter case, as GitHub resolves it", harness.last)
-    crlf = lambda sha: ci_caller(sha).replace(b"\n", b"\r\n")
-    report(harness.eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
-           "a CRLF reusable CI caller is still a companion", harness.last)
-    over_broad = mutated('"\\r(?!\\n)', '"\\r')
-    report(over_broad is not None and not Harness(over_broad).eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
-           "mutation proof: refusing every carriage return would refuse a CRLF caller")
-    commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
-    report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
-           "a comment pin that moves with the reusable CI pin is a companion", harness.last)
-    for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
-        path, content = fragment("2026-10-13", identity)
-        report(harness.eligible(with_files(**{path: (None, content)})),
-               f"the generated bootstrap changelog fragment is accepted ({identity})", harness.last)
+    def outer_environment(harness: Harness) -> None:
+        # Classification calls gh from Python, so only the completion step's bash
+        # invocations of gh can observe a shadowing function.
+        result, _ = harness.run_step("bootstrap", Consumer())
+        completed, _, _ = harness.complete(Consumer())
+        report("hostile-gh" not in result.stdout + result.stderr + completed.stdout + completed.stderr
+               and completed.returncode == 0,
+               "an outer BASH_ENV, ENV, or exported gh function never reaches a step", completed)
 
-    ordinary = with_files(**{CALLER: (generate_caller(STALE), generate_caller(STALE)),
-                             "src/feature.ts": (None, b"export const feature = true;\n")})
-    result, outputs = harness.run_step("bootstrap", ordinary)
-    report(result.returncode == 0 and outputs.get("eligible") == "false",
-           "an ordinary pull request keeps the ordinary dispatch and never fails classification")
-    outage = Consumer()
-    outage.missing.update(outage.routes())
-    result, outputs = harness.run_step("bootstrap", outage)
-    report(result.returncode == 0 and outputs.get("eligible") == "false",
-           "an API outage leaves the ordinary dispatch in place instead of failing the arm")
-    (harness.tmp / "nopython").mkdir(exist_ok=True)
-    (harness.tmp / "nopython/python3").write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
-    (harness.tmp / "nopython/python3").chmod(0o755)
-    harness.path_prefix = f"{harness.tmp / 'nopython'}:"
-    result, outputs = harness.run_step("bootstrap", Consumer())
-    harness.path_prefix = ""
-    report(result.returncode == 0 and outputs.get("eligible") == "false" and outputs.get("stale_sha") == "",
-           "a runner without the proof interpreter is never eligible")
-    for env_name, value in (("TARGET_REPO", "Verjson/example/../x"), ("PR_NUMBER", "07"),
-                            ("EXPECTED_HEAD_SHA", "g" * 40), ("DEFAULT_BRANCH", "main/../x")):
-        result, outputs = harness.run_step("bootstrap", Consumer(), {env_name: value})
+    def accepted_bootstraps(harness: Harness) -> None:
+        result, outputs = harness.run_step("bootstrap", Consumer())
+        report(result.returncode == 0 and outputs.get("eligible") == "true" and outputs.get("stale_sha") == STALE
+               and outputs.get("contract_sha") == CONTRACT,
+               "a byte-exact generated stale caller update is classified as a bootstrap", result)
+        runner_bootstrap = Consumer()
+        runner_bootstrap.base[CALLER] = generate_caller("2d1ea177fdafe361f9369526cbab8bc05f9e476d")
+        runner_bootstrap.canonical = {
+            f"{FLOOR}...2d1ea177fdafe361f9369526cbab8bc05f9e476d": "behind",
+            f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
+            f"2d1ea177fdafe361f9369526cbab8bc05f9e476d...{CONTRACT}": "ahead",
+            f"{CONTRACT}...main": "ahead",
+        }
+        report(harness.eligible(runner_bootstrap), "the runner fleet's stale 2d1ea177 caller can bootstrap", harness.last)
+        report(harness.eligible(with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})),
+               "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
+        report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
+               "a reusable node-ci caller that only moves its pin to the contract revision is a companion", harness.last)
+        ci_mirror = lambda node, review: f"const canonicalNodeCiPin = '{node}';\n".encode() + mirror(review)
+        report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+                                              "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
+               "a contract test mirroring the reusable CI pin may swap it with the caller", harness.last)
+        # verjson-cli's contract test binds both callers to one pin, so neither can move alone (ADR 0231).
+        report(harness.eligible(with_files(**{
+            CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+            ".github/workflows/actionlint.yml": (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml")),
+            "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
+            "node-ci and actionlint callers bound to one pin move together", harness.last)
+        report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+                                              ".github/workflows/ci-push.yml": (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
+               "every reusable CI caller is proven on its own, so two pin-only callers are companions", harness.last)
+        report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE, owner="verJSON/.github"),
+                                                          ci_caller(CONTRACT, owner="verJSON/.github"))})),
+               "the canonical repository matches in any letter case, as GitHub resolves it", harness.last)
+        crlf = lambda sha: ci_caller(sha).replace(b"\n", b"\r\n")
+        report(harness.eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
+               "a CRLF reusable CI caller is still a companion", harness.last)
+        over_broad = mutated('"\\r(?!\\n)', '"\\r')
+        # Refused by the carriage-return guard itself: a mutant that is merely
+        # ineligible (a missing proof program, say) proves nothing about it.
+        over_broad_harness = Harness(over_broad) if over_broad is not None else None
+        report(over_broad_harness is not None
+               and not over_broad_harness.eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))}))
+               and "contains a line break other than" in over_broad_harness.last.stdout,
+               "mutation proof: refusing every carriage return would refuse a CRLF caller",
+               over_broad_harness.last if over_broad_harness else None)
+        commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
+        report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
+               "a comment pin that moves with the reusable CI pin is a companion", harness.last)
+        for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
+            path, content = fragment("2026-10-13", identity)
+            report(harness.eligible(with_files(**{path: (None, content)})),
+                   f"the generated bootstrap changelog fragment is accepted ({identity})", harness.last)
+
+    def ordinary_dispatch(harness: Harness) -> None:
+        ordinary = with_files(**{CALLER: (generate_caller(STALE), generate_caller(STALE)),
+                                 "src/feature.ts": (None, b"export const feature = true;\n")})
+        result, outputs = harness.run_step("bootstrap", ordinary)
         report(result.returncode == 0 and outputs.get("eligible") == "false",
-               f"a malformed {env_name} is never eligible")
+               "an ordinary pull request keeps the ordinary dispatch and never fails classification")
+        outage = Consumer()
+        outage.missing.update(outage.routes())
+        result, outputs = harness.run_step("bootstrap", outage)
+        report(result.returncode == 0 and outputs.get("eligible") == "false",
+               "an API outage leaves the ordinary dispatch in place instead of failing the arm")
+        (harness.tmp / "nopython").mkdir(exist_ok=True)
+        (harness.tmp / "nopython/python3").write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        (harness.tmp / "nopython/python3").chmod(0o755)
+        harness.path_prefix = f"{harness.tmp / 'nopython'}:"
+        result, outputs = harness.run_step("bootstrap", Consumer())
+        harness.path_prefix = ""
+        report(result.returncode == 0 and outputs.get("eligible") == "false" and outputs.get("stale_sha") == "",
+               "a runner without the proof interpreter is never eligible")
+        for env_name, value in (("TARGET_REPO", "Verjson/example/../x"), ("PR_NUMBER", "07"),
+                                ("EXPECTED_HEAD_SHA", "g" * 40), ("DEFAULT_BRANCH", "main/../x")):
+            result, outputs = harness.run_step("bootstrap", Consumer(), {env_name: value})
+            report(result.returncode == 0 and outputs.get("eligible") == "false",
+                   f"a malformed {env_name} is never eligible")
 
-    for name, consumer, mutation in ineligible_cases():
+    def ineligible(harness: Harness, name: str, consumer: Consumer, mutation: tuple[str, str] | None) -> None:
         result, outputs = harness.run_step("bootstrap", consumer)
         reason = INELIGIBLE_REASONS[name]
         report(result.returncode == 0 and outputs.get("eligible") == "false" and reason in result.stdout,
                f"{name} ({reason})", result)
         if mutation is None:
-            continue
+            return
         text = mutated(*mutation)
         if text is None:
             report(False, f"mutation for '{name}' no longer applies exactly once")
-            continue
+            return
         mutant = Harness(text)
         report(mutant.eligible(consumer), f"mutation proof: removing the guard admits '{name}'", mutant.last)
 
-    rendered = subprocess.run(["bash", "-c", harness.steps["bootstrap"]["run"].split("eligible=false", 1)[0]],
-                              env={**os.environ, "RUNNER_TEMP": str(harness.tmp)}, capture_output=True)
-    program = harness.tmp / "review-caller-bootstrap.py"
-    for sha in (STALE, CONTRACT, FLOOR, "2d1ea177fdafe361f9369526cbab8bc05f9e476d", hashlib.sha1(b"drift").hexdigest()):
-        arm_bytes = subprocess.run(["python3", "-I", str(program), "render-caller", sha], capture_output=True).stdout
-        report(rendered.returncode == 0 and arm_bytes == generate_caller(sha),
-               f"the arm's embedded caller template matches the canonical generator at {sha[:8]}")
-    for bad in (("2026-02-30", "1696", STALE, CONTRACT), ("2026-10-13", "ABCDEF", STALE, CONTRACT),
-                ("2026-10-13", "0", STALE, CONTRACT), ("2026-10-13", "1696", STALE, STALE)):
-        generated = subprocess.run(["bash", str(FRAGMENT_GENERATOR), *bad], capture_output=True)
-        report(generated.returncode == 2 and not generated.stdout,
-               f"the fragment generator refuses {bad[0]} {bad[1]} {bad[2][:8]}..{bad[3][:8]}")
-    validate_root = harness.tmp / "changelog-repo"
-    (validate_root / "NEXT").mkdir(parents=True)
-    for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
-        path, content = fragment("2026-10-13", identity)
-        (validate_root / path).write_bytes(content)
-    validated = subprocess.run(["python3", str(ROOT / "scripts/changelog.py"), "validate", "--repo-root", str(validate_root)],
-                               capture_output=True, text=True)
-    report(validated.returncode == 0, "every generated bootstrap fragment satisfies the canonical changelog contract")
+    def generated_artifacts(harness: Harness) -> None:
+        rendered = subprocess.run(["bash", "-c", harness.steps["bootstrap"]["run"].split("eligible=false", 1)[0]],
+                                  env={**os.environ, "RUNNER_TEMP": str(harness.tmp)}, capture_output=True)
+        program = harness.tmp / "review-caller-bootstrap.py"
+        for sha in (STALE, CONTRACT, FLOOR, "2d1ea177fdafe361f9369526cbab8bc05f9e476d", hashlib.sha1(b"drift").hexdigest()):
+            arm_bytes = subprocess.run(["python3", "-I", str(program), "render-caller", sha], capture_output=True).stdout
+            report(rendered.returncode == 0 and arm_bytes == generate_caller(sha),
+                   f"the arm's embedded caller template matches the canonical generator at {sha[:8]}")
+        for bad in (("2026-02-30", "1696", STALE, CONTRACT), ("2026-10-13", "ABCDEF", STALE, CONTRACT),
+                    ("2026-10-13", "0", STALE, CONTRACT), ("2026-10-13", "1696", STALE, STALE)):
+            generated = subprocess.run(["bash", str(FRAGMENT_GENERATOR), *bad], capture_output=True)
+            report(generated.returncode == 2 and not generated.stdout,
+                   f"the fragment generator refuses {bad[0]} {bad[1]} {bad[2][:8]}..{bad[3][:8]}")
+        validate_root = harness.tmp / "changelog-repo"
+        (validate_root / "NEXT").mkdir(parents=True)
+        for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
+            path, content = fragment("2026-10-13", identity)
+            (validate_root / path).write_bytes(content)
+        validated = subprocess.run(["python3", str(ROOT / "scripts/changelog.py"), "validate", "--repo-root", str(validate_root)],
+                                   capture_output=True, text=True)
+        report(validated.returncode == 0, "every generated bootstrap fragment satisfies the canonical changelog contract")
 
-    steps = harness.steps
-    dispatch = steps.get("dispatch", {})
-    report(
-        dispatch.get("if") == "steps.arm.outputs.check_id != '' && steps.bootstrap.outputs.eligible != 'true'",
-        "an eligible bootstrap never dispatches the stale default-branch review",
-    )
-    report(
-        steps["bootstrap"].get("if") == "steps.arm.outputs.check_id != '' && steps.arm.outputs.explicit_rereview != 'true' && steps.arm.outputs.explicit_ai_review != 'true'",
-        "explicit paid-review labels always take the ordinary dispatch",
-    )
-    report(
-        steps["bootstrap-app-token"].get("if") == "steps.bootstrap.outputs.eligible == 'true'"
-        and steps["bootstrap-complete"].get("if") == "steps.bootstrap.outputs.eligible == 'true'"
-        and steps["bootstrap-app-token"]["with"]["permission-pull-requests"] == "write"
-        and steps["bootstrap-app-token"]["with"]["permission-contents"] == "read"
-        and set(k for k in steps["bootstrap-app-token"]["with"] if k.startswith("permission-")) == {"permission-pull-requests", "permission-contents"},
-        "the App token is minted only for a proven bootstrap and only with review permissions",
-    )
-    order = list(steps)
-    report(order.index("receipt") < order.index("bootstrap") < order.index("bootstrap-app-token")
-           < order.index("bootstrap-complete") < order.index("dispatch"),
-           "the bootstrap runs after receipt publication and before the ordinary dispatch")
+    def step_wiring(harness: Harness) -> None:
+        steps = harness.steps
+        dispatch = steps.get("dispatch", {})
+        report(
+            dispatch.get("if") == "steps.arm.outputs.check_id != '' && steps.bootstrap.outputs.eligible != 'true'",
+            "an eligible bootstrap never dispatches the stale default-branch review",
+        )
+        report(
+            steps["bootstrap"].get("if") == "steps.arm.outputs.check_id != '' && steps.arm.outputs.explicit_rereview != 'true' && steps.arm.outputs.explicit_ai_review != 'true'",
+            "explicit paid-review labels always take the ordinary dispatch",
+        )
+        report(
+            steps["bootstrap-app-token"].get("if") == "steps.bootstrap.outputs.eligible == 'true'"
+            and steps["bootstrap-complete"].get("if") == "steps.bootstrap.outputs.eligible == 'true'"
+            and steps["bootstrap-app-token"]["with"]["permission-pull-requests"] == "write"
+            and steps["bootstrap-app-token"]["with"]["permission-contents"] == "read"
+            and set(k for k in steps["bootstrap-app-token"]["with"] if k.startswith("permission-")) == {"permission-pull-requests", "permission-contents"},
+            "the App token is minted only for a proven bootstrap and only with review permissions",
+        )
+        order = list(steps)
+        report(order.index("receipt") < order.index("bootstrap") < order.index("bootstrap-app-token")
+               < order.index("bootstrap-complete") < order.index("dispatch"),
+               "the bootstrap runs after receipt publication and before the ordinary dispatch")
 
-    result, _, calls = harness.complete(Consumer())
-    approvals = [c for c in calls if c["args"][:4] == ["api", "--method", "POST", f"repos/{TARGET_REPO}/pulls/{PR_NUMBER}/reviews"]]
-    patches = [c for c in calls if c["args"][:4] == ["api", "--method", "PATCH", f"repos/{TARGET_REPO}/check-runs/9001"]]
-    report(
-        result.returncode == 0
-        and len(approvals) == 1 and approvals[0]["token"] == "app-token"
-        and "event=APPROVE" in approvals[0]["args"] and f"commit_id={HEAD}" in approvals[0]["args"]
-        and any(f"ai-review-bootstrap:{STALE}:{CONTRACT}" in arg for arg in approvals[0]["args"])
-        and len(patches) == 1 and patches[0]["token"] == "actions-token"
-        and "conclusion=success" in patches[0]["args"]
-        and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-approve" in arg for arg in patches[0]["args"])
-        and not any("ai-review-authorized:v1:9001:" + HEAD + ":ai-merge" in arg for arg in patches[0]["args"])
-        and not any("workflow" in c["args"] for c in calls),
-        "ai-merge authority approves the exact head but records approval-only authority: no terminal promotion",
-    )
-    promoting = mutated('"<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:ai-approve -->")"',
-                        '"<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:$authority -->")"')
-    _, _, promoted = Harness(promoting).complete(Consumer()) if promoting else (None, None, [])
-    report(promoting is not None and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-merge" in arg
-                                         for c in promoted for arg in c["args"]),
-           "mutation proof: recording the receipt authority would grant terminal promotion")
-    result, _, calls = harness.complete(Consumer(), authority="ai-approve")
-    report(result.returncode == 0 and any("conclusion=success" in c["args"] for c in calls)
-           and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-approve" in arg for c in calls for arg in c["args"]),
-           "ai-approve authority also persists the exact-head App approval")
+    def approval_authority(harness: Harness) -> None:
+        result, _, calls = harness.complete(Consumer())
+        approvals = [c for c in calls if c["args"][:4] == ["api", "--method", "POST", f"repos/{TARGET_REPO}/pulls/{PR_NUMBER}/reviews"]]
+        patches = [c for c in calls if c["args"][:4] == ["api", "--method", "PATCH", f"repos/{TARGET_REPO}/check-runs/9001"]]
+        report(
+            result.returncode == 0
+            and len(approvals) == 1 and approvals[0]["token"] == "app-token"
+            and "event=APPROVE" in approvals[0]["args"] and f"commit_id={HEAD}" in approvals[0]["args"]
+            and any(f"ai-review-bootstrap:{STALE}:{CONTRACT}" in arg for arg in approvals[0]["args"])
+            and len(patches) == 1 and patches[0]["token"] == "actions-token"
+            and "conclusion=success" in patches[0]["args"]
+            and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-approve" in arg for arg in patches[0]["args"])
+            and not any("ai-review-authorized:v1:9001:" + HEAD + ":ai-merge" in arg for arg in patches[0]["args"])
+            and not any("workflow" in c["args"] for c in calls),
+            "ai-merge authority approves the exact head but records approval-only authority: no terminal promotion",
+        )
+        promoting = mutated('"<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:ai-approve -->")"',
+                            '"<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:$authority -->")"')
+        _, _, promoted = Harness(promoting).complete(Consumer()) if promoting else (None, None, [])
+        report(promoting is not None and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-merge" in arg
+                                             for c in promoted for arg in c["args"]),
+               "mutation proof: recording the receipt authority would grant terminal promotion")
+        result, _, calls = harness.complete(Consumer(), authority="ai-approve")
+        report(result.returncode == 0 and any("conclusion=success" in c["args"] for c in calls)
+               and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-approve" in arg for c in calls for arg in c["args"]),
+               "ai-approve authority also persists the exact-head App approval")
 
     def neutral_without_approval(calls) -> bool:
         return (not any(c["args"][:3] == ["api", "--method", "POST"] for c in calls)
@@ -997,15 +1097,22 @@ def main() -> int:
          neutral_without_approval,
          ('(.authority // "human")', '(.authority // "ai-merge")')),
     ]
-    for name, kwargs, predicate, mutation in completion_cases:
+
+    def completion(harness: Harness, name: str, kwargs: dict, predicate, mutation: tuple[str, str]) -> None:
         result, _, calls = harness.complete(Consumer(), **kwargs)
         report(result.returncode == 0 and predicate(calls), name)
         text = mutated(*mutation)
         if text is None:
             report(False, f"mutation for '{name}' no longer applies exactly once")
-            continue
+            return
         result, _, calls = Harness(text).complete(Consumer(), **kwargs)
-        report(not (result.returncode == 0 and predicate(calls)), f"mutation proof: {name}")
+        # The mutant must reach the App approval the guard withholds, not merely fail.
+        report(result.returncode == 0 and app_approved(calls), f"mutation proof: {name}", result)
+
+    def app_approved(calls) -> bool:
+        return (any(c["args"][:4] == ["api", "--method", "POST", f"repos/{TARGET_REPO}/pulls/{PR_NUMBER}/reviews"]
+                    and c["token"] == "app-token" and "event=APPROVE" in c["args"] for c in calls)
+                and any("conclusion=success" in c["args"] for c in calls))
 
     def refused(calls) -> bool:
         return not any(c["args"][:3] in (["api", "--method", "POST"], ["api", "--method", "PATCH"]) for c in calls)
@@ -1022,39 +1129,42 @@ def main() -> int:
     app_check.overrides[f"repos/{TARGET_REPO}/check-runs/9001"] = {
         **Consumer().routes()[f"repos/{TARGET_REPO}/check-runs/9001"], "app": {"id": 4242, "slug": "verjson-ai-review"}}
     refusal_cases = [
-        ("a bootstrap whose proof breaks before granting is refused", {"later": moved},
+        ("a bootstrap whose proof breaks before granting is refused", {"later": moved}, "::error::stale review caller bootstrap proof no longer holds",
          ('proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py" 2>"$recheck_errors")" || {',
           'proof="$(printf \'{"stale_sha":"%s","contract_sha":"%s","head_sha":"%s"}\' "$STALE_SHA" "$CONTRACT_SHA" "$EXPECTED_HEAD_SHA")" || {')),
-        ("a completion whose proof names other revisions is refused", {"STALE_SHA": "c" * 40},
+        ("a completion whose proof names other revisions is refused", {"STALE_SHA": "c" * 40}, "::error::stale review caller bootstrap proof changed",
          ("'.stale_sha == $stale and .contract_sha == $contract and .head_sha == $head' <<<\"$proof\" >/dev/null || {",
           "'true' <<<\"$proof\" >/dev/null || {")),
-        ("an already completed check is never overwritten", {"later": completed_check},
+        ("an already completed check is never overwritten", {"later": completed_check}, "::error::authorization check is not this arm's in-progress exact-head check",
          ('.status == "in_progress" and .conclusion == null\n          \' <<<"$check"', 'true\n          \' <<<"$check"')),
-        ("a check from another arm run is never completed", {"later": foreign_check},
+        ("a check from another arm run is never completed", {"later": foreign_check}, "::error::authorization check is not this arm's in-progress exact-head check",
          ('.external_id == $external and .app.id == 15368 and .app.slug == "github-actions" and\n            .status',
           '.app.id == 15368 and .app.slug == "github-actions" and\n            .status')),
-        ("a check owned by another App is never completed", {"later": app_check},
+        ("a check owned by another App is never completed", {"later": app_check}, "::error::authorization check is not this arm's in-progress exact-head check",
          ('.app.id == 15368 and .app.slug == "github-actions" and\n            .status', 'true and\n            .status')),
-        ("a minted App other than the authorization App is refused", {"MINTED_APP_SLUG": "other-app"},
+        ("a minted App other than the authorization App is refused", {"MINTED_APP_SLUG": "other-app"}, "::error::minted App does not match the authorization App",
          ('[ -n "$APP_TOKEN" ] && [ "$MINTED_APP_SLUG" = "$APP_SLUG" ] || {', 'true || {')),
-        ("an unproven classification is refused", {"BOOTSTRAP_ELIGIBLE": "false"},
+        ("an unproven classification is refused", {"BOOTSTRAP_ELIGIBLE": "false"}, "::error::stale review caller bootstrap was not proven",
          ('[ "$BOOTSTRAP_ELIGIBLE" = true ] || { echo "::error::stale review caller bootstrap was not proven"; exit 1; }', ':')),
-        ("a forged receipt authority is refused", {"REVIEW_POLICY": policy("root")}, None),
-        ("a missing App installation identity is refused", {"INSTALLATION_ID": ""}, None),
+        ("a forged receipt authority is refused", {"REVIEW_POLICY": policy("root")}, "::error::receipt authority is invalid", None),
+        ("a missing App installation identity is refused", {"INSTALLATION_ID": ""}, "::error::bootstrap App installation identity is unavailable", None),
     ]
-    for name, overrides, mutation in refusal_cases:
+
+    def refusal(harness: Harness, name: str, overrides: dict, reason: str,
+                mutation: tuple[str, str] | None) -> None:
         kwargs = dict(overrides)
         later = kwargs.pop("later", None)
         result, _, calls = harness.complete(Consumer(), later=later, **kwargs)
-        report(result.returncode != 0 and refused(calls), name)
+        report(result.returncode != 0 and refused(calls) and reason in result.stdout, name, result)
         if mutation is None:
-            continue
+            return
         text = mutated(*mutation)
         if text is None:
             report(False, f"mutation for '{name}' no longer applies exactly once")
-            continue
+            return
         result, _, calls = Harness(text).complete(Consumer(), later=later, **kwargs)
-        report(not (result.returncode != 0 and refused(calls)), f"mutation proof: {name}")
+        # Without its guard the mutant must reach a write, not fail some other way.
+        report(not refused(calls), f"mutation proof: {name}", result)
 
     def approval_withheld(calls) -> bool:
         return (any("conclusion=neutral" in c["args"] for c in calls)
@@ -1067,83 +1177,114 @@ def main() -> int:
         ("a failed approval request leaves only the human path", {"GH_FAIL": "POST repos/"}, None),
         ("an unreadable persisted approval leaves only the human path", {"GH_FAIL": "GET repos/Verjson/example/pulls/7/reviews/555"}, None),
     ]
-    for name, overrides, mutation in approval_cases:
+
+    def approval(harness: Harness, name: str, overrides: dict, mutation: tuple[str, str] | None) -> None:
         result, _, calls = harness.complete(Consumer(), **overrides)
         report(result.returncode == 0 and approval_withheld(calls), name)
         if mutation is None:
-            continue
+            return
         text = mutated(*mutation)
         if text is None:
             report(False, f"mutation for '{name}' no longer applies exactly once")
-            continue
+            return
         result, _, calls = Harness(text).complete(Consumer(), **overrides)
-        report(not (result.returncode == 0 and approval_withheld(calls)), f"mutation proof: {name}")
-    result, _, calls = harness.complete(Consumer(), GH_FAIL="PATCH repos/")
-    report(result.returncode != 0, "an unconfirmed check completion fails the step for the terminalizer")
+        # Without its guard the mutant must complete as success, not fail some other way.
+        report(result.returncode == 0 and any("conclusion=success" in c["args"] for c in calls),
+               f"mutation proof: {name}", result)
 
-    injected = with_files(**{INJECTED_PATH: (None, b"export {};\n")})
-    result, outputs = harness.run_step("bootstrap", injected)
-    log = result.stdout + result.stderr
-    report(result.returncode == 0 and outputs.get("eligible") == "false" and json.dumps(INJECTED_PATH) in log
-           and not any(line.startswith("::warning") for line in log.splitlines()),
-           "an untrusted path is reported JSON-escaped, never as a raw workflow command")
-    report(json.dumps(INJECTED_PATH) in log and not live_commands(log),
-           "classification output from untrusted paths runs inside stop-commands", result)
-    result, _ = harness.run_step("bootstrap-complete", injected, {
-        "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
-        "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
-        "MINTED_APP_SLUG": "verjson-ai-review", "INSTALLATION_ID": "42", "GITHUB_RUN_ID": "7001"})
-    log = result.stdout + result.stderr
-    report(result.returncode != 0 and json.dumps(INJECTED_PATH) in log and not live_commands(
-               "\n".join(line for line in log.splitlines() if not line.startswith("::error::"))),
-           "a failed re-proof reports untrusted paths only inside stop-commands")
-    unescaped = mutated('require(match is not None, f"{shown(path)} is not the generated bootstrap changelog fragment")',
-                        'require(match is not None, f"{path} is not the generated bootstrap changelog fragment")')
-    if unescaped:
-        result, _ = Harness(unescaped).run_step("bootstrap", injected)
+    def unconfirmed_completion(harness: Harness) -> None:
+        result, _, calls = harness.complete(Consumer(), GH_FAIL="PATCH repos/")
+        report(result.returncode != 0 and "::error::authorization check completion request failed" in result.stdout,
+               "an unconfirmed check completion fails the step for the terminalizer", result)
+
+    def untrusted_paths(harness: Harness) -> None:
+        injected = with_files(**{INJECTED_PATH: (None, b"export {};\n")})
+        result, outputs = harness.run_step("bootstrap", injected)
         log = result.stdout + result.stderr
-        report(any(line.startswith("::warning") for line in log.splitlines()) and not live_commands(log),
-               "mutation proof: without JSON escaping the command appears, still neutralized by stop-commands")
-        unwrapped = unescaped.replace('echo "::stop-commands::$token"', ':', 1)
-        result, _ = Harness(unwrapped).run_step("bootstrap", injected)
-        report(any(line.startswith("::warning") for line in live_commands(result.stdout + result.stderr)),
-               "mutation proof: without either layer the injected command would run", result)
-        completion_env = {
+        report(result.returncode == 0 and outputs.get("eligible") == "false" and json.dumps(INJECTED_PATH) in log
+               and not any(line.startswith("::warning") for line in log.splitlines()),
+               "an untrusted path is reported JSON-escaped, never as a raw workflow command")
+        report(json.dumps(INJECTED_PATH) in log and not live_commands(log),
+               "classification output from untrusted paths runs inside stop-commands", result)
+        harness.reset_state()
+        result, _ = harness.run_step("bootstrap-complete", injected, {
             "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
             "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
-            "MINTED_APP_SLUG": "verjson-ai-review", "INSTALLATION_ID": "42", "GITHUB_RUN_ID": "7001"}
-        bare = Harness(unescaped)
-        bare.run_step("bootstrap", injected)
-        wrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
-        bare.steps["bootstrap-complete"]["run"] = bare.steps["bootstrap-complete"]["run"].replace(
-            'echo "::stop-commands::$token"', ':', 1)
-        unwrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
-        strip = lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("::error::"))
-        report(not live_commands(strip(wrapped_completion.stdout + wrapped_completion.stderr))
-               and any(line.startswith("::warning")
-                       for line in live_commands(strip(unwrapped_completion.stdout + unwrapped_completion.stderr))),
-               "mutation proof: the completion step's stop-commands wrapper is load-bearing", unwrapped_completion)
-    else:
-        report(False, "mutation for the path escaping layer no longer applies")
+            "MINTED_APP_SLUG": "verjson-ai-review", "INSTALLATION_ID": "42", "GITHUB_RUN_ID": "7001"})
+        log = result.stdout + result.stderr
+        report(result.returncode != 0 and json.dumps(INJECTED_PATH) in log and not live_commands(
+                   "\n".join(line for line in log.splitlines() if not line.startswith("::error::"))),
+               "a failed re-proof reports untrusted paths only inside stop-commands")
+        unescaped = mutated('require(match is not None, f"{shown(path)} is not the generated bootstrap changelog fragment")',
+                            'require(match is not None, f"{path} is not the generated bootstrap changelog fragment")')
+        if unescaped:
+            result, _ = Harness(unescaped).run_step("bootstrap", injected)
+            log = result.stdout + result.stderr
+            report(any(line.startswith("::warning") for line in log.splitlines()) and not live_commands(log),
+                   "mutation proof: without JSON escaping the command appears, still neutralized by stop-commands")
+            unwrapped = unescaped.replace('echo "::stop-commands::$token"', ':', 1)
+            result, _ = Harness(unwrapped).run_step("bootstrap", injected)
+            report(any(line.startswith("::warning") for line in live_commands(result.stdout + result.stderr)),
+                   "mutation proof: without either layer the injected command would run", result)
+            completion_env = {
+                "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
+                "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
+                "MINTED_APP_SLUG": "verjson-ai-review", "INSTALLATION_ID": "42", "GITHUB_RUN_ID": "7001"}
+            bare = Harness(unescaped)
+            bare.run_step("bootstrap", injected)
+            wrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
+            bare.steps["bootstrap-complete"]["run"] = bare.steps["bootstrap-complete"]["run"].replace(
+                'echo "::stop-commands::$token"', ':', 1)
+            unwrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
+            strip = lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("::error::"))
+            report(not live_commands(strip(wrapped_completion.stdout + wrapped_completion.stderr))
+                   and any(line.startswith("::warning")
+                           for line in live_commands(strip(unwrapped_completion.stdout + unwrapped_completion.stderr))),
+                   "mutation proof: the completion step's stop-commands wrapper is load-bearing", unwrapped_completion)
+        else:
+            report(False, "mutation for the path escaping layer no longer applies")
 
-    terminalizer = steps.get("Complete the authorization when no review was dispatched", {})
-    report(
-        terminalizer.get("if") == "always() && steps.arm.outputs.check_id != '' && steps.dispatch.outcome != 'success' && steps.bootstrap-complete.outcome != 'success'",
-        "a completed bootstrap owns its check and is never terminalized again",
-    )
-    harness.reset_state()
-    result, _ = harness.run_step(
-        "Complete the authorization when no review was dispatched", Consumer(),
-        {"EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "ARM_FAILURE_REASON": "", "AI_REVIEW_ENVIRONMENT": "ai-review-app",
-         "BOOTSTRAP_ELIGIBLE": "true"},
-    )
-    patches = [c for c in harness.recorded() if c["args"][:3] == ["api", "--method", "PATCH"]]
-    report(
-        result.returncode == 0 and len(patches) == 1 and "conclusion=failure" in patches[0]["args"]
-        and any(arg.startswith("output[summary]=The stale review caller bootstrap did not complete")
-                for arg in patches[0]["args"]),
-        "a failed bootstrap terminalizes its check as a bootstrap failure, never as success",
-    )
+    def terminalizer(harness: Harness) -> None:
+        terminalizer = harness.steps.get("Complete the authorization when no review was dispatched", {})
+        report(
+            terminalizer.get("if") == "always() && steps.arm.outputs.check_id != '' && steps.dispatch.outcome != 'success' && steps.bootstrap-complete.outcome != 'success'",
+            "a completed bootstrap owns its check and is never terminalized again",
+        )
+        harness.reset_state()
+        result, _ = harness.run_step(
+            "Complete the authorization when no review was dispatched", Consumer(),
+            {"EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "ARM_FAILURE_REASON": "", "AI_REVIEW_ENVIRONMENT": "ai-review-app",
+             "BOOTSTRAP_ELIGIBLE": "true"},
+        )
+        patches = [c for c in harness.recorded() if c["args"][:3] == ["api", "--method", "PATCH"]]
+        report(
+            result.returncode == 0 and len(patches) == 1 and "conclusion=failure" in patches[0]["args"]
+            and any(arg.startswith("output[summary]=The stale review caller bootstrap did not complete")
+                    for arg in patches[0]["args"]),
+            "a failed bootstrap terminalizes its check as a bootstrap failure, never as success",
+        )
+
+    # Every check below arranges its own consumer state, and each worker owns its
+    # Harness, so the checks are independent and may run in any order.
+    run_checks([
+        outer_environment,
+        accepted_bootstraps,
+        ordinary_dispatch,
+        *(functools.partial(ineligible, name=name, consumer=consumer, mutation=mutation)
+          for name, consumer, mutation in ineligible_cases()),
+        generated_artifacts,
+        step_wiring,
+        approval_authority,
+        *(functools.partial(completion, name=name, kwargs=kwargs, predicate=predicate, mutation=mutation)
+          for name, kwargs, predicate, mutation in completion_cases),
+        *(functools.partial(refusal, name=name, overrides=overrides, reason=reason, mutation=mutation)
+          for name, overrides, reason, mutation in refusal_cases),
+        *(functools.partial(approval, name=name, overrides=overrides, mutation=mutation)
+          for name, overrides, mutation in approval_cases),
+        unconfirmed_completion,
+        untrusted_paths,
+        terminalizer,
+    ])
 
     if failures:
         print(f"{failures} review caller bootstrap check(s) failed")

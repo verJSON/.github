@@ -522,8 +522,11 @@ def mutants(document: dict):
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("^${hosted_image}$", "${hosted_image}")}))
     yield "guard reverts to a collating [0-9] range", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("[0123456789]", "[0-9]")}))
+    # Spelled out rather than as [a-z]: a range would be caught by the bracket-range
+    # lint in binding_violations, leaving the scenario replay unproven against it.
     yield "guard accepts any hosted image family", mutate(
-        lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("ubuntu-(latest|", "[a-z]+-(latest|")}))
+        lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace(
+            "ubuntu-(latest|", "[abcdefghijklmnopqrstuvwxyz]+-(latest|")}))
     yield "guard loosens the image version shape", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace(
             "[0123456789]{2}\\.[0123456789]{2}", "[0123456789.]+")}))
@@ -552,8 +555,10 @@ def main() -> int:
               f"{'/'.join(name for name, _ in LOCALES)} locale(s) and the build-lane binding"
               if not problems else f"not ok - {workflow.name}: {len(problems)} problem(s)")
         for label, mutant in mutants(document):
+            # The cheap structural check runs first: it alone notices most
+            # mutants, so the full scenario replay runs only for the rest (#1997).
             try:
-                caught = scenario_failures(mutant, workflow.name) or binding_violations(mutant)
+                caught = binding_violations(mutant) or scenario_failures(mutant, workflow.name)
             except AssertionError as error:
                 caught = [str(error)]
             if caught:

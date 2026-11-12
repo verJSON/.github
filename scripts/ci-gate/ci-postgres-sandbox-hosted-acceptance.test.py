@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import errno
+import inspect
 import os
 import re
 import shutil
@@ -14,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
+import typing
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -65,6 +68,332 @@ def _assert_network_namespace_error(
         )
 
 
+def _docker_daemon_exposures(environ, well_known_sockets=None, timeout=2.0):
+    """Return why any Docker daemon endpoint is not proven out of reach.
+
+    The endpoints are dialed directly, not through the docker CLI: `docker info`
+    starts every installed CLI plugin before it touches a daemon, so its run time
+    depends on the runner, not on the boundary (verJSON/.github#1999). A rootless
+    daemon in another network namespace binds under $XDG_RUNTIME_DIR, which is
+    dialed whenever it is set. The source ships alone into the sandbox probe, so
+    it imports what it needs itself.
+    """
+    import errno
+    import json
+    import os
+    import socket
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    # Only an answer the kernel gives at once proves a daemon is out of reach;
+    # a busy backlog or a timeout says nothing about reachability.
+    refused = {
+        errno.ENOENT,
+        errno.ENOTDIR,
+        errno.ECONNREFUSED,
+        errno.EACCES,
+        errno.EPERM,
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+    }
+
+    def connect(parts):
+        if parts.scheme == "tcp":
+            with socket.create_connection((parts.hostname, parts.port), timeout=timeout):
+                return
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(parts.path)
+
+    def probe(endpoint):
+        try:
+            parts = urlsplit(endpoint)
+            dialable = parts.scheme == "unix" or (
+                parts.scheme == "tcp" and bool(parts.hostname) and bool(parts.port)
+            )
+        except ValueError as error:
+            return (
+                f"Docker endpoint {endpoint} cannot be parsed ({error}); "
+                "unreachability not proven"
+            )
+        if not dialable:
+            return (
+                f"Docker endpoint {endpoint} is not a unix path or tcp host and port "
+                "this probe can dial; unreachability not proven"
+            )
+        try:
+            connect(parts)
+        except TimeoutError:
+            return (
+                f"Docker endpoint {endpoint} did not answer within {timeout}s; "
+                "unreachability not proven"
+            )
+        except OSError as error:
+            if error.errno in refused:
+                return None
+            return (
+                f"Docker endpoint {endpoint} failed with errno {error.errno} "
+                f"({error.strerror}); unreachability not proven"
+            )
+        return f"Docker daemon reachable at {endpoint}"
+
+    if well_known_sockets is None:
+        well_known_sockets = [
+            "/var/run/docker.sock",
+            "/run/docker.sock",
+            f"/run/user/{os.getuid()}/docker.sock",
+        ]
+        if environ.get("XDG_RUNTIME_DIR"):
+            well_known_sockets.append(f"{environ['XDG_RUNTIME_DIR']}/docker.sock")
+    endpoints = [f"unix://{path}" for path in well_known_sockets]
+    if environ.get("DOCKER_HOST"):
+        endpoints.append(environ["DOCKER_HOST"])
+    config_directory = Path(
+        environ.get("DOCKER_CONFIG") or Path(environ.get("HOME", "/")) / ".docker"
+    )
+    exposures = []
+    for meta in sorted((config_directory / "contexts" / "meta").glob("*/meta.json")):
+        try:
+            context = json.loads(meta.read_text(encoding="utf-8"))
+            endpoints.append(context["Endpoints"]["docker"]["Host"])
+        except (OSError, ValueError, LookupError, TypeError) as error:
+            exposures.append(
+                f"Docker context {meta} has no readable endpoint ({error!r}); "
+                "unreachability not proven"
+            )
+    exposures.extend(
+        exposure
+        for exposure in (probe(endpoint) for endpoint in endpoints)
+        if exposure is not None
+    )
+    return exposures
+
+
+def _unexpected_sockets(root, *, unwalked, entry_limit=100_000):
+    """Return each socket under root, other than the Postgres socket, by sandbox path.
+
+    Daemon sockets are found by type, not name, so a containerd, podman, or
+    bind-mounted socket at any walked path counts. `unwalked` comes from
+    _sandbox_socket_scope: the /proc mount and every read-only bind of a host
+    distribution tree, including the node root, which is /usr/local on hosted
+    images. Walking those trees, which hold the image's toolchains and SDKs, timed
+    the candidate out (verJSON/.github#1999); skipping them is an accepted
+    residual that the host-side _distribution_tree_listeners check covers. The
+    walk stops after `entry_limit` entries and fails closed, so its run time is
+    bounded whatever the walked mounts hold. The source ships alone into the
+    sandbox probe.
+    """
+    import errno
+    import os
+    import stat
+
+    allowed = {"/run/verjson-postgres/.s.PGSQL.5432"}
+    pruned = set(unwalked)
+
+    def visible(path):
+        relative = os.path.relpath(path, root)
+        return "/" if relative == "." else "/" + relative
+
+    findings = []
+    pending = [root]
+    visited = 0
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > entry_limit:
+                        # A bound walk that cannot finish has proven nothing.
+                        return sorted(findings) + [
+                            f"socket walk stopped at {visible(directory)} after more than "
+                            f"{entry_limit} entries; socket absence not proven"
+                        ]
+                    path = visible(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        if path not in pruned:
+                            pending.append(entry.path)
+                    elif (
+                        stat.S_ISSOCK(entry.stat(follow_symlinks=False).st_mode)
+                        and path not in allowed
+                    ):
+                        findings.append(f"unexpected socket {path}")
+        except OSError as error:
+            # The candidate cannot reach a socket below a directory it cannot
+            # search; one it can search but not list could hide one.
+            if error.errno == errno.EACCES and not os.access(directory, os.X_OK):
+                continue
+            findings.append(
+                f"cannot list {visible(directory)} ({error.strerror}); "
+                "socket absence not proven"
+            )
+    return sorted(findings)
+
+
+DISTRIBUTION_ROOTS = ("/usr", "/bin", "/lib", "/lib64")
+SO_ACCEPTCON = 0x00010000
+BUBBLEWRAP_OPTION_ARITY = {
+    "--unshare-user": 0,
+    "--unshare-pid": 0,
+    "--as-pid-1": 0,
+    "--unshare-net": 0,
+    "--unshare-ipc": 0,
+    "--unshare-uts": 0,
+    "--unshare-cgroup-try": 0,
+    "--disable-userns": 0,
+    "--die-with-parent": 0,
+    "--new-session": 0,
+    "--cap-drop": 1,
+    "--tmpfs": 1,
+    "--proc": 1,
+    "--dev": 1,
+    "--dir": 1,
+    "--ro-bind": 2,
+    "--setenv": 2,
+}
+
+
+class SandboxSocketScope(typing.NamedTuple):
+    unwalked: tuple[str, ...]
+    host_trees: tuple[str, ...]
+
+
+def _sandbox_socket_scope(arguments: list[str]) -> SandboxSocketScope:
+    """Split the sandbox's mounts into walked ones and host-covered ones.
+
+    Both lists come from the bubblewrap arguments the sandbox is built from. A
+    read-only bind of a host distribution tree is not walked inside the sandbox;
+    the host-side listener check covers its source instead.
+    """
+    def within(path, tree):
+        return path == tree or path.startswith(tree.rstrip("/") + "/")
+
+    unwalked = []
+    host_trees = []
+    index = 1
+    while index < len(arguments) and arguments[index] != "--":
+        option = arguments[index]
+        if option not in BUBBLEWRAP_OPTION_ARITY:
+            raise ValueError(f"socket scope cannot classify bubblewrap option {option!r}")
+        arity = BUBBLEWRAP_OPTION_ARITY[option]
+        operands = arguments[index + 1 : index + 1 + arity]
+        if len(operands) != arity:
+            raise ValueError(f"socket scope found {option!r} without its {arity} operands")
+        if option in ("--tmpfs", "--dev", "--proc", "--ro-bind"):
+            # A later mount above, at, or below a skipped tree shows content the
+            # skip was never proven for; an earlier one is hidden by it. --dir
+            # only creates a directory.
+            overlapped = [
+                tree
+                for tree in unwalked
+                if within(tree, operands[-1]) or within(operands[-1], tree)
+            ]
+            if overlapped:
+                raise ValueError(
+                    f"socket scope: mount {operands[-1]} overlaps unwalked "
+                    f"{', '.join(overlapped)}"
+                )
+        if option == "--proc":
+            unwalked.append(operands[0])
+        elif option == "--ro-bind" and any(
+            within(os.path.realpath(operands[0]), os.path.realpath(root))
+            for root in DISTRIBUTION_ROOTS
+        ):
+            unwalked.append(operands[1])
+            host_trees.append(operands[0])
+        index += 1 + arity
+    if index >= len(arguments):
+        raise ValueError("socket scope found no '--' ending the bubblewrap options")
+    return SandboxSocketScope(tuple(unwalked), tuple(host_trees))
+
+
+def _distribution_tree_listeners(
+    proc_net_unix: str,
+    trees: tuple[str, ...],
+) -> list[str]:
+    """Return each host listener the sandbox's unwalked read-only trees could expose.
+
+    The sandbox socket walk skips the read-only distribution binds that
+    _sandbox_socket_scope names, so the trusted host reads its own /proc/net/unix
+    for their sources instead: a listening pathname socket (Flags 00010000) bound
+    under one of them would be visible inside the sandbox through the read-only
+    bind. The table records each bound path verbatim, so a path is resolved
+    (symlinks and `..`) and compared with each resolved tree, which also covers a
+    merged /usr where /bin and /lib link into it. A relative path, or a row this
+    parser cannot read, fails closed.
+
+    It cannot see listeners in other network namespaces, whose sockets this
+    table omits, or a socket renamed into one of the trees after bind(), whose
+    row keeps the original path.
+    """
+    lines = proc_net_unix.splitlines()
+    header = lines[0] if lines else ""
+    if header.split() != ["Num", "RefCount", "Protocol", "Flags", "Type", "St", "Inode", "Path"]:
+        return [
+            f"/proc/net/unix header {header!r} is not the known layout; "
+            "listener absence not proven"
+        ]
+    findings = []
+    for number, line in enumerate(lines[1:], start=2):
+        fields = line.split(None, 7)
+        try:
+            if len(fields) not in (7, 8) or not fields[0].endswith(":"):
+                raise ValueError(f"expected 7 or 8 fields after 'Num:', got {len(fields)}")
+            flags = int(fields[3], 16)
+            for field in fields[1:6]:
+                int(field, 16)
+            int(fields[6], 10)
+        except ValueError as error:
+            findings.append(
+                f"/proc/net/unix line {number} is unparseable ({error}): {line!r}; "
+                "listener absence not proven"
+            )
+            continue
+        path = fields[7] if len(fields) == 8 else ""
+        if not flags & SO_ACCEPTCON or not path or path.startswith("@"):
+            continue
+        if not path.startswith("/"):
+            # A relative bind resolves against the binder's working directory,
+            # which this table does not record.
+            findings.append(
+                f"host socket listening at relative path {path!r}; "
+                "listener location not proven"
+            )
+            continue
+        if any(
+            os.path.realpath(path).startswith(os.path.realpath(tree) + "/") for tree in trees
+        ):
+            findings.append(f"host socket listening at {path}")
+    return findings
+
+
+def _assert_no_host_distribution_tree_listeners(
+    trees: tuple[str, ...],
+    proc_net_unix: Path = Path("/proc/net/unix"),
+) -> None:
+    findings = _distribution_tree_listeners(
+        proc_net_unix.read_text(encoding="utf-8", errors="surrogateescape"),
+        trees,
+    )
+    if findings:
+        raise AssertionError("; ".join(findings))
+
+
+def _daemon_isolation_probe_source(
+    unwalked: tuple[str, ...],
+    socket_root: str = "/",
+) -> str:
+    """Return a self-contained sandbox script that exits while any daemon is in reach."""
+    return (
+        inspect.getsource(_docker_daemon_exposures)
+        + "\n"
+        + inspect.getsource(_unexpected_sockets)
+        + "\n_findings = _docker_daemon_exposures(__import__('os').environ)"
+        + f" + _unexpected_sockets({socket_root!r}, unwalked={tuple(unwalked)!r})\n"
+        + "if _findings:\n"
+        + "    raise SystemExit('; '.join(_findings))\n"
+    )
+
 class NetworkBoundaryAssertionTests(unittest.TestCase):
     def test_unrelated_socket_error_is_not_accepted_as_network_isolation(self) -> None:
         with self.assertRaisesRegex(AssertionError, "network namespace"):
@@ -99,6 +428,744 @@ class NetworkBoundaryAssertionTests(unittest.TestCase):
             os.strerror(errno.ECONNREFUSED),
             LOOPBACK_NETWORK_ERRNOS,
         )
+
+
+class DockerDaemonExposureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A short base keeps socket paths inside the 107-byte AF_UNIX limit.
+        directory = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def _listening_unix_socket(self, name: str) -> Path:
+        path = self.root / name
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(path))
+        listener.listen(8)
+        return path
+
+    def _write_context(self, config_directory: Path, meta: str) -> None:
+        context = config_directory / "contexts" / "meta" / "0123abcd"
+        context.mkdir(parents=True)
+        (context / "meta.json").write_text(meta, encoding="utf-8")
+
+    def test_listening_well_known_socket_is_reported_reachable(self) -> None:
+        daemon = self._listening_unix_socket("docker.sock")
+
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root)},
+            well_known_sockets=(str(daemon),),
+        )
+
+        self.assertEqual(len(exposures), 1)
+        self.assertIn("Docker daemon reachable", exposures[0])
+        self.assertIn(str(daemon), exposures[0])
+
+    def test_stale_socket_without_a_listener_is_unreachable(self) -> None:
+        stale = self.root / "docker.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as abandoned:
+            abandoned.bind(str(stale))
+
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root)},
+            well_known_sockets=(str(stale),),
+        )
+
+        self.assertEqual(exposures, [])
+
+    def test_connect_that_times_out_is_not_counted_unreachable(self) -> None:
+        daemon = self._listening_unix_socket("docker.sock")
+
+        with patch.object(socket.socket, "connect", side_effect=TimeoutError("timed out")):
+            exposures = _docker_daemon_exposures(
+                {"HOME": str(self.root)},
+                well_known_sockets=(str(daemon),),
+            )
+
+        self.assertEqual(len(exposures), 1)
+        self.assertIn("did not answer within", exposures[0])
+        self.assertIn("unreachability not proven", exposures[0])
+
+    def test_non_definitive_connect_errors_are_not_counted_unreachable(self) -> None:
+        for number in (errno.ECONNRESET, errno.EINVAL, errno.EAGAIN):
+            with self.subTest(errno=errno.errorcode[number]):
+                failure = OSError(number, os.strerror(number))
+                with patch.object(socket.socket, "connect", side_effect=failure):
+                    exposures = _docker_daemon_exposures(
+                        {"HOME": str(self.root)},
+                        well_known_sockets=("/run/docker.sock",),
+                    )
+
+                self.assertEqual(len(exposures), 1)
+                self.assertIn(f"errno {number}", exposures[0])
+                self.assertIn("unreachability not proven", exposures[0])
+
+    def test_unresolvable_tcp_host_is_not_counted_unreachable(self) -> None:
+        unresolved = socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+        with patch.object(socket, "getaddrinfo", side_effect=unresolved):
+            exposures = _docker_daemon_exposures(
+                {"HOME": str(self.root), "DOCKER_HOST": "tcp://daemon.example:2375"},
+                well_known_sockets=(),
+            )
+
+        self.assertEqual(len(exposures), 1)
+        self.assertIn(f"errno {socket.EAI_AGAIN}", exposures[0])
+        self.assertIn("unreachability not proven", exposures[0])
+
+    def test_each_definitive_refusal_counts_as_unreachable(self) -> None:
+        for number in (
+            errno.ENOENT,
+            errno.ENOTDIR,
+            errno.ECONNREFUSED,
+            errno.EACCES,
+            errno.EPERM,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+        ):
+            with self.subTest(errno=errno.errorcode[number]):
+                refusal = OSError(number, os.strerror(number))
+                with patch.object(socket.socket, "connect", side_effect=refusal):
+                    exposures = _docker_daemon_exposures(
+                        {"HOME": str(self.root)},
+                        well_known_sockets=("/run/docker.sock",),
+                    )
+
+                self.assertEqual(exposures, [])
+
+    def test_docker_host_unix_endpoint_is_probed(self) -> None:
+        daemon = self._listening_unix_socket("remote.sock")
+
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root), "DOCKER_HOST": f"unix://{daemon}"},
+            well_known_sockets=(),
+        )
+
+        self.assertEqual(exposures, [f"Docker daemon reachable at unix://{daemon}"])
+
+    def test_docker_host_tcp_endpoint_is_probed(self) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        endpoint = f"tcp://127.0.0.1:{listener.getsockname()[1]}"
+
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root), "DOCKER_HOST": endpoint},
+            well_known_sockets=(),
+        )
+
+        self.assertEqual(exposures, [f"Docker daemon reachable at {endpoint}"])
+
+    def test_tcp_endpoint_without_a_usable_port_is_not_counted_unreachable(self) -> None:
+        for endpoint in ("tcp://127.0.0.1", "tcp://127.0.0.1:docker"):
+            with self.subTest(endpoint=endpoint):
+                exposures = _docker_daemon_exposures(
+                    {"HOME": str(self.root), "DOCKER_HOST": endpoint},
+                    well_known_sockets=(),
+                )
+
+                self.assertEqual(len(exposures), 1)
+                self.assertIn(endpoint, exposures[0])
+                self.assertIn("unreachability not proven", exposures[0])
+
+    def test_unparseable_endpoint_is_reported_with_its_reason(self) -> None:
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root), "DOCKER_HOST": "tcp://[::1"},
+            well_known_sockets=(),
+        )
+
+        self.assertEqual(len(exposures), 1)
+        self.assertIn("tcp://[::1", exposures[0])
+        self.assertIn("Invalid IPv6 URL", exposures[0])
+        self.assertIn("unreachability not proven", exposures[0])
+
+    def test_endpoint_the_probe_cannot_dial_is_not_counted_unreachable(self) -> None:
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root), "DOCKER_HOST": "npipe:////./pipe/docker_engine"},
+            well_known_sockets=(),
+        )
+
+        self.assertEqual(len(exposures), 1)
+        self.assertIn("npipe:////./pipe/docker_engine", exposures[0])
+        self.assertIn("unreachability not proven", exposures[0])
+
+    def test_configured_context_endpoint_is_probed(self) -> None:
+        daemon = self._listening_unix_socket("context.sock")
+        self._write_context(
+            self.root / ".docker",
+            json.dumps({"Name": "remote", "Endpoints": {"docker": {"Host": f"unix://{daemon}"}}}),
+        )
+
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root)},
+            well_known_sockets=(),
+        )
+
+        self.assertEqual(exposures, [f"Docker daemon reachable at unix://{daemon}"])
+
+    def test_unreadable_context_is_not_counted_unreachable(self) -> None:
+        config_directory = self.root / "docker-config"
+        self._write_context(config_directory, "{not json")
+
+        exposures = _docker_daemon_exposures(
+            {"HOME": str(self.root), "DOCKER_CONFIG": str(config_directory)},
+            well_known_sockets=(),
+        )
+
+        self.assertEqual(len(exposures), 1)
+        self.assertIn("meta.json", exposures[0])
+        self.assertIn("unreachability not proven", exposures[0])
+
+    def test_default_probe_covers_system_and_rootless_daemon_sockets(self) -> None:
+        dialed = []
+
+        def refuse(address):
+            dialed.append(address)
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+        runtime_directory = self.root / "runtime"
+        with patch.object(socket.socket, "connect", side_effect=refuse):
+            exposures = _docker_daemon_exposures(
+                {"HOME": str(self.root), "XDG_RUNTIME_DIR": str(runtime_directory)},
+            )
+
+        self.assertEqual(exposures, [])
+        self.assertEqual(
+            set(dialed),
+            {
+                "/var/run/docker.sock",
+                "/run/docker.sock",
+                f"/run/user/{os.getuid()}/docker.sock",
+                f"{runtime_directory}/docker.sock",
+            },
+        )
+
+    def test_sandbox_probe_source_exits_when_a_daemon_answers(self) -> None:
+        source = _daemon_isolation_probe_source(HOSTED_UNWALKED, socket_root=str(self.root))
+
+        with patch.dict(os.environ, {"HOME": str(self.root)}, clear=True), patch.object(
+            socket.socket, "connect", return_value=None
+        ):
+            with self.assertRaisesRegex(SystemExit, "Docker daemon reachable at unix:///var/run/docker.sock"):
+                exec(compile(source, "<docker-probe>", "exec"), {"__name__": "docker_probe"})
+
+    def test_sandbox_probe_source_passes_when_no_daemon_answers(self) -> None:
+        source = _daemon_isolation_probe_source(HOSTED_UNWALKED, socket_root=str(self.root))
+        absent = FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+        with patch.dict(os.environ, {"HOME": str(self.root)}, clear=True), patch.object(
+            socket.socket, "connect", side_effect=absent
+        ):
+            exec(compile(source, "<docker-probe>", "exec"), {"__name__": "docker_probe"})
+
+
+def _hosted_shape_bubblewrap_arguments(*extra: str) -> list[str]:
+    """The hosted sandbox's mount list: the node root is /usr/local there."""
+    return [
+        "/usr/bin/bwrap",
+        "--unshare-user",
+        "--unshare-pid",
+        "--as-pid-1",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--disable-userns",
+        "--die-with-parent",
+        "--new-session",
+        "--cap-drop", "ALL",
+        "--tmpfs", "/",
+        "--tmpfs", "/tmp",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64",
+        "--ro-bind", "/etc", "/etc",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--tmpfs", "/dev/shm",
+        "--dir", "/run",
+        "--ro-bind", "/home/runner/work/_temp/profile/socket", "/run/verjson-postgres",
+        "--dir", "/opt",
+        "--dir", "/opt/verjson",
+        "--ro-bind", "/home/runner/work/_temp/profile/client", "/opt/verjson/postgres-client",
+        "--dir", "/opt/verjson/node",
+        "--ro-bind", "/usr/local", "/opt/verjson/node",
+        "--dir", "/opt/verjson/drizzle",
+        "--ro-bind", "/home/runner/work/fixtures/drizzle", "/opt/verjson/drizzle",
+        *extra,
+        "--setenv", "HOME", "/tmp",
+        "--",
+        "/usr/bin/python3",
+    ]
+
+
+HOSTED_SCOPE = _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments())
+HOSTED_UNWALKED = HOSTED_SCOPE.unwalked
+HOSTED_HOST_TREES = HOSTED_SCOPE.host_trees
+
+
+class SandboxSocketInventoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A short base keeps socket paths inside the 107-byte AF_UNIX limit.
+        directory = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def _bound_socket(self, relative: str) -> None:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as bound:
+            bound.bind(str(path))
+
+    def test_socket_other_than_postgres_is_reported_by_its_sandbox_path(self) -> None:
+        self._bound_socket("run/verjson-postgres/.s.PGSQL.5432")
+        self._bound_socket("run/containerd/containerd.sock")
+
+        findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("/run/containerd/containerd.sock", findings[0])
+        self.assertNotIn(str(self.root), findings[0])
+
+    def test_unreadable_directory_fails_closed_with_its_reason(self) -> None:
+        (self.root / "run" / "sealed").mkdir(parents=True)
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if Path(path) == self.root / "run" / "sealed":
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+            return real_scandir(path)
+
+        with patch.object(os, "scandir", side_effect=scandir):
+            findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("/run/sealed", findings[0])
+        self.assertIn(os.strerror(errno.EACCES), findings[0])
+        self.assertIn("socket absence not proven", findings[0])
+
+    def test_directory_the_candidate_cannot_search_is_out_of_reach(self) -> None:
+        sealed = self.root / "etc" / "ssl" / "private"
+        sealed.mkdir(parents=True)
+        real_scandir = os.scandir
+        real_access = os.access
+
+        def scandir(path):
+            if Path(path) == sealed:
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+            return real_scandir(path)
+
+        def access(path, mode):
+            if Path(path) == sealed:
+                return False
+            return real_access(path, mode)
+
+        with patch.object(os, "scandir", side_effect=scandir), patch.object(
+            os, "access", side_effect=access
+        ):
+            findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(findings, [])
+
+    def test_symlinked_directories_are_not_followed(self) -> None:
+        (self.root / "run").mkdir()
+        (self.root / "run" / "loop").symlink_to(self.root / "run")
+
+        findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(findings, [])
+
+    def test_kernel_and_read_only_distribution_trees_are_not_walked(self) -> None:
+        for tree in ("proc", "usr", "bin", "lib", "lib64", "opt/verjson/node"):
+            self._bound_socket(f"{tree}/nested/daemon.sock")
+
+        findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(findings, [])
+
+    def test_walk_past_its_entry_limit_fails_closed_with_a_reason(self) -> None:
+        crowded = self.root / "etc" / "crowded"
+        crowded.mkdir(parents=True)
+        for index in range(6):
+            (crowded / f"entry-{index}").touch()
+
+        findings = _unexpected_sockets(str(self.root), unwalked=(), entry_limit=5)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("more than 5 entries", findings[0])
+        self.assertIn("socket absence not proven", findings[0])
+
+    def test_walk_past_its_entry_limit_keeps_what_it_already_found(self) -> None:
+        self._bound_socket("engine.sock")
+        crowded = self.root / "etc"
+        crowded.mkdir()
+        for index in range(6):
+            (crowded / f"entry-{index}").touch()
+
+        findings = _unexpected_sockets(str(self.root), unwalked=(), entry_limit=5)
+
+        self.assertEqual(findings[0], "unexpected socket /engine.sock")
+        self.assertIn("socket absence not proven", findings[1])
+
+    def test_walk_within_its_entry_limit_passes(self) -> None:
+        crowded = self.root / "etc"
+        crowded.mkdir()
+        for index in range(4):
+            (crowded / f"entry-{index}").touch()
+
+        self.assertEqual(_unexpected_sockets(str(self.root), unwalked=(), entry_limit=5), [])
+
+    def test_walk_skips_exactly_the_unwalked_mounts_it_is_given(self) -> None:
+        self._bound_socket("opt/verjson/node/lib/daemon.sock")
+        self._bound_socket("usr/lib/daemon.sock")
+
+        findings = _unexpected_sockets(str(self.root), unwalked=("/opt/verjson/node",))
+
+        self.assertEqual(findings, ["unexpected socket /usr/lib/daemon.sock"])
+
+    def test_every_other_tree_is_walked_by_path_not_by_name(self) -> None:
+        relatives = [f"{tree}/nested/daemon.sock" for tree in ("etc", "tmp", "opt", "dev", "var", "run")]
+        relatives += ["opt/x/lib/d.sock", "tmp/bin/d.sock"]
+        for relative in relatives:
+            self._bound_socket(relative)
+
+        findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(
+            findings,
+            sorted(f"unexpected socket /{relative}" for relative in relatives),
+        )
+
+    def test_postgres_socket_name_elsewhere_is_still_reported(self) -> None:
+        for relative in ("tmp/.s.PGSQL.5432", "run/other/.s.PGSQL.5432"):
+            self._bound_socket(relative)
+
+        findings = _unexpected_sockets(str(self.root), unwalked=HOSTED_UNWALKED)
+
+        self.assertEqual(
+            findings,
+            [
+                "unexpected socket /run/other/.s.PGSQL.5432",
+                "unexpected socket /tmp/.s.PGSQL.5432",
+            ],
+        )
+
+    def test_sandbox_probe_source_skips_the_unwalked_mounts_it_is_given(self) -> None:
+        self._bound_socket("usr/lib/engine.sock")
+        source = _daemon_isolation_probe_source(("/usr",), socket_root=str(self.root))
+        absent = FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+        with patch.dict(os.environ, {"HOME": str(self.root)}, clear=True), patch.object(
+            socket.socket, "connect", side_effect=absent
+        ):
+            exec(compile(source, "<daemon-probe>", "exec"), {"__name__": "daemon_probe"})
+
+    def test_sandbox_probe_source_exits_on_an_unexpected_socket(self) -> None:
+        self._bound_socket("run/podman/podman.sock")
+        source = _daemon_isolation_probe_source(HOSTED_UNWALKED, socket_root=str(self.root))
+        absent = FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+        with patch.dict(os.environ, {"HOME": str(self.root)}, clear=True), patch.object(
+            socket.socket, "connect", side_effect=absent
+        ):
+            with self.assertRaisesRegex(SystemExit, "unexpected socket /run/podman/podman.sock"):
+                exec(compile(source, "<daemon-probe>", "exec"), {"__name__": "daemon_probe"})
+
+
+PROC_NET_UNIX_HEADER = "Num       RefCount Protocol Flags    Type St Inode Path"
+
+
+def _proc_net_unix(*rows: str) -> str:
+    return "\n".join((PROC_NET_UNIX_HEADER, *rows)) + "\n"
+
+
+class SandboxSocketScopeTests(unittest.TestCase):
+    def test_distribution_binds_are_unwalked_and_host_covered(self) -> None:
+        scope = _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments())
+
+        self.assertEqual(
+            scope.unwalked,
+            ("/usr", "/bin", "/lib", "/lib64", "/proc", "/opt/verjson/node"),
+        )
+        self.assertEqual(scope.host_trees, ("/usr", "/bin", "/lib", "/lib64", "/usr/local"))
+
+    def test_every_unwalked_bind_is_host_covered_and_every_other_bind_walked(self) -> None:
+        arguments = _hosted_shape_bubblewrap_arguments(
+            "--ro-bind", "/home/runner/work/_temp/shim", "/tmp/untrusted-bin",
+        )
+        options = arguments[: arguments.index("--")]
+        binds = [
+            (options[index + 1], options[index + 2])
+            for index, option in enumerate(options)
+            if option == "--ro-bind"
+        ]
+
+        scope = _sandbox_socket_scope(arguments)
+
+        covered = [(source, target) for source, target in binds if target in scope.unwalked]
+        self.assertEqual(tuple(source for source, _ in covered), scope.host_trees)
+        self.assertEqual(
+            sorted(set(scope.unwalked) - {target for _, target in covered}),
+            ["/proc"],
+        )
+        self.assertEqual(
+            sorted(target for source, target in binds if (source, target) not in covered),
+            [
+                "/etc",
+                "/opt/verjson/drizzle",
+                "/opt/verjson/postgres-client",
+                "/run/verjson-postgres",
+                "/tmp/untrusted-bin",
+            ],
+        )
+
+    def test_real_hosted_bind_list_matches_the_pinned_scope(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            socket_directory = root / "socket"
+            socket_directory.mkdir()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as postgres:
+                postgres.bind(str(socket_directory / ci_postgres_sandbox.POSTGRES_SOCKET_NAME))
+                client_bin = root / "client" / "bin"
+                client_bin.mkdir(parents=True)
+                for tool in ("psql", "pg_dump"):
+                    (client_bin / tool).write_text("#!/bin/sh\n", encoding="utf-8")
+                    (client_bin / tool).chmod(0o755)
+                hosted = types.SimpleNamespace(
+                    primary={"containerName": "primary"},
+                    secondary={"containerName": "secondary"},
+                    schema_profile={"containerName": "schema"},
+                    primary_state_file=root / "primary.json",
+                    secondary_state_file=root / "secondary.json",
+                    schema_state_file=root / "schema.json",
+                    runner_temp=root,
+                    bwrap="/usr/bin/bwrap",
+                    node_root=Path("/usr/local"),
+                    drizzle_dir=root / "drizzle",
+                )
+                state = {
+                    "containerName": "primary",
+                    "profileName": ci_postgres_sandbox.PROFILE_NAME,
+                    "socketDirectory": str(socket_directory),
+                    "clientBundleDirectory": str(root / "client"),
+                }
+                with patch.object(ci_postgres_sandbox, "verify_profile_runtime"), patch.object(
+                    ci_postgres_sandbox, "verify_local_auth_policy"
+                ):
+                    arguments = PostgresSandboxHostedAcceptanceTests._bubblewrap_command(
+                        hosted, state, []
+                    )
+
+        self.assertEqual(_sandbox_socket_scope(arguments), HOSTED_SCOPE)
+
+    def test_unknown_truncated_or_unterminated_options_fail_closed(self) -> None:
+        unknown = _hosted_shape_bubblewrap_arguments("--bind", "/var/run", "/var/run")
+        prefix = _hosted_shape_bubblewrap_arguments()
+        options = prefix[: prefix.index("--")]
+        for label, arguments, reason in (
+            ("unknown", unknown, "cannot classify bubblewrap option '--bind'"),
+            ("truncated", options + ["--ro-bind", "/srv"], "'--ro-bind' without its 2 operands"),
+            ("unterminated", options, "no '--' ending the bubblewrap options"),
+        ):
+            with self.subTest(label):
+                with self.assertRaisesRegex(ValueError, f"socket scope.*{re.escape(reason)}"):
+                    _sandbox_socket_scope(arguments)
+
+    def test_bind_source_is_classified_by_its_resolved_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            link = Path(directory) / "node"
+            link.symlink_to("/usr/local")
+            scope = _sandbox_socket_scope(
+                _hosted_shape_bubblewrap_arguments("--ro-bind", str(link), "/opt/tools")
+            )
+
+        self.assertEqual(scope.unwalked[-1], "/opt/tools")
+        self.assertEqual(scope.host_trees[-1], str(link))
+
+    def test_bind_source_sharing_only_a_name_prefix_is_walked(self) -> None:
+        scope = _sandbox_socket_scope(
+            _hosted_shape_bubblewrap_arguments(
+                "--ro-bind", "/usrdata/x", "/opt/data",
+                "--dir", "/opt/verjson/nodes",
+            )
+        )
+
+        self.assertNotIn("/opt/data", scope.unwalked)
+        self.assertNotIn("/usrdata/x", scope.host_trees)
+
+    def test_each_distribution_root_counts_without_a_merged_usr(self) -> None:
+        with patch.object(os.path, "realpath", side_effect=lambda path: path):
+            scope = _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments())
+
+        self.assertEqual(scope, HOSTED_SCOPE)
+
+    def test_walked_mount_under_an_unwalked_bind_fails_closed(self) -> None:
+        arguments = _hosted_shape_bubblewrap_arguments(
+            "--ro-bind", "/home/runner/work/_temp/shim", "/usr/local/shim",
+        )
+
+        with self.assertRaisesRegex(ValueError, "mount /usr/local/shim overlaps unwalked /usr"):
+            _sandbox_socket_scope(arguments)
+
+    def test_mount_over_an_ancestor_of_an_unwalked_bind_fails_closed(self) -> None:
+        for extra in (
+            ("--tmpfs", "/opt"),
+            ("--ro-bind", "/home/runner/work/_temp/shim", "/opt/verjson"),
+            ("--ro-bind", "/home/runner/work/_temp/shim", "/"),
+        ):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"socket scope: mount {re.escape(extra[-1])} overlaps unwalked .*/opt/verjson/node",
+                ):
+                    _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments(*extra))
+
+    def test_device_proc_and_distribution_mounts_over_an_ancestor_fail_closed(self) -> None:
+        for extra in (("--dev", "/opt"), ("--proc", "/opt"), ("--ro-bind", "/usr/share", "/opt")):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(ValueError, "overlaps unwalked /opt/verjson/node"):
+                    _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments(*extra))
+
+    def test_directory_created_at_an_ancestor_of_an_unwalked_bind_is_accepted(self) -> None:
+        scope = _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments("--dir", "/opt/verjson"))
+
+        self.assertEqual(scope, HOSTED_SCOPE)
+
+    def test_mount_replacing_an_unwalked_bind_fails_closed(self) -> None:
+        arguments = _hosted_shape_bubblewrap_arguments(
+            "--ro-bind", "/home/runner/work/_temp/shim", "/opt/verjson/node",
+        )
+
+        with self.assertRaisesRegex(ValueError, "mount /opt/verjson/node overlaps unwalked /opt/verjson/node"):
+            _sandbox_socket_scope(arguments)
+
+
+class HostDistributionTreeListenerTests(unittest.TestCase):
+    def test_listener_under_a_read_only_tree_is_reported(self) -> None:
+        table = _proc_net_unix(
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41234 /usr/lib/engine.sock",
+        )
+
+        findings = _distribution_tree_listeners(table, HOSTED_HOST_TREES)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("/usr/lib/engine.sock", findings[0])
+
+    def test_listener_under_each_read_only_tree_is_reported_by_full_path(self) -> None:
+        paths = ["/bin/engine.sock", "/lib/engine.sock", "/lib64/engine.sock", "/usr/local/my engine.sock"]
+        table = _proc_net_unix(
+            *(f"0000000000000000: 00000002 00000000 00010000 0001 01 4123{index} {path}" for index, path in enumerate(paths))
+        )
+
+        findings = _distribution_tree_listeners(table, HOSTED_HOST_TREES)
+
+        self.assertEqual(findings, [f"host socket listening at {path}" for path in paths])
+
+    def test_dot_dot_path_into_a_read_only_tree_is_reported(self) -> None:
+        table = _proc_net_unix(
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41234 /tmp/../usr/lib/engine.sock",
+        )
+
+        findings = _distribution_tree_listeners(table, HOSTED_HOST_TREES)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("/tmp/../usr/lib/engine.sock", findings[0])
+
+    def test_symlinked_path_into_a_read_only_tree_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            link = Path(directory) / "toolchain"
+            link.symlink_to("/usr/lib")
+            path = f"{link}/engine.sock"
+            table = _proc_net_unix(
+                f"0000000000000000: 00000002 00000000 00010000 0001 01 41234 {path}",
+            )
+
+            findings = _distribution_tree_listeners(table, HOSTED_HOST_TREES)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn(path, findings[0])
+
+    def test_tree_reached_through_a_merged_usr_link_is_matched(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            (root / "usr" / "bin").mkdir(parents=True)
+            (root / "bin").symlink_to("usr/bin")
+            path = f"{root}/usr/bin/engine.sock"
+            table = _proc_net_unix(
+                f"0000000000000000: 00000002 00000000 00010000 0001 01 41234 {path}",
+            )
+
+            findings = _distribution_tree_listeners(table, trees=(f"{root}/bin",))
+
+        self.assertEqual(findings, [f"host socket listening at {path}"])
+
+    def test_relative_listener_path_is_not_proven_outside_the_trees(self) -> None:
+        table = _proc_net_unix(
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41234 engine.sock",
+            "0000000000000000: 00000002 00000000 00000000 0001 01 41235 connected.sock",
+        )
+
+        findings = _distribution_tree_listeners(table, HOSTED_HOST_TREES)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("engine.sock", findings[0])
+        self.assertIn("listener location not proven", findings[0])
+
+    def test_rows_outside_the_residual_are_not_reported(self) -> None:
+        table = _proc_net_unix(
+            "0000000000000000: 00000002 00000000 00000000 0001 01 41230 /usr/lib/connected.sock",
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41231 /run/docker.sock",
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41232 /usrlocal/engine.sock",
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41233 /library/engine.sock",
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41234 @/usr/abstract",
+            "0000000000000000: 00000002 00000000 00010000 0001 01 41235",
+        )
+
+        self.assertEqual(_distribution_tree_listeners(table, HOSTED_HOST_TREES), [])
+
+    def test_unparseable_rows_fail_closed_with_a_reason(self) -> None:
+        for row in (
+            "0000000000000000: 00000002 00000000 0001 01 41234",
+            "0000000000000000: 00000002 00000000 listening 0001 01 41234 /run/x.sock",
+            "0000000000000000: 00000002 00000000 00010000 0001 01 inode /run/x.sock",
+            "0000000000000000: refs 00000000 00010000 0001 01 41234 /run/x.sock",
+            "0000000000000000 00000002 00000000 00010000 0001 01 41234 /run/x.sock",
+            "",
+        ):
+            with self.subTest(row=row):
+                findings = _distribution_tree_listeners(_proc_net_unix(row), HOSTED_HOST_TREES)
+
+                self.assertEqual(len(findings), 1)
+                self.assertIn("line 2", findings[0])
+                self.assertIn("listener absence not proven", findings[0])
+
+    def test_host_check_reads_the_table_and_fails_on_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            table = Path(directory) / "unix"
+            table.write_text(
+                _proc_net_unix(
+                    "0000000000000000: 00000002 00000000 00010000 0001 01 41234 /usr/lib/engine.sock",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(AssertionError, "host socket listening at /usr/lib/engine.sock"):
+                _assert_no_host_distribution_tree_listeners(HOSTED_HOST_TREES, table)
+
+    def test_unrecognized_header_fails_closed(self) -> None:
+        for table in (
+            "",
+            "Num RefCount Protocol Flags Type St Inode Netns Path\n",
+        ):
+            with self.subTest(table=table):
+                findings = _distribution_tree_listeners(table, HOSTED_HOST_TREES)
+
+                self.assertEqual(len(findings), 1)
+                self.assertIn("header", findings[0])
+                self.assertIn("listener absence not proven", findings[0])
 
 
 class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
@@ -412,6 +1479,8 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         return result
 
     def _assert_network_boundary(self, state: dict[str, object]) -> None:
+        scope = _sandbox_socket_scope(self._bubblewrap_command(state, []))
+        _assert_no_host_distribution_tree_listeners(scope.host_trees)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", 0))
@@ -430,7 +1499,6 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
 import json
 import os
 import socket
-import subprocess
 from pathlib import Path
 
 observed = []
@@ -476,20 +1544,11 @@ must_reject(
     lambda: (socket_path.parent / "candidate-write").write_text("forbidden"),
 )
 
-docker_socket = Path("/var/run/docker.sock")
-if docker_socket.exists():
-    try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(str(docker_socket))
-    except OSError:
-        pass
-    else:
-        raise SystemExit("Docker socket reachable")
-docker = subprocess.run(["docker", "info"], capture_output=True, timeout=3, check=False)
-if docker.returncode == 0:
-    raise SystemExit("Docker daemon reachable")
+__DAEMON_ISOLATION_PROBE__
 print(json.dumps(observed))
-""".replace("__LOOPBACK_PORT__", str(loopback_port))
+""".replace("__LOOPBACK_PORT__", str(loopback_port)).replace(
+                "__DAEMON_ISOLATION_PROBE__", _daemon_isolation_probe_source(scope.unwalked)
+            )
             network = self._candidate(
                 state,
                 ["/usr/bin/python3", "-I", "-c", network_probe],
@@ -1096,7 +2155,4 @@ for tool in ("psql", "pg_dump"):
 
 
 if __name__ == "__main__":
-    if os.environ.get("GITHUB_ACTIONS") != "true":
-        print("SKIP: hosted Postgres acceptance runs in GitHub Actions")
-        raise SystemExit(0)
     unittest.main()

@@ -455,6 +455,10 @@ class GeneratedCallerTests(unittest.TestCase):
                     capture_output=True,
                 )
                 self.assertEqual(2, result.returncode)
+                self.assertEqual(
+                    "gen-changelog-caller.sh: release-propose requires --autonomy propose or --autonomy dispatch\n",
+                    result.stderr,
+                )
 
     def test_reusable_workflows_have_exact_non_widenable_authority(self) -> None:
         workflows = {}

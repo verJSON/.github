@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -184,17 +185,22 @@ class PreContractMigrationTests(unittest.TestCase):
         self.assert_rejected(base, head, "cannot change other release snapshots")
 
     def test_malformed_or_attacker_selected_permits_fail_closed(self) -> None:
+        unsafe = "pre-contract migration destination is not a safe path"
         attacks = (
-            {"schema_version": 1, "migrations": [self.entry(destination="../escape.md")]},
-            {"schema_version": 1, "migrations": [self.entry(destination=".git/config")]},
-            {"schema_version": 1, "migrations": [self.entry(destination="NEXT/archive.md")]},
-            {"schema_version": 1, "migrations": [self.entry(source="CHANGELOG/other.md")]},
-            {"schema_version": 1, "migrations": [dict(self.entry(), extra="write")]},
-            {"schema_version": 1, "migrations": [self.entry(sha256="A" * 64)]},
+            ({"schema_version": 1, "migrations": [self.entry(destination="../escape.md")]}, unsafe),
+            ({"schema_version": 1, "migrations": [self.entry(destination=".git/config")]}, unsafe),
+            ({"schema_version": 1, "migrations": [self.entry(destination="NEXT/archive.md")]},
+             "pre-contract migration destination is active changelog state"),
+            ({"schema_version": 1, "migrations": [self.entry(source="CHANGELOG/other.md")]},
+             "pre-contract migration source does not match its version"),
+            ({"schema_version": 1, "migrations": [dict(self.entry(), extra="write")]},
+             "pre-contract migration entry has unsupported fields"),
+            ({"schema_version": 1, "migrations": [self.entry(sha256="A" * 64)]},
+             "pre-contract migration sha256 is invalid"),
         )
-        for document in attacks:
+        for document, reason in attacks:
             with self.subTest(document=document):
-                with self.assertRaises(changelog.ChangelogError):
+                with self.assertRaisesRegex(changelog.ChangelogError, "^" + re.escape(reason) + "$"):
                     changelog.parse_pre_contract_migrations(json.dumps(document).encode())
 
     def test_schema_version_requires_an_exact_json_integer(self) -> None:

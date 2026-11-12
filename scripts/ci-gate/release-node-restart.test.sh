@@ -111,7 +111,7 @@ case "$2" in
     printf '%s\n' v1.2.3
     ;;
   create)
-    [ "${GH_CREATE_FAIL:-0}" != 1 ] || exit 1
+    [ "${GH_CREATE_FAIL:-0}" != 1 ] || exit 31
     touch "$TEST_STATE/github-release"
     ;;
   edit) [ -e "$TEST_STATE/github-release" ] ;;
@@ -137,8 +137,15 @@ run_notes() {
 }
 
 run_publish
-if run_notes env GH_CREATE_FAIL=1; then
+# The failed create prints nothing of its own, so the stub's distinctive exit 31
+# is what shows the create call, and not an earlier step, stopped the run.
+notes_status=0
+run_notes env GH_CREATE_FAIL=1 || notes_status=$?
+if [ "$notes_status" -eq 0 ]; then
   echo "FAIL - simulated GitHub Release failure unexpectedly succeeded" >&2
+  exit 1
+elif [ "$notes_status" -ne 31 ]; then
+  echo "FAIL - the release-notes step stopped with exit $notes_status before the simulated create failure (31)" >&2
   exit 1
 fi
 run_publish
@@ -154,10 +161,20 @@ run_publish
 run_notes env GH_CREATE_FAIL=0
 echo "ok - a fully completed release rerun reconciles without rewriting package or tag"
 
+# A mismatched integrity and a spoofed name each fail one half of the same
+# comparison, so they share its message; neither can reach the other half.
 for mode in mismatch spoof; do
   rm -rf "$work/state"; mkdir -p "$work/state"; touch "$work/state/registry-root"
-  if VIEW_MODE="$mode" run_publish >/dev/null 2>&1; then
+  mode_status=0
+  VIEW_MODE="$mode" run_publish >"$work/$mode.out" 2>&1 || mode_status=$?
+  if [ "$mode_status" -eq 0 ]; then
     echo "FAIL - rerun accepted $mode registry metadata" >&2
+    exit 1
+  fi
+  if [ "$mode_status" -ne 1 ] \
+    || ! grep -qF 'Error: registry package identity or integrity does not match the attested release snapshot' "$work/$mode.out"; then
+    echo "FAIL - rerun refused $mode registry metadata for another reason (exit $mode_status)" >&2
+    cat "$work/$mode.out" >&2
     exit 1
   fi
   echo "ok - rerun rejects $mode registry metadata"

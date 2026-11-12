@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests for typed CI test levels (ADR 0238, test-levels amendment)."""
 
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -48,7 +49,8 @@ def levels(*items, **top):
 
 
 def run_generator(*args):
-    return subprocess.run([sys.executable, str(GENERATOR), *args], capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(GENERATOR), *args], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C"})
 
 
 def aggregate_script(rendered):
@@ -56,11 +58,39 @@ def aggregate_script(rendered):
     return workflow["jobs"][ci_levels.AGGREGATE_ID]["steps"][0]["run"]
 
 
-def run_aggregate(script, expected, results):
-    env = {"PATH": os.environ["PATH"], "LEVEL_COUNT": str(len(results))}
+def aggregate(script, expected, results):
+    env = {"PATH": os.environ["PATH"], "LC_ALL": "C", "LEVEL_COUNT": str(len(results))}
     for index, (exp, result) in enumerate(zip(expected, results)):
         env.update({f"LEVEL_{index}": f"l{index}", f"EXPECTED_{index}": exp, f"RESULT_{index}": result})
-    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).returncode
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+
+def run_aggregate(script, expected, results):
+    return aggregate(script, expected, results).returncode
+
+
+NEEDS_OUTPUT_READ = re.compile(r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
+
+
+def undeclared_needs_output_reads(rendered):
+    """Return (reader, job, output) for each needs-output read the producing job never declares."""
+    node_ci = yaml.safe_load((ROOT / ".github/workflows/node-ci.yml").read_text())
+    node_ci_outputs = set(node_ci[True]["workflow_call"]["outputs"])
+    jobs = yaml.safe_load(rendered)["jobs"]
+    declared = {}
+    for job_id, job in jobs.items():
+        if "uses" in job:
+            if not job["uses"].startswith("Verjson/.github/.github/workflows/node-ci.yml@"):
+                raise AssertionError(f"{job_id} calls an unmodeled reusable workflow: {job['uses']}")
+            declared[job_id] = node_ci_outputs
+        else:
+            declared[job_id] = set(job.get("outputs", {}))
+    return sorted(
+        (reader, job_id, output)
+        for reader, job in jobs.items()
+        for job_id, output in NEEDS_OUTPUT_READ.findall(json.dumps(job))
+        if output not in declared[job_id]
+    )
 
 
 class GoldenTests(unittest.TestCase):
@@ -187,7 +217,7 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         )
         self.assertIn("needs.artifact-producer.result == 'skipped'", jobs["test-levels"]["steps"][1]["with"]["share-selected"])
         self.assertEqual(jobs["test-levels"]["steps"][1]["if"], "always()")
-        self.assertEqual(jobs["test-levels"]["if"], "${{ always() }}")
+        self.assertEqual(jobs["test-levels"]["if"], "${{ !github.event.pull_request.draft && (always()) }}")
         self.assertNotIn("continue-on-error", json.dumps(jobs["test-levels"]))
         aggregate_projection = jobs["test-levels"]["steps"][1]["with"]["needs-json"]
         self.assertIn('"build-artifact-receipt":${{ toJSON(needs.build.outputs.build-artifact-receipt) }}', aggregate_projection)
@@ -211,10 +241,10 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         selected = "toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected))"
         available = "toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available))"
         participant_if = (
-            "${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
+            "${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
             "&& needs.artifact-preflight.result == 'success' "
             f"&& ({selected} == 'false' || (github.run_attempt == '1' && {selected} == 'true' "
-            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true) }}}}"
+            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true)) }}}}"
         )
         for level_id in ("build", "test"):
             self.assertEqual(jobs[level_id]["if"], participant_if)
@@ -226,6 +256,7 @@ class BuildArtifactSchemaTests(unittest.TestCase):
 
         def route(preflight_result, raw_selected, attempt, producer_result, raw_available):
             bindings = {
+                "github.event.pull_request.draft": False,
                 "needs.artifact-mode-gate.result": "success",
                 "needs.artifact-preflight.result": preflight_result,
                 "github.run_attempt": attempt,
@@ -340,6 +371,23 @@ class BuildArtifactSchemaTests(unittest.TestCase):
             "${{ github.event_name == 'push' }}",
         )
 
+    def test_every_generated_caller_reads_only_declared_needs_outputs(self):
+        goldens = sorted(FIXTURES.glob("*.golden.yml"))
+        self.assertLessEqual(
+            {"default.golden.yml", "gitflow.golden.yml", "build-artifact-share.golden.yml",
+             "build-artifact-static-fallback.golden.yml"},
+            {golden.name for golden in goldens},
+        )
+        for golden in goldens:
+            with self.subTest(golden=golden.name):
+                self.assertEqual(undeclared_needs_output_reads(golden.read_text()), [])
+
+    def test_static_fallback_writes_its_outputs_through_one_redirect(self):
+        # actionlint's shellcheck pass rejects repeated redirects to one file (SC2129).
+        workflow = yaml.safe_load((FIXTURES / "build-artifact-static-fallback.golden.yml").read_text())
+        run = workflow["jobs"]["artifact-preflight"]["steps"][0]["run"]
+        self.assertEqual(run.count(">>"), 1, run)
+
     def test_static_eligibility_uses_canonical_parser_for_string_shorthand(self):
         document = self.artifact_document()
         document["levels"][0]["inputs"] = {
@@ -385,13 +433,17 @@ class AggregateTruthTableTests(unittest.TestCase):
                 self.assertEqual(run_aggregate(self.script, [expected], [result]) == 0, passes)
 
     def test_an_unexpected_expectation_value_fails(self):
-        self.assertNotEqual(run_aggregate(self.script, [""], ["success"]), 0)
+        rejected = aggregate(self.script, [""], ["success"])
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(rejected.stdout.splitlines(), ["::error::level l0: expected= result=success"])
 
     def test_any_bad_level_among_good_ones_fails_the_aggregate(self):
         self.assertEqual(run_aggregate(self.script, ["true", "true", "false"], ["success", "success", "skipped"]), 0)
         for bad in ("failure", "cancelled", "skipped"):
             with self.subTest(bad=bad):
-                self.assertNotEqual(run_aggregate(self.script, ["true", "true", "false"], ["success", bad, "skipped"]), 0)
+                rejected = aggregate(self.script, ["true", "true", "false"], ["success", bad, "skipped"])
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(rejected.stdout.splitlines(), [f"::error::level l1: expected=true result={bad}"])
 
 
 def context(event, target):
@@ -421,6 +473,8 @@ def simulate(rendered, outcomes, event="pull_request", base="main"):
 
     def evaluate(expression):
         py = expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True")
+        # Every simulated run is a push, a dispatch, or a ready pull request.
+        py = py.replace(ci_levels.DRAFT_GUARD, "True")
         py = py.replace("github.event_name", repr(event)).replace("github.base_ref", repr(base_ref))
         py = py.replace("github.ref_name", repr(ref_name))
         py = re.sub(r"needs\.([a-z-]+)\.result", lambda m: repr(results[m.group(1)]), py)
@@ -459,7 +513,10 @@ class EdgeConditionTests(unittest.TestCase):
         results = simulate(self.rendered, outcomes, event, base)
         _, flags = expected_flags(self.rendered, event, base)
         ordered = [results[env_level] for env_level in ["lint", "unit", "integration", "diagnostics", "release-gate"]]
-        return results, run_aggregate(aggregate_script(self.rendered), flags, ordered)
+        process = aggregate(aggregate_script(self.rendered), flags, ordered)
+        # Levels are reported by position: l0 lint, l1 unit, l2 integration, l3 diagnostics.
+        self.errors = process.stdout.splitlines()
+        return results, process.returncode
 
     def test_all_success_on_a_pull_request_passes(self):
         results, code = self.aggregate_exit({})
@@ -471,16 +528,22 @@ class EdgeConditionTests(unittest.TestCase):
         self.assertEqual(results["integration"], "skipped")
         self.assertEqual(results["diagnostics"], "success")
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l1: expected=true result=failure",
+                                       "::error::level l2: expected=true result=skipped"])
 
     def test_a_cancelled_prerequisite_runs_neither_edge_and_fails(self):
         results, code = self.aggregate_exit({"unit": "cancelled"})
         self.assertEqual((results["integration"], results["diagnostics"]), ("skipped", "skipped"))
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l1: expected=true result=cancelled",
+                                       "::error::level l2: expected=true result=skipped",
+                                       "::error::level l3: expected=true result=skipped"])
 
     def test_a_failing_independent_level_fails_even_when_the_rest_succeed(self):
         results, code = self.aggregate_exit({"lint": "failure"})
         self.assertEqual(results["unit"], "success")
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l0: expected=true result=failure"])
 
     def test_a_push_to_main_expects_the_release_gate_and_not_diagnostics(self):
         results, code = self.aggregate_exit({}, event="push")
@@ -519,13 +582,108 @@ class EdgeConditionTests(unittest.TestCase):
     def test_a_failed_diagnostics_level_fails_the_aggregate(self):
         _, code = self.aggregate_exit({"diagnostics": "failure"})
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l3: expected=true result=failure"])
+
+
+GOLDENS = tuple(sorted(FIXTURES.glob("*.golden.yml")))
+_NEEDS_REF = re.compile(r"needs\.[a-z][a-z0-9-]*\.(?:result|outputs\.[a-z][a-z0-9-]*)")
+
+
+def schedules(job, *, event="pull_request", draft=None, upstream="success"):
+    """Whether GitHub starts `job`: its `if:` with every upstream at `upstream`.
+
+    Outputs bind to 'true' so the artifact DAG takes its sharing path. A guard
+    without a status function also needs every dependency to have succeeded.
+    """
+    guard = job.get("if")
+    if guard is None:
+        return upstream == "success"
+    bindings = {
+        "github.event_name": event,
+        "github.event.pull_request.draft": draft,
+        "github.base_ref": "main" if event == "pull_request" else "",
+        "github.ref_name": "7/merge" if event == "pull_request" else "main",
+        "github.run_attempt": "1",
+    }
+    for name in _NEEDS_REF.findall(guard):
+        bindings[name] = upstream if name.endswith(".result") else "true"
+    functions = {"always": lambda: True, "cancelled": lambda: False,
+                 "success": lambda: upstream == "success", "failure": lambda: upstream == "failure"}
+    explicit_status = re.search(r"\b(?:always|success|failure|cancelled)\(", guard)
+    runs = Evaluator(bindings, functions=functions).evaluate(guard)
+    return runs and bool(explicit_status or upstream == "success")
+
+
+class DraftDeferralTests(unittest.TestCase):
+    """Issue #1984: drafts run no lane; ready and new commits run the whole plan."""
+
+    def test_a_draft_pull_request_schedules_no_job(self):
+        for golden in GOLDENS:
+            for name, job in yaml.safe_load(golden.read_text())["jobs"].items():
+                with self.subTest(caller=golden.name, job=name):
+                    self.assertFalse(
+                        schedules(job, draft=True),
+                        "a draft must hold no runner and report no lane or aggregate result",
+                    )
+
+    def test_a_ready_pull_request_schedules_its_whole_plan(self):
+        plans = {
+            (): {"ci"},
+            ("--levels", str(FIXTURES / "gitflow.json")): {"lint", "unit", "integration", "diagnostics", ci_levels.AGGREGATE_ID},
+        }
+        for arguments, expected in plans.items():
+            with self.subTest(arguments=arguments):
+                jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
+                self.assertEqual({name for name, job in jobs.items() if schedules(job, draft=False)}, expected)
+
+    def test_a_push_carries_no_draft_flag_and_schedules_its_whole_plan(self):
+        plans = {
+            (): {"ci"},
+            ("--levels", str(FIXTURES / "gitflow.json")): {"unit", "integration", "release-gate", ci_levels.AGGREGATE_ID},
+        }
+        for arguments, expected in plans.items():
+            with self.subTest(arguments=arguments):
+                jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
+                self.assertEqual({name for name, job in jobs.items() if schedules(job, event="push")}, expected)
+
+    def test_on_a_ready_pull_request_the_aggregate_still_judges_skipped_levels(self):
+        """Paired with the truth table, where an expected level that skipped fails it."""
+        jobs = yaml.safe_load(run_generator(SHA, "--levels", str(FIXTURES / "gitflow.json")).stdout)["jobs"]
+        self.assertTrue(
+            schedules(jobs[ci_levels.AGGREGATE_ID], draft=False, upstream="skipped"),
+            "an aggregate skipped with its levels would pass a ready head nothing verified",
+        )
+
+    @staticmethod
+    def cancels(action):
+        cancel = yaml.safe_load(ci_levels.CONCURRENCY)["concurrency"]["cancel-in-progress"]
+        return Evaluator({"github.event_name": "pull_request", "github.event.action": action}).evaluate(cancel)
+
+    def test_a_same_commit_transition_waits_for_the_running_run(self):
+        for action in ("opened", "reopened", "ready_for_review"):
+            with self.subTest(action=action):
+                self.assertFalse(
+                    self.cancels(action),
+                    "a same-head event must not cancel a running ready run into a red required check",
+                )
+
+    def test_a_new_commit_cancels_the_run_it_supersedes(self):
+        self.assertTrue(self.cancels("synchronize"), "a superseded head's run would keep its runner to the end")
+
+    def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
+        triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
+        self.assertEqual(
+            triggers["pull_request"],
+            {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
+            "without ready_for_review nothing re-runs a deferred draft once it is ready",
+        )
 
 
 class ValidatorTests(unittest.TestCase):
     def test_valid_plan_is_immutable(self):
         plan = parse(levels({"id": "unit"}, {"id": "e2e", "needs": [{"level": "unit"}]}))
         self.assertEqual([l.id for l in plan.levels], ["unit", "e2e"])
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(dataclasses.FrozenInstanceError, "^cannot assign to field 'id'$"):
             plan.levels[0].id = "x"
 
     def test_needs_default_to_success(self):
@@ -731,7 +889,10 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(result.stderr.startswith("unreadable_file $: "))
 
     def test_sha_must_be_forty_hex(self):
-        self.assertNotEqual(run_generator("main").returncode, 0)
+        result = run_generator("main")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((result.returncode, result.stdout), (2, ""))
+        self.assertTrue(result.stderr.endswith("gen-node-ci-caller.py: error: sha must be a 40-hex commit\n"), result.stderr)
 
 
 if __name__ == "__main__":
