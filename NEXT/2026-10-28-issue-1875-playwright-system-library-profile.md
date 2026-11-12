@@ -10,4 +10,4 @@ The Ubuntu archive signing key is pinned by SHA256 and snapshotted into the priv
 
 The protected Node CI generator's source and output byte tripwires rise from 480,000 to 490,000 bytes so that the merged canonical workflow (483,271 bytes) fits; ADR 0238's 2026-11-12 amendment records this as a labeled stopgap until inline candidate-execution code moves into the pinned helper modules.
 
-The same-repository hosted acceptance workflow is Tier 2 work: it skips draft pull requests, starts on `ready_for_review`, and cancels a superseded run.
+The same-repository hosted acceptance workflow is Tier 2 work: it skips draft pull requests, starts on `ready_for_review`, and cancels a superseded run. Its completion also re-evaluates merge admission, as ADR 0260 requires of every workflow that reports on a pull-request head.
