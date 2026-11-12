@@ -6140,6 +6140,197 @@ for problem in problems:
     sys.stderr.write("FAIL - %s %s\n" % (path, problem))
 sys.exit(1 if problems else 0)
 RELEASE_SHAPE_PY
+cat >"$work/package-less-verification.py" <<'PACKAGE_LESS_VERIFICATION_PY'
+"""Run a release caller's verify job on a package-less tree (#1906).
+
+A repository without a root package.json verifies through its executable
+scripts/release-verify.sh, and that hook may run on Node: package metadata
+cannot say which runtime it needs. Walk the verify job's steps in order on such
+a tree: emulate actions/setup-node wherever its condition admits the tree, run
+the generated runtime capture and verification suite, and require the hook to
+see the configured Node version.
+
+The caller has already passed the structural checks, so this reads only the
+generated block layout. Anything else is an error, never a pass.
+"""
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+workflow_path, expected_node_version, release_mode = sys.argv[1:4]
+SELECTED = "steps.release-version.outputs.selected == 'true'"
+PACKAGE_FILE_PRESENT = re.compile(r"hashFiles\('([A-Za-z0-9_./-]+)'\) != ''")
+NODE_VERSION_INPUT = re.compile(r"\$\{\{ '([0-9]+(?:\.[0-9]+){0,2})' \}\}")
+STEP_SHELL = ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail"]
+
+
+def refuse(message):
+    sys.stderr.write("FAIL - %s %s\n" % (workflow_path, message))
+    sys.exit(1)
+
+
+def verify_job_steps():
+    lines = open(workflow_path, encoding="utf-8").read().split("\n")
+    try:
+        start = lines.index("    steps:", lines.index("  verify:"))
+    except ValueError:
+        refuse("has no verify job steps the package-less check can read (#1906)")
+    steps = []
+    for line in lines[start + 1:]:
+        if line.startswith("      - "):
+            steps.append(["        " + line[len("      - "):]])
+        elif line.startswith("        ") and steps:
+            steps[-1].append(line)
+        elif not line.strip() and steps:
+            steps[-1].append("")
+        elif line.startswith("      #"):
+            continue
+        else:
+            break
+    return [parse_step(step) for step in steps]
+
+
+def parse_step(step_lines):
+    fields = {}
+    index = 0
+    while index < len(step_lines):
+        line = step_lines[index]
+        index += 1
+        if (
+            not line.startswith("        ")
+            or line.startswith("         ")
+            or line.startswith("        #")
+        ):
+            continue
+        key, separator, value = line.strip().partition(":")
+        if not separator:
+            refuse("has a verify step line the package-less check cannot read (#1906)")
+        value = value.strip()
+        nested = []
+        while index < len(step_lines) and (
+            not step_lines[index].strip() or step_lines[index].startswith("         ")
+        ):
+            nested.append(step_lines[index])
+            index += 1
+        if key == "run" and value == "|":
+            while nested and not nested[-1].strip():
+                nested.pop()
+            fields[key] = "\n".join(line[10:] for line in nested) + "\n"
+        elif key == "with" and not value:
+            fields[key] = dict(
+                (name.strip(), setting.strip())
+                for name, _, setting in (
+                    line.strip().partition(":") for line in nested
+                    if line.strip() and not line.strip().startswith("#")
+                )
+            )
+        else:
+            fields[key] = value.split(" # ", 1)[0] if key == "uses" else value
+    return fields
+
+
+def admits(condition, tree):
+    if condition is None:
+        return True
+    for term in condition.split(" && "):
+        if term == SELECTED:
+            continue
+        package_file = PACKAGE_FILE_PRESENT.fullmatch(term)
+        if package_file is None:
+            refuse("has a verify step condition the package-less check cannot evaluate: %s (#1906)" % condition)
+        if not os.path.isfile(os.path.join(tree, package_file.group(1))):
+            return False
+    return True
+
+
+def run_step(step, tree, environment):
+    script = os.path.join(environment["RUNNER_TEMP"], "step.sh")
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(step["run"])
+    return subprocess.run(
+        STEP_SHELL + [script], cwd=tree, env=environment, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+
+
+def run_verify_job(steps, tree, runner_temp):
+    path = os.environ.get("PATH", "")
+    captured_path = ""
+    tool_cache = os.path.join(runner_temp, "verjson-changelog-tools")
+    for step in steps:
+        if step.get("uses", "").startswith("actions/setup-node@"):
+            if not admits(step.get("if"), tree):
+                continue
+            version = NODE_VERSION_INPUT.fullmatch(step.get("with", {}).get("node-version", ""))
+            if version is None:
+                refuse("has a setup-node version the package-less check cannot read (#1906)")
+            node_directory = os.path.join(runner_temp, "setup-node", "bin")
+            os.makedirs(node_directory, exist_ok=True)
+            node = os.path.join(node_directory, "node")
+            with open(node, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nprintf 'setup-node %%s\\n' '%s'\n" % version.group(1))
+            os.chmod(node, 0o755)
+            path = node_directory + os.pathsep + path
+        elif step.get("name") == "Capture trusted release verification runtime":
+            if not admits(step.get("if"), tree):
+                continue
+            output = os.path.join(runner_temp, "github-output")
+            open(output, "w", encoding="utf-8").close()
+            capture = run_step(step, tree, dict(
+                os.environ, PATH=path, RUNNER_TEMP=runner_temp,
+                VERJSON_CHANGELOG_TOOL_CACHE=tool_cache, GITHUB_OUTPUT=output,
+            ))
+            if capture.returncode != 0:
+                refuse("cannot capture the release verification runtime on a package-less tree (#1906): %s" % capture.stdout.strip())
+            for line in open(output, encoding="utf-8").read().splitlines():
+                if line.startswith("path="):
+                    captured_path = line[len("path="):]
+        elif step.get("name") == "Run the release verification suite":
+            if not admits(step.get("if"), tree):
+                refuse("does not run its release verification suite on a package-less tree (#1906)")
+            return run_step(step, tree, dict(
+                os.environ, PATH=path, RUNNER_TEMP=runner_temp,
+                RELEASE_VERIFICATION_PATH=captured_path,
+                VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
+                PACKAGE_VERSION="9.8.7", CI_PACKAGE_RETENTION_KEEP="3", NODE_AUTH_TOKEN="",
+            ))
+    refuse("has no release verification suite the package-less check can run (#1906)")
+
+
+def package_less_tree(root):
+    tree = os.path.join(root, "tree")
+    runner_temp = os.path.join(root, "runner")
+    os.makedirs(os.path.join(tree, "scripts"))
+    os.makedirs(runner_temp)
+    return tree, runner_temp
+
+
+steps = verify_job_steps()
+with tempfile.TemporaryDirectory() as root:
+    tree, runner_temp = package_less_tree(root)
+    hook = os.path.join(tree, "scripts", "release-verify.sh")
+    with open(hook, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env node\nprocess.stdout.write('runner node ' + process.version + '\\n')\n")
+    os.chmod(hook, 0o755)
+    verification = run_verify_job(steps, tree, runner_temp)
+    if verification.returncode != 0 or (
+        "setup-node %s" % expected_node_version
+    ) not in verification.stdout.splitlines():
+        refuse(
+            "does not give a package-less verification hook the configured Node %s (#1906): %s"
+            % (expected_node_version, verification.stdout.strip()[-400:])
+        )
+# release-snapshot is the mode built for package-less repositories (#1206): the
+# same tree with no hook has nothing to verify and must stop the release here,
+# before the snapshot job can run.
+if release_mode == "release-snapshot":
+    with tempfile.TemporaryDirectory() as root:
+        tree, runner_temp = package_less_tree(root)
+        if run_verify_job(steps, tree, runner_temp).returncode == 0:
+            refuse("lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)")
+PACKAGE_LESS_VERIFICATION_PY
 
 # Every workflow that calls changelog-release.yml is a release caller, whatever
 # it happens to be named. Keying these checks on one filename let a caller named
@@ -6880,6 +7071,13 @@ printf '%s\n' '#!/usr/bin/env bash' 'exit 23' \
     || fail "$release_workflow does not emit the stamped-version failure diagnostic (#862)"
   ! grep -qF 'do-not-print-this' "$verification_fixture/output" \
     || fail "$release_workflow exposes the verification credential in its failure diagnostic (#862)"
+
+  # A package-less repository verifies through its own hook, which may run on
+  # Node; package metadata cannot say so. Run the verify job on such a tree and
+  # require the hook to see the configured Node version (#1906).
+  python3 "$work/package-less-verification.py" "$release_workflow" "$EXPECTED_RELEASE_NODE_VERSION" "$release_mode" \
+    || fail "$release_workflow: see above"
+  echo "ok - $workflow_relative_path gives a package-less verification hook the configured Node $EXPECTED_RELEASE_NODE_VERSION (#1906)"
 done <<RELEASE_WORKFLOWS
 $release_workflows
 RELEASE_WORKFLOWS

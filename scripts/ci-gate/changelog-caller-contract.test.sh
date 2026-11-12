@@ -1329,6 +1329,75 @@ injected_warning_failures="$(
 [ "$injected_warning_failures" = 1 ] \
   && pass "capture_mode refuses a generator mode that succeeded while writing to stderr" \
   || fail "capture_mode accepted a generator mode that wrote to stderr (failures: ${injected_warning_failures:-none})"
+# The generated contract test runs each release caller's verify job against a
+# package-less tree whose executable scripts/release-verify.sh runs on Node
+# (#1906). A generated caller with any of these defects already fails the
+# pinned pre-credential digest first, so no adopter case can show this check
+# refuse one: its rejections are exercised here on the check itself.
+package_less_check="$tmproot/package-less-verification.py"
+awk '
+  $0 == "cat >\"$work/package-less-verification.py\" <<'"'"'PACKAGE_LESS_VERIFICATION_PY'"'"'" { copying = 1; next }
+  copying && $0 == "PACKAGE_LESS_VERIFICATION_PY" { exit }
+  copying
+' "$emitted" >"$package_less_check"
+package_less_node_version=22.23.1
+package_less_release="$tmproot/package-less-release.yml"
+bash "$gen" release-snapshot "$sha" --node-version "$package_less_node_version" >"$package_less_release" \
+  || fail "release-snapshot --node-version $package_less_node_version did not generate"
+mutate_package_less_release() { # mutate_package_less_release <file> <old> <new>
+  python3 - "$@" <<'PY'
+import sys
+path, old, new = sys.argv[1:4]
+text = open(path, encoding="utf-8").read()
+if text.count(old) != 1:
+    raise SystemExit(f"mutation anchor occurs {text.count(old)} times, expected once: {old!r}")
+open(path, "w", encoding="utf-8").write(text.replace(old, new))
+PY
+}
+gate_setup_node_on_package_json() {
+  mutate_package_less_release "$1" \
+    "      - uses: $(sed -n 's/^      - uses: \(actions\/setup-node@.*\)$/\1/p' "$1")
+        if: steps.release-version.outputs.selected == 'true'
+" \
+    "      - uses: $(sed -n 's/^      - uses: \(actions\/setup-node@.*\)$/\1/p' "$1")
+        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
+"
+}
+expect_package_less_rejection() { # expect_package_less_rejection <label> <reason> <mutator>
+  local label="$1" reason="$2" mutator="$3" mutated status=0
+  mutated="$tmproot/package-less-$mutator.yml"
+  cp "$package_less_release" "$mutated"
+  if [ ! -s "$package_less_check" ]; then
+    fail "the generated contract test carries no package-less verification check, so $label is never refused (#1906)"
+  elif ! "$mutator" "$mutated"; then
+    fail "the $label mutation did not apply"
+  elif python3 "$package_less_check" "$mutated" "$package_less_node_version" release-snapshot \
+    >"$tmproot/package-less.out" 2>&1; then
+    fail "the package-less verification check accepted $label"
+  else
+    status=$?
+    if [ "$status" -eq 1 ] && grep -qF -- "$reason" "$tmproot/package-less.out"; then
+      pass "the package-less verification check rejects $label"
+    else
+      fail "the package-less verification check rejected $label for another reason (exit $status): $(tail -3 "$tmproot/package-less.out")"
+    fi
+  fi
+}
+expect_package_less_rejection "setup-node gated on package.json" \
+  "does not give a package-less verification hook the configured Node $package_less_node_version (#1906)" \
+  gate_setup_node_on_package_json
+pass_package_less_tree_without_hook() {
+  mutate_package_less_release "$1" \
+    '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
+            exit 1
+' \
+    '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
+            exit 0
+'
+}
+expect_package_less_rejection "a package-less tree without a verification hook passing verification" \
+  "lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)" \
+  pass_package_less_tree_without_hook
 if generator_only_row; then
   [ "$fails" -eq 0 ] || exit 1
   echo "All generator contract assertions passed."
@@ -7049,6 +7118,13 @@ if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts a generated release-snapshot caller"
 else
   fail "emitted suite rejects a generated release-snapshot caller: $(tail -2 "$ADOPTER_LOG")"
+fi
+# The check is exercised directly in the generator-only block; this shows the
+# emitted suite actually runs it on a discovered release caller (#1906).
+if grep -qxF 'ok - .github/workflows/release.yml gives a package-less verification hook the configured Node 24 (#1906)' "$ADOPTER_LOG"; then
+  pass "emitted suite runs the package-less Node verification check on the release caller"
+else
+  fail "emitted suite never ran the package-less Node verification check on the release caller (#1906)"
 fi
 SCHED_SCRIPT
 )"
