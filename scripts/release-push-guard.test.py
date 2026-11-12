@@ -46,6 +46,16 @@ class ReleasePushGuardTest(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               env=os.environ | {'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'})
 
+    def allow_remote_history_rewrite(self):
+        # The lease alone admits any non-fast-forward from the dispatch SHA, so
+        # parent cases run without the remote's own denial to prove the guard
+        # itself refuses the push.
+        self.git(self.remote, 'config', 'receive.denyNonFastForwards', 'false')
+
+    def assert_rejected_for_wrong_parent(self, result):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('release commit must have the dispatch commit as its sole parent', result.stderr)
+
     def remote_ref(self, ref):
         r = self.git(self.remote, 'rev-parse', '--verify', ref, check=False)
         return r.stdout.strip() if r.returncode == 0 else None
@@ -166,8 +176,9 @@ class ReleasePushGuardTest(unittest.TestCase):
         tree = self.git(self.repo, 'rev-parse', f'{self.release}^{{tree}}').stdout.strip()
         bad = self.git(self.repo, 'commit-tree', tree, '-p', self.previous, '-m', 'wrong parent').stdout.strip()
         self.git(self.repo, 'tag', '-a', 'bad', bad, '-m', 'bad')
+        self.allow_remote_history_rewrite()
         result = self.push(release=bad, tag='bad')
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_for_wrong_parent(result)
         self.assertEqual(self.remote_ref('refs/heads/main'), self.dispatch)
         self.assertIsNone(self.remote_ref('refs/tags/bad'))
 
@@ -176,8 +187,9 @@ class ReleasePushGuardTest(unittest.TestCase):
         bad = self.git(self.repo, 'commit-tree', tree, '-p', self.previous, '-m', 'wrong parent').stdout.strip()
         self.git(self.repo, 'tag', '-a', 'bad', bad, '-m', 'bad')
         self.git(self.repo, 'replace', bad, self.release)
+        self.allow_remote_history_rewrite()
         result = self.push(release=bad, tag='bad')
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_for_wrong_parent(result)
         self.assertEqual(self.remote_ref('refs/heads/main'), self.dispatch)
         self.assertIsNone(self.remote_ref('refs/tags/bad'))
 
