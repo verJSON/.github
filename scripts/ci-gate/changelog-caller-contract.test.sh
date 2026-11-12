@@ -6989,14 +6989,24 @@ grep -qE '^  verify:$' <<<"$snapshot_release" \
 # Regression: publish's tag/note verification step once read the version from
 # `steps.release-version.outputs.version` (always empty there), so the exact-tag
 # check failed on every release.
-# A snapshot-only adopter need not be a Node project (#1206): the Node steps are
-# guarded on package.json and a repository without one must verify through its
-# own scripts/release-verify.sh rather than falling back to npm test.
+# A snapshot-only adopter need not be a Node project (#1206): its package steps
+# are guarded on package.json and a repository without one must verify through
+# its own scripts/release-verify.sh rather than falling back to npm test. That
+# hook may itself run on Node, which package metadata cannot announce, so the
+# configured Node runtime is installed whether or not package.json exists (#1906).
 snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:space:]]*$/{seen=0} seen' <<<"$snapshot_release")"
-[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 7 ] \
+snapshot_setup_node_condition="$(awk '
+  /^      - uses: actions\/setup-node@/ { found = 1; next }
+  found && /^      - / { exit }
+  found && /^        if: / { sub(/^        if: /, ""); print; exit }
+' <<<"$snapshot_verify_job")"
+[ "$snapshot_setup_node_condition" = "steps.release-version.outputs.selected == 'true'" ] \
+  && pass "release-snapshot installs the configured Node runtime whether or not package.json exists (#1906)" \
+  || fail "release-snapshot gates setup-node on something other than the selected release, so a package-less Node-based verify hook runs without its configured Node: ${snapshot_setup_node_condition:-<no condition>}"
+[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 6 ] \
   && grep -qF 'elif [ ! -f package.json ]; then' <<<"$snapshot_verify_job" \
   && grep -qF 'No package.json and no executable scripts/release-verify.sh' <<<"$snapshot_verify_job" \
-  && pass "release-snapshot guards setup-node, dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
+  && pass "release-snapshot guards dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
   || fail "release-snapshot still assumes a Node project: a non-npm adopter would fail at npm ci or verify nothing"
 snapshot_publish_job="$(awk '/^  publish:[[:space:]]*$/{seen=1} seen' <<<"$snapshot_release")"
 grep -qF 'VERSION: ${{ needs.verify.outputs.version }}' <<<"$snapshot_publish_job" \

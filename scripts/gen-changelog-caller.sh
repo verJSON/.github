@@ -2547,10 +2547,12 @@ ${release_plan_step}
           fetch-depth: 0
           persist-credentials: false
       # A snapshot-only adopter publishes nothing and need not be a Node project
-      # (#1206): the Node steps run only when a package.json exists, and a
+      # (#1206): its package steps run only when a package.json exists, and a
       # repository without one must verify through its own verify hook below.
+      # Node itself is installed either way, because that hook may run on Node
+      # and package metadata cannot say so (#1906).
       - uses: ${release_setup_node}
-        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
+        if: steps.release-version.outputs.selected == 'true'
         with:
           # Keep the literal inside an expression so Renovate's uses-with
           # extractor leaves it alone while setup-node receives the same value.
@@ -4755,7 +4757,7 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
     "release-node": "639d473d29fff274a0ff6e439df02fb6d8e3f76baa0531e77197f40a56aa65a7",
     "release-artifact": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
-    "release-snapshot": "7eceae921350cc602532030f3b8ff7a28fea0397d292aa2644415b0af9ddf5be",
+    "release-snapshot": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",

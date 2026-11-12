@@ -481,6 +481,13 @@ contract test rejects it. An adopter that later gains something to publish
 regenerates as `release-node` or `release-artifact` rather than editing this
 file.
 
+A `release-snapshot` repository need not have a root `package.json`. Without
+one, it verifies through an executable `scripts/release-verify.sh`, and `verify`
+fails before the snapshot if that hook is missing. Dependency installation and
+version stamping run only when `package.json` exists. The configured Node
+version (`--node-version`) is installed either way, so a hook written in Node
+runs on the pinned runtime rather than whatever the runner provides (#1906).
+
 Reaching for `release-node` with a `"private": true` package is now refused
 before anything irreversible happens. node-release.yml only ever runs as
 `publish`, so a failure there lands on top of a tag and an immutable

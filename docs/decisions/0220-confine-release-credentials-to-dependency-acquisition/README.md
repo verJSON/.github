@@ -180,3 +180,15 @@ The other canonical changelog workflows, `changelog-release.yml`, `release-propo
 ## 2026-11-12 amendment pointer — pre-credential digests re-recorded by ADR 0244
 
 [ADR 0244](../0244-manually-dispatched-fragment-derived-release/README.md) (#1939, PR #1941) adds the stated-head check to the verify job's pre-credential region and re-records `APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256` there. The values in the 2026-10-18 amendment above are superseded: release-node `639d473d…`, release-artifact `6c7bf751…`, release-snapshot `7eceae92…`.
+
+## 2026-11-12 amendment — release-snapshot installs Node before its verification hook (#1906)
+
+**Finding.** The generated release-snapshot caller ran `actions/setup-node` only when the release tree had a root `package.json` (#1206). A package-less adopter still verifies through an executable `scripts/release-verify.sh`, and that hook may run on Node. Package metadata does not say which runtime a custom hook needs, so such a hook ran on whatever Node the runner happened to provide, or none, rather than the configured, pinned version.
+
+**Decision.** In release-snapshot, setup-node now runs on the selected release alone (`steps.release-version.outputs.selected == 'true'`), as it already did in release-node and release-artifact. Dependency acquisition, credentialed and tokenless installation, lifecycle execution, and version stamping keep their `hashFiles('package.json') != ''` guard, so a package-less tree still receives no package credential and runs no npm command. A package-less caller with no hook still fails in the verification step, before the snapshot job can run. The step stays immediately before *Capture trusted release verification runtime*, so the captured `PATH` the hook runs with includes the configured Node.
+
+Installing Node unconditionally was preferred over also admitting `hashFiles('scripts/release-verify.sh') != ''`. The two differ only for a tree that has neither file, which fails verification either way. A second file condition would tie the runtime to one hook name while `scripts/release-prepare-packages.sh` also runs before verification. The cost is one setup-node run, usually served from the runner tool cache, for package-less adopters whose hook does not use Node.
+
+**Contract.** The setup-node step is inside the verify job's pre-credential region, so this amendment re-records the release-snapshot value of `APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256` in `scripts/gen-changelog-caller.sh`. The release-node and release-artifact values recorded through ADR 0244 are unchanged. The values are release-node `639d473d…`, release-artifact `6c7bf751…`, and release-snapshot `6c7bf751…`. The release-snapshot pre-credential region is now byte-identical to release-artifact's.
+
+**Rollout.** Generated release-node and release-artifact callers are byte-identical to their previous output. Release-snapshot callers and the shared generated contract test change, so adopters get the fix when they regenerate their complete caller set at a contract commit that contains it.
