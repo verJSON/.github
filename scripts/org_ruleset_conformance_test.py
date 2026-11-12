@@ -54,6 +54,24 @@ def ruleset(
     }
 
 
+def merge_admission_contract():
+    return {
+        "ruleset_id": None,
+        "name": MERGE_ADMISSION_BINDING["ruleset_name"],
+        "bypass_actors": copy.deepcopy(MERGE_ADMISSION_BYPASS),
+    }
+
+
+def required_checks_rule(*checks):
+    return {
+        "type": "required_status_checks",
+        "parameters": {
+            "strict_required_status_checks_policy": False,
+            "required_status_checks": list(checks),
+        },
+    }
+
+
 def actions_state_responses(repositories):
     """The ADR 0252 paused-state reads, for repositories mapped to (id, verjson-actions-state)."""
     return {
@@ -74,6 +92,22 @@ def actions_state_responses(repositories):
 
 CORE_CHECKS_NODE_BYPASS = [
     {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},
+    {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+    {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"},
+]
+
+# ADR 0260 Decision 2: `merge-admission` is the one context bound to the AI review App,
+# and the item-2 ruleset's bypass list mirrors 20722935 without that App
+# (ARB-2031-2026-11-12 C6, C10).
+MERGE_ADMISSION_BINDING = {
+    "context": "merge-admission",
+    "integration_id": 4528902,
+    "app_id_variable": "AI_REVIEW_APP_ID",
+    "ruleset_name": "merge-admission-required",
+}
+MERGE_ADMISSION_BYPASS = [
+    {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},
+    {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"},
     {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
     {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"},
 ]
@@ -151,8 +185,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                             "bypass_mode": "always",
                         },
                         "required_check_producer_app_id": 15368,
+                        "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
                         "bypassless_required_workflows": [],
-                        "bypass_actor_contracts": [
+                        "bypass_actor_contracts": [merge_admission_contract()] + [
                             {
                                 "ruleset_id": ruleset_id,
                                 "name": detail["name"],
@@ -253,6 +288,12 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                     "bypass_mode": "always",
                 },
                 "required_check_producer_app_id": 15368,
+                "merge_admission_binding": {
+                    "context": "merge-admission",
+                    "integration_id": 4528902,
+                    "app_id_variable": "AI_REVIEW_APP_ID",
+                    "ruleset_name": "merge-admission-required",
+                },
                 "bypassless_required_workflows": [
                 {
                     "name": "authn-type-surface-required-workflow",
@@ -332,6 +373,16 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                     {
                         "ruleset_id": 18098028,
                         "name": "main-protection",
+                        "bypass_actors": [
+                            {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},
+                            {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"},
+                            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+                            {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"},
+                        ],
+                    },
+                    {
+                        "ruleset_id": None,
+                        "name": "merge-admission-required",
                         "bypass_actors": [
                             {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},
                             {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"},
@@ -462,7 +513,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             "repository_id": {"repository_ids": [1302124584]},
         }
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        policy["bypass_actor_contracts"] = []
+        policy["bypass_actor_contracts"] = [merge_admission_contract()]
         result, _ = self.run_audit(
             [[{"id": 99}]], {99: detail}, raw_policy=json.dumps(policy)
         )
@@ -528,7 +579,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
     def committed_policy_without_bypass_contracts(self):
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        policy["bypass_actor_contracts"] = []
+        policy["bypass_actor_contracts"] = [merge_admission_contract()]
         return json.dumps(policy)
 
     def test_bypassless_cli_projects_workflow_with_its_strict_admission_check_passes(self):
@@ -682,6 +733,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             contract
             for contract in policy["bypass_actor_contracts"]
             if contract["ruleset_id"] == 20515817
+            or contract["name"] == MERGE_ADMISSION_BINDING["ruleset_name"]
         ]
         return self.run_audit(
             [[{"id": 20515817}, {"id": baseline["id"]}]],
@@ -1021,8 +1073,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
-            "bypass_actor_contracts": [],
+            "bypass_actor_contracts": [merge_admission_contract()],
         }
 
         result, _ = self.run_audit(
@@ -1052,8 +1105,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
             "bypass_actor_contracts": [
+                merge_admission_contract(),
                 {
                     "ruleset_id": 17,
                     "name": "ruleset-17",
@@ -1079,8 +1134,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
             "bypass_actor_contracts": [
+                merge_admission_contract(),
                 {"ruleset_id": None, "name": name, "bypass_actors": bypass_actors}
             ],
         }
@@ -1169,8 +1226,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
-            "bypass_actor_contracts": [],
+            "bypass_actor_contracts": [merge_admission_contract()],
         }
 
         result, _ = self.run_audit(
@@ -1194,8 +1252,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
-            "bypass_actor_contracts": [],
+            "bypass_actor_contracts": [merge_admission_contract()],
         }
 
         result, _ = self.run_audit(
@@ -1220,6 +1279,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
         }
         cases = [
@@ -1274,7 +1334,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         ]
         for details, contract, diagnostic in cases:
             with self.subTest(diagnostic=diagnostic):
-                policy = base_policy | {"bypass_actor_contracts": [contract]}
+                policy = base_policy | {"bypass_actor_contracts": [merge_admission_contract(), contract]}
                 result, _ = self.run_audit(
                     [[{"id": ruleset_id} for ruleset_id in details]],
                     details,
@@ -1293,6 +1353,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "bypass_mode": "always",
             },
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
         }
         cases = [
@@ -1329,7 +1390,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         ]
         for contracts, diagnostic in cases:
             with self.subTest(diagnostic=diagnostic):
-                policy = base_policy | {"bypass_actor_contracts": contracts}
+                policy = base_policy | {"bypass_actor_contracts": [merge_admission_contract(), *contracts]}
                 result, _ = self.run_audit(
                     [[{"id": 17}]],
                     {17: ruleset(17)},
@@ -1349,6 +1410,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             "organization": "Verjson",
             "release_authorization_bypass": actor,
             "required_check_producer_app_id": 15368,
+            "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
             "bypassless_required_workflows": [],
         }
         cases = [
@@ -1361,6 +1423,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             with self.subTest(diagnostic=diagnostic):
                 policy = base_policy | {
                     "bypass_actor_contracts": [
+                        merge_admission_contract(),
                         {
                             "ruleset_id": 17,
                             "name": "ruleset-17",
@@ -1458,8 +1521,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                         "bypass_mode": "always",
                     },
                     "required_check_producer_app_id": 15368,
+                    "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
                     "bypassless_required_workflows": [],
                     "bypass_actor_contracts": [
+                        merge_admission_contract(),
                         {
                             "ruleset_id": ruleset_id,
                             "name": f"ruleset-{ruleset_id}",
@@ -1663,6 +1728,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                         "actor_id": 4583107,
                         "bypass_mode": "always",
                     },
+                    "merge_admission_binding": copy.deepcopy(MERGE_ADMISSION_BINDING),
                     "bypassless_required_workflows": [],
                 }
                 if producer is not None:
@@ -1674,6 +1740,73 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 2, result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
+
+    def test_merge_admission_bound_to_the_ai_review_app_is_conformant(self):
+        detail = ruleset(1, rules=[required_checks_rule(
+            {"context": "shell-tests", "integration_id": 15368},
+            {"context": "merge-admission", "integration_id": 4528902},
+        )])
+
+        result, _ = self.run_audit([[{"id": 1}]], {1: detail})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_policy_cannot_bind_merge_admission_to_the_declared_producer(self):
+        # ADR 0260 Decision 2: merge-admission bound to 15368 is a finding, so a policy
+        # that declares 15368 for it would turn that finding into a pass.
+        policy = json.loads(self.committed_policy_without_bypass_contracts())
+        policy["merge_admission_binding"]["integration_id"] = 15368
+
+        result, _ = self.run_audit(
+            [[{"id": 1}]],
+            {1: ruleset(1, rules=[required_checks_rule(
+                {"context": "merge-admission", "integration_id": 15368},
+            )])},
+            raw_policy=json.dumps(policy),
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn(
+            "ruleset policy.merge_admission_binding.integration_id must not be the "
+            "declared producer App 15368",
+            result.stderr,
+        )
+
+    def test_merge_admission_ruleset_needs_a_reviewed_bypass_contract_before_it_exists(self):
+        # ARB-2031-2026-11-12 C6: the name-keyed contract lands before the ruleset.
+        policy = json.loads(self.committed_policy_without_bypass_contracts())
+        policy["bypass_actor_contracts"] = []
+
+        result, _ = self.run_audit(
+            [[{"id": 1}]], {1: ruleset(1, bypass_actors=[])}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn(
+            "ruleset policy.merge_admission_binding.ruleset_name 'merge-admission-required' "
+            "has no reviewed bypass contract",
+            result.stderr,
+        )
+
+    def test_merge_admission_ruleset_contract_never_lets_its_producer_app_bypass(self):
+        # ARB-2031-2026-11-12 C6: a producer that can bypass the ruleset requiring its
+        # own check could merge past it.
+        policy = json.loads(self.committed_policy_without_bypass_contracts())
+        [contract] = policy["bypass_actor_contracts"]
+        contract["bypass_actors"].append(
+            {"actor_type": "Integration", "actor_id": 4528902, "bypass_mode": "always"}
+        )
+
+        result, _ = self.run_audit(
+            [[{"id": 1}]], {1: ruleset(1, bypass_actors=[])}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn(
+            "reviewed bypass contract merge-admission-required must not list the "
+            "merge-admission producer App 4528902",
+            result.stderr,
+        )
 
     def test_bindings_outside_default_branch_rulesets_are_still_required(self):
         detail = ruleset(

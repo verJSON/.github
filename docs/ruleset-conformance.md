@@ -33,6 +33,14 @@ unbound context can be satisfied by a status published from any App that reuses
 its name, which is the provenance property ADR 0184's Gate A depends on. Both
 findings are reported together, so neither masks the other. See ADR0190.
 
+One context is declared to another App: `merge_admission_binding` binds
+`merge-admission` to the AI review App (ADR 0260 Decision 2). The audit fails when
+that context is unbound or bound to any other App, 15368 included, and refuses a
+policy that binds it to `required_check_producer_app_id`. The binding names the
+ruleset that requires it (`merge-admission-required`); the policy must carry that
+ruleset's reviewed bypass contract before the ruleset exists, and the contract must
+never list the AI review App (ARB-2031-2026-11-12 C6).
+
 The program has no mutation path. It calls only paginated GitHub REST GETs and
 does not print API response bodies, credential data, secret values, or variable
 values. Exit `0` means the exact-token policy conforms, exit `1` is policy drift,

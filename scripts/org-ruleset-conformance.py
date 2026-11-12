@@ -128,6 +128,27 @@ def read_declared_status_check(value, producer_app_id: int, location: str):
     }
 
 
+def read_merge_admission_binding(value):
+    """ADR 0260 Decision 2: the one context bound to an App other than the declared producer."""
+    location = "ruleset policy.merge_admission_binding"
+    binding = require_mapping(value, location)
+    require_exact_keys(
+        binding,
+        {"context", "integration_id", "app_id_variable", "ruleset_name"},
+        location,
+    )
+    return {
+        "context": require_string(binding["context"], f"{location}.context"),
+        "integration_id": require_positive_integer(
+            binding["integration_id"], f"{location}.integration_id"
+        ),
+        "app_id_variable": require_string(
+            binding["app_id_variable"], f"{location}.app_id_variable"
+        ),
+        "ruleset_name": require_string(binding["ruleset_name"], f"{location}.ruleset_name"),
+    }
+
+
 def read_policy(policy: Path):
     document = require_mapping(
         load_json(policy.read_text(encoding="utf-8"), "ruleset policy"),
@@ -139,6 +160,7 @@ def read_policy(policy: Path):
             "organization",
             "release_authorization_bypass",
             "required_check_producer_app_id",
+            "merge_admission_binding",
             "bypassless_required_workflows",
             "bypass_actor_contracts",
         },
@@ -176,6 +198,12 @@ def read_policy(policy: Path):
         document["required_check_producer_app_id"],
         "ruleset policy.required_check_producer_app_id",
     )
+    merge_admission = read_merge_admission_binding(document["merge_admission_binding"])
+    if merge_admission["integration_id"] == producer_app_id:
+        raise AuditDataError(
+            "ruleset policy.merge_admission_binding.integration_id must not be the "
+            f"declared producer App {producer_app_id}"
+        )
     exceptions = require_array(
         document["bypassless_required_workflows"],
         "ruleset policy.bypassless_required_workflows",
@@ -289,7 +317,38 @@ def read_policy(policy: Path):
         contract_ids.add(parsed["ruleset_id"])
         contract_names.add(parsed["name"])
         parsed_contracts.append(parsed)
-    return organization, expected, producer_app_id, parsed_exceptions, parsed_contracts
+    # ARB-2031-2026-11-12 C6: the ruleset's bypass contract lands before the ruleset
+    # exists, and never lets the App whose check that ruleset requires bypass it.
+    merge_admission_contract = next(
+        (
+            contract
+            for contract in parsed_contracts
+            if contract["name"] == merge_admission["ruleset_name"]
+        ),
+        None,
+    )
+    if merge_admission_contract is None:
+        raise AuditDataError(
+            "ruleset policy.merge_admission_binding.ruleset_name "
+            f"{merge_admission['ruleset_name']!r} has no reviewed bypass contract"
+        )
+    if any(
+        actor["actor_type"] == "Integration"
+        and actor["actor_id"] == merge_admission["integration_id"]
+        for actor in merge_admission_contract["bypass_actors"]
+    ):
+        raise AuditDataError(
+            f"reviewed bypass contract {merge_admission['ruleset_name']} must not list the "
+            f"merge-admission producer App {merge_admission['integration_id']}"
+        )
+    return (
+        organization,
+        expected,
+        producer_app_id,
+        merge_admission,
+        parsed_exceptions,
+        parsed_contracts,
+    )
 
 
 def list_ruleset_ids(organization: str):
@@ -519,22 +578,30 @@ def paused_evaluate_acceptance(ruleset: dict, exceptions: list[dict]):
     )
 
 
-def producer_binding_findings(ruleset: dict, producer_app_id: int):
-    """Required contexts an App other than the declared producer could satisfy."""
+def producer_binding_findings(ruleset: dict, producer_app_id: int, merge_admission: dict):
+    """Required contexts an App other than the declared producer could satisfy.
+
+    ADR 0260 Decision 2: the merge-admission context is declared to the AI review App
+    instead, and every other context stays declared to the producer (ADR 0190).
+    """
     findings = []
     for rule in ruleset["rules"]:
         if rule.get("type") != "required_status_checks":
             continue
         for check in rule["parameters"]["required_status_checks"]:
+            if check["context"] == merge_admission["context"]:
+                declared, role = merge_admission["integration_id"], "merge-admission producer"
+            else:
+                declared, role = producer_app_id, "producer"
             binding = check.get("integration_id")
-            if binding == producer_app_id:
+            if binding == declared:
                 continue
             findings.append(
                 (
                     check["context"],
                     "is not bound to a producer App"
                     if binding is None
-                    else f"is bound to App {binding}, not the declared producer App {producer_app_id}",
+                    else f"is bound to App {binding}, not the declared {role} App {declared}",
                 )
             )
     return findings
@@ -695,6 +762,7 @@ def main(arguments: list[str] | None = None) -> int:
             organization,
             expected_actor,
             producer_app_id,
+            merge_admission,
             bypassless_exceptions,
             bypass_contracts,
         ) = read_policy(policy)
@@ -732,7 +800,9 @@ def main(arguments: list[str] | None = None) -> int:
     unbound = [
         (ruleset, context, diagnostic)
         for ruleset in rulesets
-        for context, diagnostic in producer_binding_findings(ruleset, producer_app_id)
+        for context, diagnostic in producer_binding_findings(
+            ruleset, producer_app_id, merge_admission
+        )
     ]
     baseline_findings, baseline_acceptance = paused_baseline_review(
         rulesets, bypass_contracts, paused_policy
