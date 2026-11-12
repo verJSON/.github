@@ -114,7 +114,7 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
             events = triggers(doc) - {"workflow_call"}
             self.assertEqual(len(events), 1, f"{declaring_path} must declare exactly one event besides workflow_call")
             event = next(iter(events))
-            callers = set()
+            callers = {}
             sources = generator_outputs(declaring_path)
             sources += [
                 (candidate.name, candidate.read_text(encoding="utf-8"))
@@ -133,16 +133,15 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
                     # generated gate re-arm caller adds a guard job ahead of it (ADR 0255,
                     # amendment 2026-11-06); any such other job calls no workflow and holds no
                     # group, so it can neither join this family nor displace a member of it.
-                    calling = [job for job in jobs.values()
+                    calling = [(job_id, job) for job_id, job in jobs.items()
                                if isinstance(job, dict) and calls_declarer(job.get("uses", ""), declaring_path)]
                     self.assertEqual(len(calling), 1,
                                      f"{source} must call {declaring_path} from exactly one job")
-                    for other in jobs.values():
-                        if other is calling[0]:
-                            continue
+                    ((arm_id, job),) = calling
+                    others = {job_id: other for job_id, other in jobs.items() if other is not job}
+                    for other in others.values():
                         self.assertNotIn("uses", other, f"{source} must call no other workflow")
                         self.assertNotIn("concurrency", other, f"{source} must hold no group outside the family")
-                    (job,) = calling
                     self.assertNotIn("steps", job, f"{source} must only call the declaring workflow")
                     self.assertTrue(calls_declarer(job.get("uses", ""), declaring_path),
                                     f"{source} must call {declaring_path}")
@@ -153,7 +152,34 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
                                      f"{source} must trigger only on the family event")
                     destinations = DESTINATION.findall(text)
                     self.assertEqual(len(set(destinations)), 1, f"{source} must name one destination path")
-                    callers.add((caller["name"], destinations[0]))
+                    entry = {"name": caller["name"], "path": destinations[0]}
+                    if others:
+                        # A guard job gating the calling job declares the caller's yield
+                        # shape (ADR 0226 amendment 2026-11-12): the merge gate leaves a run
+                        # whose suite is exactly the guard's SUCCESS and the calling job's
+                        # SKIPPED out of the newest-family-run selection, matching both
+                        # checks by name, so the map must carry the exact job ids.
+                        self.assertEqual(len(others), 1, f"{source} may gate its call by one guard job only")
+                        ((guard_id, guard),) = others.items()
+                        self.assertIn(job.get("needs"), (guard_id, [guard_id]),
+                                      f"{source} must make its calling job need the guard")
+                        self.assertIn(f"needs.{guard_id}.outputs.", job.get("if", ""),
+                                      f"{source} must gate its calling job on the guard's output")
+                        for named in (guard, job):
+                            self.assertNotIn("name", named,
+                                             f"{source} must leave its yield jobs named by their ids, as their checks are")
+                        # The yield premise (ARB-2059-2026-11-12 C3): the group engages
+                        # only when the calling job starts, so a skipped calling job
+                        # displaces nothing. A group held by the caller's workflow or by
+                        # the calling job itself would engage before the skip.
+                        self.assertIsNone(own_group,
+                                          f"{source} must declare no workflow-level group when it yields")
+                        self.assertNotIn("concurrency", job,
+                                         f"{source} must hold no group on its calling job when it yields")
+                        entry["yield"] = {"guard": guard_id, "arm": arm_id}
+                    key = (entry["name"], entry["path"])
+                    self.assertEqual(callers.get(key, entry), entry, f"{source} disagrees with another source on {key}")
+                    callers[key] = entry
             families.append({
                 "group_prefix": prefix,
                 "group_key": GROUP_KEY,
@@ -163,13 +189,13 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
                     "path": declaring_path,
                     "name": doc["name"],
                 },
-                "callers": sorted(callers),
+                "callers": [callers[key] for key in sorted(callers)],
             })
         return families
 
     def test_checked_in_map_equals_the_families_the_workflows_declare(self):
         checked_in = [
-            {**family, "callers": sorted((c["name"], c["path"]) for c in family["callers"])}
+            {**family, "callers": sorted(family["callers"], key=lambda c: (c["name"], c["path"]))}
             for family in checked_in_map()
         ]
         self.assertEqual(checked_in, self.derived_families())
@@ -183,9 +209,10 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
         self.assertEqual(family["declared_by"]["name"], "AI review authorization arm")
         self.assertEqual(family["event"], "pull_request_target")
         self.assertEqual(family["callers"], [
-            ("AI review label re-arm", ".github/workflows/ai-review-label-rearm.yml"),
-            ("AI review lifecycle re-arm", ".github/workflows/ai-review-lifecycle-rearm.yml"),
-            ("gate re-arm", ".github/workflows/gate-rearm.yml"),
+            {"name": "AI review label re-arm", "path": ".github/workflows/ai-review-label-rearm.yml"},
+            {"name": "AI review lifecycle re-arm", "path": ".github/workflows/ai-review-lifecycle-rearm.yml"},
+            {"name": "gate re-arm", "path": ".github/workflows/gate-rearm.yml",
+             "yield": {"guard": "guard", "arm": "rearm"}},
         ])
 
 
