@@ -328,3 +328,44 @@ third behaviorally matched copy.
 
 Each guard that held when written was proven by a mutant that fails it for its asserted
 reason, recorded in the pull request.
+
+## 2026-11-12 amendment: the producer never evaluated live (key delivery)
+
+After #2055 merged at `6ba5b189`, no `Merge admission` run evaluated a head. By
+2026-11-12T13:31Z, 107 runs had failed. In each, the plan found work and
+`admit / app-key-policy / validate-ai-review-key` stopped with
+`AI_REVIEW_APP_PRIVATE_KEY is empty or unavailable` (for example
+[run 43226371916](https://github.com/Verjson/.github/actions/runs/43226371916)), so
+`evaluate` was skipped. The other 89 runs succeeded only because their plan was empty.
+`evaluate` and the key validator were skipped in every one of them. No
+`merge-admission` check was ever posted by this producer.
+
+The cause was key transport, not policy. This repository holds the key only as an
+`ai-review-app` environment secret. In a reusable workflow, an environment binding
+alone resolves no secret: it needs caller inheritance
+([ADR 0171](../0171-inherited-reusable-environment-context/README.md), live control
+run 34433194313). The key validator also needs the narrow named grant on its policy edge
+(ADR 0171, 2026-09-27 amendment). `merge-admission-caller.yml` called the producer
+without `secrets: inherit`, and the producer's `app-key-policy` edge carried no grant.
+Both the validator and `evaluate`'s token mint therefore saw an empty key. The
+`ai-review-merge-dispatch.yml` → `ai-review-merge.yml` chain uses both transports and
+resolves the same environment-only key; its run 43223952797 passed
+`validate-ai-review-key` on the same day.
+
+The fix adopts that transport. The caller's `admit` job inherits the caller's secrets.
+The producer's `app-key-policy` edge carries only
+`AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}`. `evaluate` keeps
+its `ai-review-app` environment binding, and the main-only policy and its
+`needs`/`if` dependency are unchanged. Permissions and triggers are unchanged. The
+producer does not declare the key under `on.workflow_call.secrets`: ADR 0171 records the
+optional declaration as a transport that failed the live control, and the key-consumer
+contract forbids declaring a role key.
+
+`scripts/ci-gate/app-key-environment.test.py` (platform) now enrolls `merge-admission`
+as an App-key consumer, with `evaluate` as its key-bearing job. It requires the named
+grant on every `app-key-policy` edge whose role is `ai-review`, instead of on
+`ai-review-merge` alone. It also derives every relative reusable edge into an App-key
+consumer from the workflows and requires `secrets: inherit` on each, so a new caller
+cannot omit it. Removing either transport line fails its test for that reason. The
+pull request records the mutants. A live receipt is the first `Merge admission` run
+after merge that reaches `evaluate`.

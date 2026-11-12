@@ -49,5 +49,8 @@ jobs:
       pull-requests: read
       statuses: read
     uses: ./.github/workflows/merge-admission.yml
+    # The App key lives only in the `ai-review-app` environment; a reusable workflow's
+    # environment-bound jobs resolve it only through inheritance (ADR 0171, #2031).
+    secrets: inherit
     with:
       ai_review_environment: ai-review-app
