@@ -1,7 +1,7 @@
 # 0260 — Native merge admission through a producer-posted `merge-admission` check
 
 - **Date:** 2026-11-12
-- **Status:** Accepted (ARB-G1-2026-11-06 C2, majority 2-1, not validator-certified). This change ships the producer and the assertion's self-exclusion. It creates, edits, and enables no ruleset, and changes no organization property, variable, or conformance policy.
+- **Status:** Accepted (ARB-G1-2026-11-06 C2, majority 2-1, not validator-certified). This change ships the producer and the assertion's self-exclusion. It creates, edits, and enables no ruleset, and changes no organization property, variable, or conformance policy. Precondition (b), the owner's explicit acceptance of the stale-SUCCESS window, gates enabling the ruleset (item 7, second step); it does not gate shipping this producer, which posts a context no ruleset requires.
 - **Issues:** [verJSON/.github#1990](https://github.com/verJSON/.github/issues/1990) (decision record), [verJSON/.github#2031](https://github.com/verJSON/.github/issues/2031) (the exact-head review receipt on the native path)
 - **Extends:** [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md), [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md), [ADR 0226](../0226-superseded-cancelled-check-runs-do-not-block-admission/README.md), [ADR 0202](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md)
 - **Related:** [ADR 0091](../0091-ruleset-requires-authorization-arm/README.md), [ADR 0190](../0190-pin-the-producer-app-of-every-required-status-check/README.md), [#1964](https://github.com/verJSON/.github/issues/1964)
@@ -127,41 +127,42 @@ rejected for long-term health as well as fit: it would put a second secret-beari
 plane in the required workflow, and couple every producer change to the arm's ruleset
 rotation (ADR 0091).
 
-**Self-exclusion.** `assert-mergeable-head.sh` binds `MERGE_ADMISSION_APP_ID=4528902` (the
-AI review App, `ai-review-authorization`, read from the organization variable and
+**Self-exclusion.** `assert-mergeable-head.sh` binds `MERGE_ADMISSION_APP_ID=4528902`
+(the AI review App, `ai-review-authorization`, read from the organization variable and
 `apps/ai-review-authorization` on 2026-11-12). Gates A and C set aside every
 `merge-admission` check run produced by that App that is still in progress or concluded
 success, including earlier in-progress ones, which every refusal leaves behind and which
 would otherwise block every later evaluation of the same head. The producer never
 concludes its check any other way, so a completed non-success from that App is not its
-output and stays a Gate C failure. Gate A skips the required context only where the ruleset
-binds it to that App. A same-named check run from any other App and a same-named commit
-status stay in the inventory. Gate B keeps reading the raw inventory. The assertion also takes an
-optional third argument, the expected head, and exits 1 when the pull request's head is
-another SHA, so an evaluation never answers for a head other than the one its check run
-belongs to.
+output and stays a Gate C failure. Gate A skips the required context only where the
+ruleset binds it to that App. A same-named check run from any other App and a same-named
+commit status stay in the inventory. Gate B keeps reading the raw inventory. The
+assertion also takes an optional third argument, the expected head, and exits 1 when the
+pull request's head is another SHA, so an evaluation never answers for a head other than
+the one its check run belongs to.
 
 **Evaluation is per head, not per pull request.** A check run attaches to a commit, so a
 `merge-admission` success on a head stands for every open pull request at that head,
 whatever its base or branch. Evaluating pull requests one at a time would let the last
 evaluation of a shared head govern all of them: a pull request without a receipt could
-merge on another's success. `scripts/ci-gate/merge-admission.sh` therefore takes one head
-and every open pull request at it. It creates the new check run in progress with the App
-token, continues only when GitHub reports the bound App as its producer and a numeric id,
-runs the assertion beside it with the job's read-only token (the App token is removed from
-the assertion's environment) for each of those pull requests, re-lists the open pull
-requests at the head immediately before completing, and completes the check run as success
-only when every assertion exited 0 with the exact output `true` and that set is unchanged.
-Every other outcome, including one refusal among several pull requests or a set that
-changed or could not be read again, leaves it in progress and exits 0. The evaluate job checks out `Verjson/.github` at
-`job.workflow_sha`, the executing producer's own SHA, which the consumer pins in its
-`uses:` reference. The App token is minted with `permission-checks: write` only and the
-mint step tolerates failure. `scripts/ci-gate/merge-admission-plan.sh` groups the open
-pull requests by head: it plans each head that has at least one pull request that is not a
-draft (a draft cannot merge, and marking it ready is a trigger), lists every open pull
-request at that head including drafts (the success would stand for a draft the moment it is
-marked ready), drops a head at which any pull request is unevaluable, and with an event
-head plans only that head.
+merge on another's success. `scripts/ci-gate/merge-admission.sh` therefore takes one
+head and every open pull request at it. It creates the new check run in progress with
+the App token, continues only when GitHub reports the bound App as its producer and a
+numeric id, runs the assertion beside it with the job's read-only token (the App token
+is removed from the assertion's environment) for each of those pull requests, re-lists
+the open pull requests at the head immediately before completing, and completes the
+check run as success only when every assertion exited 0 with the exact output `true` and
+that set is unchanged. Every other outcome, including one refusal among several pull
+requests or a set that changed or could not be read again, leaves it in progress and
+exits 0. The evaluate job checks out `Verjson/.github` at `job.workflow_sha`, the
+executing producer's own SHA, which the consumer pins in its `uses:` reference. The App
+token is minted with `permission-checks: write` only and the mint step tolerates
+failure. `scripts/ci-gate/merge-admission-plan.sh` groups the open pull requests by
+head: it plans each head that has at least one pull request that is not a draft (a draft
+cannot merge, and marking it ready is a trigger), lists every open pull request at that
+head including drafts (the success would stand for a draft the moment it is marked
+ready), drops a head at which any pull request is unevaluable, and with an event head
+plans only that head.
 
 **Serialization.** The evaluate job's concurrency group is per repository and head, with
 `cancel-in-progress: false`. GitHub keeps one pending run per group, so a pending
@@ -175,34 +176,64 @@ every workflow that reports a check on a pull-request head here, plus the trigge
 pull-request or review event starts (excluding the producer's own three files and
 close-only workflows), adds the dispatched `AI review + auto-merge` gate, which patches its
 authorization check on the head, and requires an exact match, so a new pull-request
-workflow cannot be left out. The sweep runs every 15 minutes. **The completion trigger for checks from
-Apps other than GitHub Actions is deferred, and that window is documented here** (the
-serialization bullet's alternative): `check_suite: completed` is the event that reports
-them, but the ADR 0235 runner-isolation checker classifies `check_suite` as undetermined
-(it can name a fork head), and classifying it is an ADR 0235 change of its own. Until
-then, a non-Actions check that completes on a head is seen by the next sweep, at most 15
-minutes later, or by any earlier trigger on that head. When `check_suite` is classified,
-the caller adds it and the producer must skip the AI review App's own suite, which every
-admission completes. GitHub delivers no
-workflow event for a ruleset edit, so that trigger is the sweep (at most 15 minutes) or a
-manual `workflow_dispatch` of the caller as part of the ruleset-edit procedure.
-`app-key-environment.yml` now reads a scheduled run's default branch from its ref, because
-a schedule event carries no repository record and always runs on the default branch.
+workflow cannot be left out.
+
+**The sweep is best-effort.** It is scheduled every 15 minutes, and that is a target, not
+a guarantee: GitHub delays scheduled runs under load and can drop them, and it disables a
+scheduled workflow on a public repository after 60 days without repository activity. Item
+5's "at most 15 minutes apart", and every bound below that names the next sweep, holds
+only as well as the schedule does; the canaries measure the actual gaps between sweeps and
+report them.
+
+**The completion trigger for checks from Apps other than GitHub Actions is deferred, and
+that window is documented here** (the serialization bullet's alternative): `check_suite:
+completed` is the event that reports them, but the ADR 0235 runner-isolation checker
+classifies `check_suite` as undetermined (it can name a fork head), and classifying it
+is an ADR 0235 change of its own. Until then, a non-Actions check that completes on a
+head is seen by the next sweep (targeted 15 minutes later) or by any earlier trigger on
+that head. When `check_suite` is classified, the caller adds it and the producer must
+skip the AI review App's own suite, which every admission completes. GitHub delivers no
+workflow event for a ruleset edit, so that trigger is the sweep (targeted 15 minutes) or
+a manual `workflow_dispatch` of the caller as part of the ruleset-edit procedure.
+`app-key-environment.yml` now reads a scheduled run's default branch from its ref,
+because a schedule event carries no repository record and always runs on the default
+branch.
 
 **Precondition (a) scope.** Refusals, evaluation errors, an unreadable pull-request
 listing, and an App token that cannot be minted all end with the producer's jobs
 succeeding. Two configuration faults still fail visibly, because they precede any
 evaluation and are the controls that protect the key: the main-only environment
 admission (`app-key-environment.yml`) and the generated App client-id guard. A runner or
-checkout failure before the evaluation starts fails visibly too. Those red
-runs belong to the default-branch commit, so they never enter a head's inventory; an
-evaluation they stop leaves the head's earlier `merge-admission` state as it was, which
-is the stale-SUCCESS window of precondition (b). One canonical environment admission is
-kept rather than a third behaviorally matched copy.
+checkout failure before the evaluation starts fails visibly too, and so does an evaluate
+job that exceeds its 15-minute timeout. The evaluate job's concurrency group also
+cancels pending legs: GitHub keeps one pending job per group and cancels an older
+pending one when a newer one queues, so a burst of triggers on one head concludes the
+displaced legs as cancelled. Precondition (a) is therefore narrowed, not met as written:
+every one of these runs concludes red or cancelled on the default-branch commit, never
+on a pull-request head, so none enters a head's inventory or blocks a merge, but each
+adds noise to the default branch's CI signal. An evaluation they stop leaves the head's
+earlier `merge-admission` state as it was, which is the stale-SUCCESS window of
+precondition (b). One canonical environment admission is kept rather than a third
+behaviorally matched copy.
 
 ## Not performed by this change (rollout gates)
 
-- The owner's explicit acceptance of the stale-SUCCESS window (precondition (b)).
+- The owner's explicit acceptance of the stale-SUCCESS window (precondition (b)), which
+  gates enabling the ruleset (item 7, second step), not shipping this unrequired producer.
+- ARB or owner acknowledgment of the narrowed precondition (a): configuration faults,
+  timeouts, and concurrency cancellations of pending evaluate legs conclude red or
+  cancelled on the default-branch commit.
+- An alert, before enrollment, on every producer run that does not conclude success and on
+  every evaluation that annotates `was not evaluated` (which precondition (a) lets
+  succeed), so the unbounded outage window below is seen rather than silent.
+- A REST rate-limit budget, before enrollment. Each assertion makes roughly 10-20 API
+  calls on the job's `GITHUB_TOKEN`, whose budget (about 1,000 requests per hour per
+  repository on the Team plan) is shared with the AI gate and `actions-ci`. The sweep
+  alone costs about 4 x open pull requests x calls per hour, plus bursts from pushes and
+  completions. The rollout measures it on the canary and, where it does not fit, adopts
+  one of: reading with a separately minted read-only App token, whose budget is per
+  installation; or skipping, in the sweep, a head whose newest bound-App
+  `merge-admission` check postdates the head's last event.
 - The item 2 ruleset, its conformance-policy amendment, and the org-ruleset-conformance
   audit change. No ruleset is created, edited, or enabled, and no property or variable
   changes.
@@ -235,16 +266,24 @@ kept rather than a third behaviorally matched copy.
   requests. On a private
   repository without an ephemeral self-hosted lane those are billed hosted minutes; the
   rollout must budget them before enrolling private repositories.
+- **Unbounded stale-SUCCESS window during an outage.** A missing App client id, an
+  environment admission failure, an App token that cannot be minted, or a check run that
+  cannot be created stops the evaluation before the superseding in-progress check exists
+  (`scripts/ci-gate/merge-admission.sh`, the token and creation guards; the evaluate job's
+  client-id and admission steps). An earlier SUCCESS on the head then stands for as long
+  as the outage lasts, with no upper bound, even if the head's state changes. The alert
+  listed under the rollout gates is what bounds it in practice.
 - Rollback before enablement is deleting the caller and trigger; after enablement it is
   item 8.
 
 ## Verification
 
-- `scripts/assert-mergeable-head.merge-admission.test.sh` (merge-gate): Gate C sets aside
-  the bound App's in-progress check but keeps its completed failure; Gate A sets aside the
-  context the ruleset binds to that App; a same-named GitHub Actions check stays a Gate C failure; a context bound to
-  GitHub Actions stays required; a mismatched expected head exits 1, a matching one is
-  evaluated, and a malformed one is a usage error.
+- `scripts/assert-mergeable-head.merge-admission.test.sh` (merge-gate): Gate C sets
+  aside the bound App's in-progress check but keeps its completed failure; Gate A sets
+  aside the context the ruleset binds to that App; a same-named GitHub Actions check
+  stays a Gate C failure; a context bound to GitHub Actions stays required; a mismatched
+  expected head exits 1, a matching one is evaluated, and a malformed one is a usage
+  error.
 - `scripts/ci-gate/merge-admission.test.sh` (merge-gate): the in-progress check is created
   first with the App token and before the assertion; exit 0 with `true` completes that
   check run as success; exit 0 with any other output, exit 6, exit 5, and exit 1 leave it
@@ -256,9 +295,10 @@ kept rather than a third behaviorally matched copy.
   assertion bind the same App id.
 - `scripts/ci-gate/merge-admission-plan.test.sh` (merge-gate) and
   `scripts/ci-gate/merge-admission-workflow.test.py` (merge-gate) pin the plan and the
-  workflow contract: the caller's completion triggers equal the derived set of pull-request
-  workflows, one plan entry per head with every open pull request at it (drafts
-  included, a head with an unevaluable pull request dropped), default-branch-only triggers, a sweep at most 15 minutes apart, the
+  workflow contract: the caller's completion triggers equal the derived set of
+  pull-request workflows, one plan entry per head with every open pull request at it
+  (drafts included, a head with an unevaluable pull request dropped),
+  default-branch-only triggers, a sweep scheduled at most 15 minutes apart, the
   trigger's events and its lack of credentials, per-head serialization without
   cancellation, the pinned canonical checkout, the App token's single permission, the
   read-only assertion token, the environment admission and its scheduled-run default

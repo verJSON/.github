@@ -64,7 +64,7 @@ class CallerTriggerTests(unittest.TestCase):
         self.assertEqual(on["workflow_run"]["types"], ["completed"])
         self.assertIn("Merge admission trigger", on["workflow_run"]["workflows"])
 
-    def test_the_periodic_sweep_runs_at_most_fifteen_minutes_apart(self):
+    def test_the_periodic_sweep_is_scheduled_at_most_fifteen_minutes_apart(self):
         schedules = triggers(workflow("merge-admission-caller"))["schedule"]
         self.assertEqual(len(schedules), 1)
         minute, *rest = schedules[0]["cron"].split()

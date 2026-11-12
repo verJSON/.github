@@ -38,4 +38,7 @@ and of the keyless `merge-admission-trigger.yml`, plus a 15-minute sweep) and po
 `merge-admission` while no ruleset requires it. `app-key-environment.yml` reads a
 scheduled run's default branch from its ref, since a schedule event carries no
 repository record. ADR 0260 records the ARB-G1-2026-11-06 C2 decision; no ruleset is
-created or enabled.
+created or enabled. It also records the rollout gates this change does not perform: the
+owner's acceptance of the stale-SUCCESS window before the ruleset is enabled, an
+acknowledgment of the narrowed precondition (a), an alert that bounds the unbounded
+outage window, a REST rate-limit budget, and canary measurement of the best-effort sweep.

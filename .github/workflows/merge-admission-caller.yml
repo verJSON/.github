@@ -25,9 +25,12 @@ on:
       - Authn required type surface
       - CLI projects required package surface
     types: [completed]
-  # The periodic sweep, at most 15 minutes apart. It is also the completion trigger for
-  # checks from Apps other than GitHub Actions: `check_suite` is not yet classified by the
-  # ADR 0235 runner-isolation checker, so that window is documented in ADR 0260 instead.
+  # The periodic sweep, targeted every 15 minutes. A schedule is best-effort: GitHub delays
+  # or drops scheduled runs under load and disables them on a public repository after 60
+  # days without activity, so this is a target the canaries measure, not a bound (ADR 0260).
+  # It is also the completion trigger for checks from Apps other than GitHub Actions:
+  # `check_suite` is not yet classified by the ADR 0235 runner-isolation checker, so that
+  # window is documented in ADR 0260 instead.
   # It also covers ruleset edits and changes no event reports.
   schedule:
     - cron: '*/15 * * * *'
