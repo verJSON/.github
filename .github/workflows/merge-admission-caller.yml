@@ -1,0 +1,53 @@
+name: Merge admission
+
+# This repository's own merge-admission producer (ADR 0260, #1990, #2031). It posts the
+# `merge-admission` context while no ruleset requires it. Every trigger starts a run on the
+# default-branch commit, outside every pull-request head's workflow-run and check-run
+# inventories (ADR 0260, action 3); pull-request and review events reach it only through
+# the keyless `Merge admission trigger` workflow, which completes first.
+on:
+  # Completion of each workflow that reports a check on a pull-request head, and of the
+  # trigger (ADR 0260, action 5). The producer's own path is not listed.
+  # scripts/ci-gate/merge-admission-workflow.test.py derives this list from every workflow
+  # here that a pull-request or review event starts and requires an exact match.
+  workflow_run:
+    workflows:
+      - Merge admission trigger
+      - actions-ci
+      - actionlint
+      - actionlint reusable-call contract
+      - container candidate reusable-call contract
+      - runner-isolation
+      - AI review authorization arm
+      - AI review label re-arm
+      - AI review lifecycle re-arm
+      - AI review + auto-merge
+      - Authn required type surface
+      - CLI projects required package surface
+    types: [completed]
+  # The periodic sweep, targeted every 15 minutes. A schedule is best-effort: GitHub delays
+  # or drops scheduled runs under load and disables them on a public repository after 60
+  # days without activity, so this is a target the canaries measure, not a bound (ADR 0260).
+  # It is also the completion trigger for checks from Apps other than GitHub Actions:
+  # `check_suite` is not yet classified by the ADR 0235 runner-isolation checker, so that
+  # window is documented in ADR 0260 instead.
+  # It also covers ruleset edits and changes no event reports.
+  schedule:
+    - cron: '*/15 * * * *'
+  # A sweep on demand, after a ruleset edit (no event reports one to a workflow).
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  admit:
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
+    uses: ./.github/workflows/merge-admission.yml
+    with:
+      ai_review_environment: ai-review-app
