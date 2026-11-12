@@ -1,0 +1,24 @@
+name: Merge admission trigger
+
+# Carries the pull-request and review events of ADR 0260 action 5 to the merge-admission
+# producer, which starts on this run's completion (`workflow_run`), from the default
+# branch, outside the head's inventories. This run belongs to the head, so it holds no
+# credential, reads nothing, and completes in seconds; the producer re-reads everything
+# it evaluates. A review event runs the head's copy of this file, which is why it may do
+# nothing beyond completing.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Hand the event to the merge-admission producer
+        run: echo "merge-admission re-evaluates this head when this run completes"

@@ -23,3 +23,14 @@ the check in progress and exits 0 (ADR 0260 precondition (a)).
 every open pull request that is not a draft, or only those at the head an event names.
 An unreadable listing plans nothing and a malformed entry is skipped, each named in a
 warning, so the producer's own job still succeeds.
+
+The reusable producer `.github/workflows/merge-admission.yml` runs these from this
+repository at its own executing SHA, one evaluation per head at a time without
+cancellation, on the ephemeral lane, and only from `workflow_run`, `schedule`, or
+`workflow_dispatch`, so its runs stay outside every head's inventories. This repository
+adopts it through `merge-admission-caller.yml` (completion of each pull-request workflow
+and of the keyless `merge-admission-trigger.yml`, plus a 15-minute sweep) and posts
+`merge-admission` while no ruleset requires it. `app-key-environment.yml` reads a
+scheduled run's default branch from its ref, since a schedule event carries no
+repository record. ADR 0260 records the ARB-G1-2026-11-06 C2 decision; no ruleset is
+created or enabled.

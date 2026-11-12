@@ -1,0 +1,169 @@
+name: Merge admission producer
+
+# The merge-admission producer (ADR 0260, #1990, #2031). For each pull-request head an
+# event or the sweep names, it creates a NEW `merge-admission` check run in progress with
+# the AI review App, runs the canonical scripts/assert-mergeable-head.sh from this
+# repository at the executing workflow's own SHA, and completes the check as success only
+# when that assertion exits 0 printing `true`. A refusal or an error leaves the check in
+# progress, which blocks a merge once a ruleset requires the context, and this workflow's
+# own jobs still succeed (precondition (a)).
+#
+# Callers start it only from default-branch events (workflow_run, schedule,
+# workflow_dispatch), so its runs and job check runs belong to the default-branch commit
+# and never enter the evaluated head's inventories (ADR 0260, action 3). The App key stays
+# in the caller's main-only `ai-review-app` environment (action 6).
+on:
+  workflow_call:
+    inputs:
+      ai_review_environment:
+        description: Main-only environment containing the AI review App private key
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    # Only default-branch events start an evaluation (ADR 0260, action 3): a run started by
+    # a pull-request event would belong to the head it evaluates, so a caller wired to one
+    # evaluates nothing. Both jobs run on the ephemeral lane (ADR 0235): they read
+    # pull-request data, and the evaluate job holds the App key only for this run.
+    if: ${{ github.event_name == 'workflow_run' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Resolve executing trusted workflow revision
+        id: trusted-revision
+        env:
+          EXECUTING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: echo "sha=$EXECUTING_WORKFLOW_SHA" >>"$GITHUB_OUTPUT"
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .gate-trust checkout path
+        run: |
+          if [ -L .gate-trust ]; then echo "::error::.gate-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
+      - name: Check out the canonical merge-admission planner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Verjson/.github
+          ref: ${{ steps.trusted-revision.outputs.sha }}
+          path: .gate-trust
+          sparse-checkout: |
+            scripts/ci-gate/merge-admission-plan.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Plan the heads this run evaluates
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_HEAD: ${{ github.event.workflow_run.head_sha || '' }}
+        run: |
+          set -uo pipefail
+          plan="$(bash .gate-trust/scripts/ci-gate/merge-admission-plan.sh "$REPOSITORY" "$EVENT_HEAD")" || plan='[]'
+          count="$(jq -e 'length' <<<"$plan")" || { plan='[]'; count=0; }
+          printf 'plan=%s\ncount=%s\n' "$plan" "$count" >>"$GITHUB_OUTPUT"
+
+  app-key-policy:
+    needs: plan
+    if: ${{ needs.plan.outputs.count != '' && needs.plan.outputs.count != '0' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/app-key-environment.yml
+    with:
+      role: ai-review
+      environment: ${{ inputs.ai_review_environment }}
+
+  evaluate:
+    needs: [plan, app-key-policy]
+    if: ${{ needs.app-key-policy.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.plan) }}
+    # One evaluation per head at a time, never cancelled (ADR 0260): a pending evaluation
+    # is replaced only by a newer one of the same head, which reads later state and creates
+    # a newer check run.
+    concurrency:
+      group: merge-admission-${{ github.repository }}-${{ matrix.head_sha }}
+      cancel-in-progress: false
+    environment: ${{ inputs.ai_review_environment }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - name: Resolve executing trusted workflow revision
+        id: trusted-revision
+        env:
+          EXECUTING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: echo "sha=$EXECUTING_WORKFLOW_SHA" >>"$GITHUB_OUTPUT"
+      - name: Refuse a symlink at the .gate-trust checkout path
+        run: |
+          if [ -L .gate-trust ]; then echo "::error::.gate-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
+      - name: Check out the canonical merge assertion
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Verjson/.github
+          ref: ${{ steps.trusted-revision.outputs.sha }}
+          path: .gate-trust
+          sparse-checkout: |
+            scripts/assert-mergeable-head.sh
+            scripts/ci-gate/independent-review-receipt.sh
+            scripts/ci-gate/merge-admission.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      # A schedule event carries no repository record, so the token's single repository
+      # is read from the run's own context.
+      - name: Resolve the repository the App token is scoped to
+        id: target
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=${REPOSITORY#*/}" >>"$GITHUB_OUTPUT"
+      # An App outage must not fail this job (precondition (a)): without a token the
+      # evaluation names the reason and posts nothing.
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_merge-admission_evaluate_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.AI_REVIEW_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
+      - name: Mint the AI review App token for the merge-admission check
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.AI_REVIEW_CLIENT_ID }}
+          private-key: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          permission-checks: write
+      - name: Evaluate the head and post merge-admission
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.pr }}
+          HEAD_SHA: ${{ matrix.head_sha }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .gate-trust/scripts/ci-gate/merge-admission.sh "$REPOSITORY" "$PR_NUMBER" "$HEAD_SHA"

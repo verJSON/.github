@@ -38,6 +38,7 @@ EXPECTED_WORKFLOWS = {
     "dependency-supersession-observe.yml",
     "dependency-supersession-reconcile.yml",
     "gate-rearm.yml",
+    "merge-admission.yml",
     "release-app-canary.yml",
     "renovate-compatibility-reconcile.yml",
     "renovate-grouping-plan.yml",
@@ -115,7 +116,7 @@ class AppClientIdPolicyTests(unittest.TestCase):
 
     def test_every_canonical_token_mint_has_an_adjacent_exact_guard(self):
         mints = list(guarded_mints())
-        self.assertEqual(len(mints), 18)
+        self.assertEqual(len(mints), 19)
         self.assertEqual({path.name for path, *_ in mints}, EXPECTED_WORKFLOWS)
         self.assertEqual(
             sum(path.read_text(encoding="utf-8").count("Iv[") for path in WORKFLOWS.glob("*.yml")),
@@ -145,7 +146,7 @@ class AppClientIdPolicyTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("18 GitHub App token mints", result.stdout)
+        self.assertIn("19 GitHub App token mints", result.stdout)
 
     def test_orphan_final_guard_removal_preserves_the_following_job(self):
         path = WORKFLOWS / "synthetic.yml"

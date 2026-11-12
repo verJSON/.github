@@ -278,6 +278,7 @@ merge-gate	bash scripts/assert-mergeable-head.review-receipt.test.sh
 merge-gate	bash scripts/assert-mergeable-head.merge-admission.test.sh
 merge-gate	bash scripts/ci-gate/merge-admission.test.sh
 merge-gate	bash scripts/ci-gate/merge-admission-plan.test.sh
+merge-gate	python3 scripts/ci-gate/merge-admission-workflow.test.py
 merge-gate	python3 scripts/ci-gate/concurrency-family-map.test.py
 changelog-release-4	python3 scripts/ci-gate/exact-release-packages.test.py
 platform	python3 scripts/node_floor_ruleset_test.py

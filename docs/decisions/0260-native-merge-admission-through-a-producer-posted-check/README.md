@@ -1,0 +1,246 @@
+# 0260 — Native merge admission through a producer-posted `merge-admission` check
+
+- **Date:** 2026-11-12
+- **Status:** Accepted (ARB-G1-2026-11-06 C2, majority 2-1, not validator-certified). This change ships the producer and the assertion's self-exclusion. It creates, edits, and enables no ruleset, and changes no organization property, variable, or conformance policy.
+- **Issues:** [verJSON/.github#1990](https://github.com/verJSON/.github/issues/1990) (decision record), [verJSON/.github#2031](https://github.com/verJSON/.github/issues/2031) (the exact-head review receipt on the native path)
+- **Extends:** [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md), [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md), [ADR 0226](../0226-superseded-cancelled-check-runs-do-not-block-admission/README.md), [ADR 0202](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md)
+- **Related:** [ADR 0091](../0091-ruleset-requires-authorization-arm/README.md), [ADR 0190](../0190-pin-the-producer-app-of-every-required-status-check/README.md), [#1964](https://github.com/verJSON/.github/issues/1964)
+- **Category:** merge-gate admission, required checks (sensitive class)
+
+## Context
+
+ADR 0257 added Gate R to `scripts/assert-mergeable-head.sh`: on a promotion-enabled
+repository, a head needs a valid ADR 0202 independent-review receipt bound to exactly that
+head. It holds every merge that runs the assertion, but not the merge button or native
+auto-merge, which are held only by rulesets, and GitHub reads a SKIPPED required check as
+passing. ADR 0257 Decision 3 left the native path to #1990 and required its ADR to record
+whether the new check may veto that path. #2031 asks that a promotion-enabled repository
+cannot merge a head without that receipt on any path the canonical contract owns.
+
+On 2026-11-06 the architecture review board decided #1990 (ARB-G1-2026-11-06, item C2):
+ADOPTED_WITH_CONSTRAINTS by majority, 2-1, not validator-certified. Claude and Gemini
+accepted; Grok 4.7 (Cursor) voted REVISE, and an advisory Codex vote also said REVISE.
+Nobody voted REJECT. The two dissents are binding preconditions.
+
+## Decision
+
+The adopted action items, distilled:
+
+1. **Admission.** On enrolled repositories a native merge-button merge or native auto-merge
+   is admitted only when the canonical `assert-mergeable-head.sh` exits 0 printing `true`
+   for the exact head, through all of Gates A, W, B, C, and R, and not under GitHub's
+   SKIPPED-passes semantics. This answers ADR 0257 Decision 3: on an enrolled repository
+   the check does veto the native path for every principal that cannot bypass the
+   ruleset.
+2. **Ruleset.** A new organization ruleset, scoped to `verjson-core-checks=enforced`
+   repositories that hold the AI review App key, requires the context `merge-admission`
+   bound to the AI review App's integration id. The conformance policy and the
+   org-ruleset-conformance audit are amended to allow exactly this per-context binding
+   (`merge-admission` to the App id) and to fail when that context is bound to 15368 or
+   unbound; every other required context stays bound to 15368 (ADR 0190).
+3. **Producer and self-exclusion.** The producer runs the canonical script from the
+   organization repository at a pinned SHA. It either runs entirely outside the target
+   head's workflow-run and check inventories, or the script excludes exactly its own run
+   from ADR 0229 rule 2 and its own job check runs from Gate C, each authenticated by run
+   id and the pinned producer path, and nothing else. Gates A and C exclude
+   `merge-admission` only when its producer is the bound App; a same-named check from any
+   other producer stays a Gate C failure.
+4. **States.** Every evaluation first creates a new `merge-admission` check run in progress
+   on the head, superseding any earlier result, and completes it SUCCESS only when the
+   assertion answers `true`. On a refusal or an error it leaves the run in progress
+   (pending, which blocks natively) and never posts NEUTRAL, SKIPPED, or FAILURE. That
+   the newest same-named check run governs the native required status is platform
+   behavior that the negative canaries of item 7 must prove.
+5. **Triggers.** Re-evaluate on pull-request events (opened, synchronize, reopened,
+   ready_for_review, edited including a base change, labeled, unlabeled), on completion of
+   each workflow that reports a required context (excluding the producer's own path), on
+   reviews submitted, edited, or dismissed, after any ruleset edit, and by a periodic
+   sweep of open enrolled pull requests at most 15 minutes apart. The superseding
+   in-progress run is the first action of every evaluation; the canaries measure the
+   residual window between a same-head change and that run, and this ADR states it.
+6. **Stated limits.** Ruleset bypass actors are not held: the Renovate App (renovate-config
+   `default.json`) and administrators with bypass. Native merges gain no human-review
+   requirement (GH-03, out of scope). The App key sits in each consumer's `ai-review-app`
+   environment, so the trust boundary is the repository's main branch plus that
+   environment's protection, the same as the authorization arm.
+7. **Rollout.** This ADR first. Ship the producer posting the context while it is not
+   required, and observe at least 20 merges across at least 3 enrolled repositories with
+   a pre-merge SUCCESS on the exact head, recording any false refusal. Then enable the
+   ruleset on one canary repository only, with an audit receipt, and run matched positive
+   and negative canaries as a non-bypass actor, through both the merge button and an
+   already-enabled auto-merge: a draft-skipped required context, an unfinished run on the
+   head, a same-head base change and a review dismissal after a SUCCESS (measuring the time
+   until the superseding run exists), assert true then false on the same head, and a
+   forged same-named check from GitHub Actions. Each negative case must block. Then the
+   enrolled set.
+8. **Rollback.** Disable the new ruleset: one edit, no data effect. The policy amendment
+   and the producer may remain.
+
+Binding preconditions from the dissents:
+
+- **(a) Cursor.** When the producer refuses or errors, its own workflow and job checks
+  conclude success. The only blocking signal is the `merge-admission` check left in
+  progress. The self-exclusion covers only the current in-progress run and never hides an
+  earlier failed producer check.
+- **(b) Codex.** This decision is admission with a remaining **stale-SUCCESS window**: a
+  review dismissed on the same head, a newly started advisory workflow, or a non-Actions
+  check that fails later can follow a SUCCESS until the superseding run exists. The owner
+  must accept that window explicitly. Canaries try to merge, through the merge button and
+  through already-enabled auto-merge, throughout the interval before the superseding run
+  exists, and report any merge that gets through as a limitation. If full merge-time
+  parity is required, rollout stays blocked.
+- **Serialization and completion triggers.** Evaluations are serialized per head (a
+  producer concurrency group without cancel-in-progress), or an out-of-order-completion
+  negative canary is added. A completion trigger covers checks from non-Actions Apps, or
+  that window is documented. The canaries confirm that a check left in progress for a long
+  time still blocks natively.
+
+The ARB record does not itself authorize a ruleset edit, and neither does this ADR.
+
+### Outcome for #2031
+
+Gate R (ADR 0257) is part of the assertion that the producer runs, so once the item 2
+ruleset is enabled on a repository, a native merge of a head without a valid exact-head
+ADR 0202 receipt on a promotion-enabled repository is held: the producer leaves
+`merge-admission` in progress on Gate R's exit 6, exactly as on any other refusal. That
+is the outcome #2031 requested, for every non-bypass principal. It takes effect only with
+the rollout steps below; this change performs none of them.
+
+## Implementation in this change
+
+**Placement (item 3).** The producer is a new reusable workflow,
+`.github/workflows/merge-admission.yml`, called from the consumer's default branch, and
+not a job inside the org-required arm (`gate-rearm.yml`). The arm is a required workflow,
+which runs only on `pull_request_target`, so it cannot take `workflow_run`, review, or
+`schedule` triggers, and its runs belong to the head's inventory, which would
+need the run-id self-exclusion of item 3's second branch. The producer takes the first
+branch instead: callers start it only from `workflow_run`, `schedule`, and
+`workflow_dispatch`, whose runs and job check runs belong to the default-branch commit,
+never to a pull-request head; the producer's first job evaluates nothing when any other
+event starts it. Pull-request and review events reach it through a keyless
+trigger workflow (`merge-admission-trigger.yml`) whose run completes before the producer
+starts, so ADR 0229 rule 2 never sees an unfinished trigger run as the producer's own. The
+assertion therefore needs no run-id exclusion and gains none, and it never hides any
+Actions check; precondition (a)'s "never hide an earlier failed producer check" holds by
+construction, because no producer job check runs on the head. A job inside the arm was
+rejected for long-term health as well as fit: it would put a second secret-bearing control
+plane in the required workflow, and couple every producer change to the arm's ruleset
+rotation (ADR 0091).
+
+**Self-exclusion.** `assert-mergeable-head.sh` binds `MERGE_ADMISSION_APP_ID=4528902` (the
+AI review App, `ai-review-authorization`, read from the organization variable and
+`apps/ai-review-authorization` on 2026-11-12). Gates A and C set aside every
+`merge-admission` check run produced by that App, including earlier in-progress ones,
+which every refusal leaves behind and which would otherwise block every later evaluation
+of the same head. Gate A skips the required context only where the ruleset binds it to
+that App. A same-named check run from any other App and a same-named commit status stay in
+the inventory. Gate B keeps reading the raw inventory. The assertion also takes an
+optional third argument, the expected head, and exits 1 when the pull request's head is
+another SHA, so an evaluation never answers for a head other than the one its check run
+belongs to.
+
+**Evaluation.** `scripts/ci-gate/merge-admission.sh` creates the new check run in progress
+with the App token, continues only when GitHub reports the bound App as its producer and a
+numeric id, runs the assertion beside it with the job's read-only token, and completes
+the check run as success only on exit 0 with the exact output `true`. Every other outcome
+leaves it in progress and exits 0. The evaluate job checks out `Verjson/.github` at
+`job.workflow_sha`, the executing producer's own SHA, which the consumer pins in its
+`uses:` reference. The App token is minted with `permission-checks: write` only and the
+mint step tolerates failure. `scripts/ci-gate/merge-admission-plan.sh` lists the open
+pull requests that are not drafts (a draft cannot merge, and marking it ready is a
+trigger), or only those at the head an event names.
+
+**Serialization.** The evaluate job's concurrency group is per repository and head, with
+`cancel-in-progress: false`. GitHub keeps one pending run per group, so a pending
+evaluation can be replaced only by a newer one of the same head, which reads later state
+and creates a newer check run. The sweep's matrix legs share the same groups as the
+event-driven evaluations.
+
+**Triggers (item 5).** This repository's caller (`merge-admission-caller.yml`) lists
+every workflow that reports a check on a pull-request head here, plus the trigger, under
+`workflow_run`. The sweep runs every 15 minutes. **The completion trigger for checks from
+Apps other than GitHub Actions is deferred, and that window is documented here** (the
+serialization bullet's alternative): `check_suite: completed` is the event that reports
+them, but the ADR 0235 runner-isolation checker classifies `check_suite` as undetermined
+(it can name a fork head), and classifying it is an ADR 0235 change of its own. Until
+then, a non-Actions check that completes on a head is seen by the next sweep, at most 15
+minutes later, or by any earlier trigger on that head. When `check_suite` is classified,
+the caller adds it and the producer must skip the AI review App's own suite, which every
+admission completes. GitHub delivers no
+workflow event for a ruleset edit, so that trigger is the sweep (at most 15 minutes) or a
+manual `workflow_dispatch` of the caller as part of the ruleset-edit procedure.
+`app-key-environment.yml` now reads a scheduled run's default branch from its ref, because
+a schedule event carries no repository record and always runs on the default branch.
+
+**Precondition (a) scope.** Refusals, evaluation errors, an unreadable pull-request
+listing, and an App token that cannot be minted all end with the producer's jobs
+succeeding. Two configuration faults still fail visibly, because they precede any
+evaluation and are the controls that protect the key: the main-only environment
+admission (`app-key-environment.yml`) and the generated App client-id guard. A runner or
+checkout failure before the evaluation starts fails visibly too. Those red
+runs belong to the default-branch commit, so they never enter a head's inventory; an
+evaluation they stop leaves the head's earlier `merge-admission` state as it was, which
+is the stale-SUCCESS window of precondition (b). One canonical environment admission is
+kept rather than a third behaviorally matched copy.
+
+## Not performed by this change (rollout gates)
+
+- The owner's explicit acceptance of the stale-SUCCESS window (precondition (b)).
+- The item 2 ruleset, its conformance-policy amendment, and the org-ruleset-conformance
+  audit change. No ruleset is created, edited, or enabled, and no property or variable
+  changes.
+- Generated consumer callers (the producer caller and the trigger) for enrolled
+  repositories, the 20-merge observation across 3 repositories, the canary ruleset with
+  its audit receipt, and every positive and negative canary of item 7, including the
+  measurement of the trigger-to-superseding-run window and the long-in-progress block.
+
+## Consequences
+
+- This repository posts `merge-admission` on its pull-request heads as soon as this lands,
+  while no ruleset requires it. A refused head keeps an in-progress `merge-admission` check,
+  which the assertion sets aside and nothing else requires.
+- Any caller of the assertion may pass the expected head; existing two-argument callers are
+  unchanged.
+- **Residual windows**, beyond precondition (b)'s: a change on the same head waits for
+  its trigger run to complete and the producer to start before the superseding check
+  exists; a GitHub Actions check is seen at completion only for workflows the caller
+  lists, and a check from any other App only by the next sweep;
+  a ruleset edit is seen by the next sweep or a manual dispatch; a permission downgrade
+  emits no event and is seen by the next sweep.
+- A pull request whose head is the default branch's current commit shares that commit
+  with the producer's own runs, which read as unfinished; it is refused and left in
+  progress, never admitted.
+- Both producer jobs run on the ephemeral lane (`CI_LANE_UNTRUSTED`, GitHub-hosted by
+  default) because the ADR 0235 checker finds that they read pull-request data. The
+  sweep therefore costs, every 15 minutes, one planning job, the canonical environment
+  admission's two jobs (one of them fixed on a GitHub-hosted runner), and one evaluation
+  job and environment deployment record per open non-draft pull request. On a private
+  repository without an ephemeral self-hosted lane those are billed hosted minutes; the
+  rollout must budget them before enrolling private repositories.
+- Rollback before enablement is deleting the caller and trigger; after enablement it is
+  item 8.
+
+## Verification
+
+- `scripts/assert-mergeable-head.merge-admission.test.sh` (merge-gate): Gate C sets aside
+  the bound App's in-progress check; Gate A sets aside the context the ruleset binds to
+  that App; a same-named GitHub Actions check stays a Gate C failure; a context bound to
+  GitHub Actions stays required; a mismatched expected head exits 1, a matching one is
+  evaluated, and a malformed one is a usage error.
+- `scripts/ci-gate/merge-admission.test.sh` (merge-gate): the in-progress check is created
+  first with the App token and before the assertion; exit 0 with `true` completes that
+  check run as success; exit 0 with any other output, exit 6, exit 5, and exit 1 leave it
+  in progress while the producer exits 0; a check from another App, a non-numeric id, a
+  failed creation, or no App token stops before the assertion; a failed completion is
+  named; malformed arguments are refused before any call; the producer and the
+  assertion bind the same App id.
+- `scripts/ci-gate/merge-admission-plan.test.sh` (merge-gate) and
+  `scripts/ci-gate/merge-admission-workflow.test.py` (merge-gate) pin the plan and the
+  workflow contract: default-branch-only triggers, a sweep at most 15 minutes apart, the
+  trigger's events and its lack of credentials, per-head serialization without
+  cancellation, the pinned canonical checkout, the App token's single permission, the
+  read-only assertion token, the environment admission and its scheduled-run default
+  branch, and the guard that a pull-request event evaluates nothing.
+
+Each guard that held when written was proven by a mutant that fails it for its asserted
+reason, recorded in the pull request.
