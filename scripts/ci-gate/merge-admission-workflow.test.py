@@ -26,7 +26,8 @@ PULL_REQUEST_HEAD_EVENTS = HEAD_EVENTS - {"merge_group"}
 # The producer, its trigger, and its caller: never derived as completion triggers of their own.
 MERGE_ADMISSION_FILES = {"merge-admission.yml", "merge-admission-trigger.yml", "merge-admission-caller.yml"}
 # Workflows that no pull-request event starts, yet that complete a check on the head: the AI
-# review gate is dispatched and patches its authorization check run there.
+# review gate patches its authorization check run there. It is dispatched on the default
+# branch, so its completed run names no pull-request head, and the producer sweeps instead.
 DISPATCHED_HEAD_REPORTERS = {"AI review + auto-merge"}
 
 
@@ -179,6 +180,18 @@ class ProducerTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("PR_NUMBER", evaluate["env"])
+
+    def test_only_a_completed_pull_request_run_narrows_the_plan_to_its_head(self):
+        # A completed run started by a pull-request or review event names the head it ran
+        # for. Any other completed run, such as the AI review gate dispatched on the default
+        # branch, names a default-branch commit no pull request is at, so the plan sweeps.
+        plan = self.step("plan", "Plan the heads this run evaluates")
+        self.assertEqual(
+            plan["env"]["EVENT_HEAD"],
+            "${{ contains(fromJSON('[\"pull_request\",\"pull_request_target\",\"pull_request_review\"]'), "
+            "github.event.workflow_run.event) && github.event.workflow_run.head_sha || '' }}",
+        )
+        self.assertIn('merge-admission-plan.sh "$REPOSITORY" "$EVENT_HEAD"', plan["run"])
 
     def test_the_key_is_admitted_only_through_the_main_only_environment_policy(self):
         policy = self.doc["jobs"]["app-key-policy"]

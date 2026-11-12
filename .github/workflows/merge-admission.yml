@@ -65,7 +65,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          EVENT_HEAD: ${{ github.event.workflow_run.head_sha || '' }}
+          # Only a run a pull-request or review event started names a pull-request head. Any
+          # other completed run (the AI review gate is dispatched on the default branch), the
+          # schedule, and a manual dispatch plan a full sweep.
+          EVENT_HEAD: ${{ contains(fromJSON('["pull_request","pull_request_target","pull_request_review"]'), github.event.workflow_run.event) && github.event.workflow_run.head_sha || '' }}
         run: |
           set -uo pipefail
           plan="$(bash .gate-trust/scripts/ci-gate/merge-admission-plan.sh "$REPOSITORY" "$EVENT_HEAD")" || plan='[]'

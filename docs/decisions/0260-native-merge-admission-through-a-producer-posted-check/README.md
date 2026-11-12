@@ -177,9 +177,15 @@ as the event-driven evaluations.
 every workflow that reports a check on a pull-request head here, plus the trigger, under
 `workflow_run`. The workflow contract test derives that list from every workflow a
 pull-request or review event starts (excluding the producer's own three files and
-close-only workflows), adds the dispatched `AI review + auto-merge` gate, which patches its
-authorization check on the head, and requires an exact match, so a new pull-request
-workflow cannot be left out.
+close-only workflows), adds the dispatched `AI review + auto-merge` gate, which patches
+its authorization check on the head, and requires an exact match, so a new pull-request
+workflow cannot be left out. Only a completed run that a pull-request or review event
+started (`pull_request`, `pull_request_target`, `pull_request_review`) narrows the plan
+to its `head_sha`. Every other completed run plans a full sweep, like the schedule and a
+manual dispatch: the AI review gate is dispatched with `--ref` set to the default branch
+(`gate-rearm.yml`), so its `head_sha` is a default-branch commit no pull request is at,
+and narrowing to it would evaluate nothing. Each completion of the gate therefore costs
+a sweep.
 
 **The sweep is best-effort.** It is scheduled every 15 minutes, and that is a target, not
 a guarantee: GitHub delays scheduled runs under load and can drop them, and it disables a
