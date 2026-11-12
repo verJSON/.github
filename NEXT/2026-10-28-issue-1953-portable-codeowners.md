@@ -1,6 +1,7 @@
 ---
 date: 2026-10-28
 issue: 1953
+impact: minor
 title: Generate portable CODEOWNERS ownership
 ---
 
