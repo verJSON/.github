@@ -70,10 +70,10 @@ SECRETLESS_HOSTED_FALLBACK = f"{SECRETLESS} && '{HOSTED}'"
 # this fixed exception bound to its single canonical workflow/job site.
 FIXED_HOSTED_PROFILE_ACCEPTANCE = "fixed-hosted-profile-acceptance"
 FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW = "playwright-profile-hosted-acceptance.yml"
-FIXED_HOSTED_PROFILE_ACCEPTANCE_SIZE = 1133
+FIXED_HOSTED_PROFILE_ACCEPTANCE_SIZE = 1302
 FIXED_HOSTED_PROFILE_ACCEPTANCE_MAX_BYTES = 2048
 FIXED_HOSTED_PROFILE_ACCEPTANCE_SHA256 = (
-    "c26f146f1786a07c04cbe1ac0f61cc1380d5b418518434eb40c6092d9be6c379"
+    "5b335a7a6d3343d572b36224f7ad8ed486b70c6e02627b5a945df96c2516668d"
 )
 FIXED_HOSTED_JOB_SITES = frozenset(
     {("playwright-profile-hosted-acceptance.yml", "hosted-profile-acceptance")}

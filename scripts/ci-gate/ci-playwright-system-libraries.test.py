@@ -1405,7 +1405,8 @@ raise SystemExit(0)
         self.assertEqual(job["runs-on"], "ubuntu-24.04")
         self.assertEqual(
             job["if"],
-            "github.event.pull_request.head.repo.full_name == github.repository",
+            "github.event.pull_request.head.repo.full_name == github.repository"
+            " && !github.event.pull_request.draft",
         )
         checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["persist-credentials"], "false")

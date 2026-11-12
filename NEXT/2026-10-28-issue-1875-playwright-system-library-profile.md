@@ -9,3 +9,5 @@ Node CI can opt into a versioned Playwright 1.63.0 Chromium system-library profi
 The Ubuntu archive signing key is pinned by SHA256 and snapshotted into the private invocation root before APT runs; any key change fails closed until runner-image and package provenance are reviewed. Parent-check failures report only the fixed parent path, numeric uid, and octal mode.
 
 The protected Node CI generator's source and output byte tripwires rise from 480,000 to 490,000 bytes so that the merged canonical workflow (483,271 bytes) fits; ADR 0238's 2026-11-12 amendment records this as a labeled stopgap until inline candidate-execution code moves into the pinned helper modules.
+
+The same-repository hosted acceptance workflow is Tier 2 work: it skips draft pull requests, starts on `ready_for_review`, and cancels a superseded run.

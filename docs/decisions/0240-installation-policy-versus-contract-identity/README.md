@@ -181,3 +181,13 @@ literal hosted runner before lane variables or the caller's `runner` input,
 as required by ADR 0239. In Node CI, the catalog's `caller-runner` selector
 is nested behind that outer guard. This clarifies the existing public-runner
 invariant without changing profile ownership or trusted-caller routing.
+
+## 2026-11-12 amendment — fixed hosted profile acceptance skips drafts
+
+The acceptance job's real package transaction is Tier 2 integration work under
+[`docs/ci-workflow-tiers.md`](../../ci-workflow-tiers.md), so its exact approved
+condition now also requires `!github.event.pull_request.draft`. The workflow
+requests `ready_for_review` and `converted_to_draft`, and per-pull-request
+concurrency cancels a superseded run. The approved byte pin, the hosted selector
+policy's exact condition, and the routing shape test move together. The
+placement tuple, permissions, and same-repository limit are unchanged.

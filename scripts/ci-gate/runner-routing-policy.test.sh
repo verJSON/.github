@@ -104,7 +104,8 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as stream:
     lines = stream.read().splitlines()
 source = "\n".join(lines)
-assert "&" not in source and "*" not in source and "<<:" not in source
+# Expression conjunctions are the only ampersands; any other is a YAML anchor.
+assert "&" not in source.replace("&&", "") and "*" not in source and "<<:" not in source
 on_index = lines.index("on:")
 next_top_level = next(
     (index for index in range(on_index + 1, len(lines))
@@ -145,7 +146,7 @@ run_index = next((index for index, line in enumerate(job_lines)
 assert trigger_keys == {"pull_request"}
 assert permission_lines == ["  contents: read"]
 assert job_headers == ["hosted-profile-acceptance"]
-assert "    if: github.event.pull_request.head.repo.full_name == github.repository" in job_lines
+assert "    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft" in job_lines
 assert not any(re.match(r"^ {4}(strategy|uses|with|permissions|secrets)\s*:", line)
                for line in job_lines)
 assert not re.search(r"\bsecrets\b|\bgithub\.token\b", source, re.IGNORECASE)

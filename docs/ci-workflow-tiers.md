@@ -28,6 +28,7 @@ a runner. Existing path filters and job predicates remain in effect.
 | `actions-ci` | `shell-test-groups`, `hosted-compatibility-tests`, and the `shell-tests` required-check aggregate |
 | `CLI projects required package surface` | Protected full Node CI at both supported Node versions, plus `package-surface` validation |
 | `container candidate reusable-call contract` | The reusable candidate build validation in `validate` |
+| `Playwright profile hosted acceptance` | The real hosted package transaction in `hosted-profile-acceptance` |
 
 The candidate `publish` job is `workflow_dispatch`-only and is not part of the
 pull-request tiering. `pull_request_target` authorization and merge-gate

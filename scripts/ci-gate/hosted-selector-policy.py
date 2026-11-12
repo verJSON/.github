@@ -960,6 +960,7 @@ def is_fixed_hosted_profile_acceptance(path: str, name: str, body: dict) -> bool
         and body.get("runs-on") == "ubuntu-24.04"
         and body.get("if")
         == "github.event.pull_request.head.repo.full_name == github.repository"
+        " && !github.event.pull_request.draft"
         and "strategy" not in body
         and "uses" not in body
         and "with" not in body
