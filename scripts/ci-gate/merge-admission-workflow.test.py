@@ -229,6 +229,9 @@ class CallerTriggerTests(unittest.TestCase):
                                 "pull_request_review_comment", "issue_comment", "dynamic")}
         cases |= {f"{event} event": ({"github": {"event_name": event, "sha": "f" * 40, "event": {}}}, "sweep")
                   for event in ("schedule", "workflow_dispatch")}
+        empty_head = completed("pull_request")
+        empty_head["github"]["event"]["workflow_run"]["head_sha"] = ""
+        cases["completed pull_request run with an empty head"] = (empty_head, "sweep")
         for name, (context, key) in cases.items():
             with self.subTest(name):
                 self.assertEqual(interpolate(group, context), f"merge-admission-caller-{key}")

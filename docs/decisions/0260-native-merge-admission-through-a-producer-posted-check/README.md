@@ -426,6 +426,10 @@ higher. Displaced pending runs still appear in the run list as `cancelled` on th
 default-branch commit, so the count of created runs does not fall; executed runs and
 `evaluate` jobs do. Those cancellations add the same default-branch noise as the
 evaluate job's cancelled legs, which narrowed precondition (a) above already accepts.
+The bound is per head and per sweep, not global: concurrent producer runs grow with
+the number of open pull-request heads, so a contributor with K open heads holds K head
+groups. The post-merge measurement on #2031 is therefore read per head, not as one
+hourly total.
 
 **Budget ownership.** `docs/ci-workflow-tiers.md` excludes `pull_request_target`
 authorization and merge-gate workflows from the tier policy, so no document states a
