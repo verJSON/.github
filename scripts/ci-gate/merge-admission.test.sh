@@ -272,6 +272,12 @@ if [ -n "$policy_app" ] && [ "$producer_app" = "$policy_app" ] && [ "$assertion_
 else
   fail "the producer, the assertion, and the conformance policy bind the same AI review App id (producer: '$producer_app', assertion: '$assertion_app', policy: '$policy_app')"
 fi
+# The equality above holds if all three drift together; this test's fixtures pin the App.
+if [ "$policy_app" = "$AI_REVIEW_APP_ID" ]; then
+  pass "the bound AI review App id is this test's AI review App $AI_REVIEW_APP_ID"
+else
+  fail "the bound AI review App id is this test's AI review App $AI_REVIEW_APP_ID (policy: '$policy_app')"
+fi
 
 if [ "$fails" -ne 0 ]; then
   printf '%s merge-admission producer case(s) failed\n' "$fails" >&2
