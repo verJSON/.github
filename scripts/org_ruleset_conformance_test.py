@@ -54,6 +54,18 @@ def ruleset(
     }
 
 
+def merge_admission_ruleset(ruleset_id, *checks, enforcement="disabled"):
+    """ADR 0260's item-2 ruleset as GitHub returns it once created, by default disabled."""
+    detail = ruleset(
+        ruleset_id,
+        name=MERGE_ADMISSION_BINDING["ruleset_name"],
+        bypass_actors=copy.deepcopy(MERGE_ADMISSION_BYPASS),
+        rules=[required_checks_rule(*checks)],
+    )
+    detail["enforcement"] = enforcement
+    return detail
+
+
 def merge_admission_contract():
     return {
         "ruleset_id": None,
@@ -105,6 +117,12 @@ MERGE_ADMISSION_BINDING = {
     "app_id_variable": "AI_REVIEW_APP_ID",
     "ruleset_name": "merge-admission-required",
 }
+APP_ID_VARIABLE_PATH = "orgs/Verjson/actions/variables/AI_REVIEW_APP_ID"
+PRE_CREATION_RECEIPT = (
+    "merge-admission-receipt=pre-creation gates=creation context=merge-admission "
+    "app_id=4528902 app_id_variable=AI_REVIEW_APP_ID ruleset=merge-admission-required "
+    "ruleset_state=absent"
+)
 MERGE_ADMISSION_BYPASS = [
     {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},
     {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"},
@@ -195,6 +213,8 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                             }
                             for ruleset_id, detail in details.items()
                             if detail.get("bypass_actors")
+                            # The name-keyed contract above covers it (C6).
+                            and detail["name"] != MERGE_ADMISSION_BINDING["ruleset_name"]
                         ],
                     }
                 ),
@@ -225,6 +245,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             responses.update(
                 {f"orgs/Verjson/rulesets/{ruleset_id}": [detail] for ruleset_id, detail in details.items()}
             )
+            responses[APP_ID_VARIABLE_PATH] = [
+                {"name": "AI_REVIEW_APP_ID", "value": "4528902", "visibility": "all"}
+            ]
             responses.update(extra_responses or {})
             env = os.environ | {
                 "PATH": f"{temp}:{os.environ['PATH']}",
@@ -273,6 +296,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             [
                 ["api", "--hostname", "github.com", "--method", "GET", "--paginate", "--slurp", "orgs/Verjson/rulesets?per_page=100"],
                 ["api", "--hostname", "github.com", "--method", "GET", "--paginate", "--slurp", "orgs/Verjson/rulesets/1"],
+                ["api", "--hostname", "github.com", "--method", "GET", "--paginate", "--slurp", APP_ID_VARIABLE_PATH],
             ],
         )
         self.assertNotIn("required_approving_review_count", result.stdout + result.stderr)
@@ -436,6 +460,11 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             for index, contract in enumerate(committed["bypass_actor_contracts"])
             for ruleset_id in [contract["ruleset_id"] or 90_000_000 + index]
         }
+        for detail in details.values():
+            if detail["name"] == MERGE_ADMISSION_BINDING["ruleset_name"]:
+                detail["rules"] = [required_checks_rule(
+                    {"context": "merge-admission", "integration_id": 4528902}
+                )]
         details[13] = ruleset(
             13,
             include=["refs/heads/release/*"],
@@ -459,7 +488,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("organization=Verjson", result.stdout)
         self.assertTrue(
-            all(call[-1].startswith("orgs/Verjson/rulesets") for call in calls),
+            all(call[-1].startswith("orgs/Verjson/") for call in calls),
             calls,
         )
 
@@ -1448,7 +1477,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("second-page (6)", result.stderr)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            [call[-1] for call in calls if call[-1].startswith("orgs/Verjson/rulesets")],
+            ["orgs/Verjson/rulesets?per_page=100", "orgs/Verjson/rulesets/5", "orgs/Verjson/rulesets/6"],
+        )
 
     def test_listing_and_detail_http_failures_fail_closed(self):
         listing_path = "orgs/Verjson/rulesets?per_page=100"
@@ -1807,6 +1839,105 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             "merge-admission producer App 4528902",
             result.stderr,
         )
+
+    def test_absent_merge_admission_ruleset_yields_the_pre_creation_receipt(self):
+        # ARB-2031-2026-11-12 C10: before creation the receipt checks the org variable
+        # and names the ruleset as absent, never passing silently.
+        result, calls = self.run_audit([[{"id": 1}]], {1: ruleset(1)})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(PRE_CREATION_RECEIPT, result.stdout.splitlines())
+        self.assertIn(APP_ID_VARIABLE_PATH, [call[-1] for call in calls])
+
+    def test_org_variable_naming_another_app_fails_before_creation(self):
+        result, _ = self.run_audit(
+            [[{"id": 1}]],
+            {1: ruleset(1)},
+            extra_responses={APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID", "value": "1234567"}]},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "ERROR: merge-admission ruleset merge-admission-required is absent: organization "
+            "variable AI_REVIEW_APP_ID does not name the policy's merge-admission producer "
+            "App 4528902",
+            result.stderr,
+        )
+        self.assertNotIn("1234567", result.stdout + result.stderr)
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_disabled_merge_admission_ruleset_bound_to_the_app_yields_the_full_receipt(self):
+        # C10: once the ruleset exists, even disabled, the receipt also reads its binding,
+        # and that receipt gates activation and each enrollment edit.
+        detail = merge_admission_ruleset(
+            41, {"context": "merge-admission", "integration_id": 4528902}
+        )
+
+        result, _ = self.run_audit([[{"id": 41}]], {41: detail})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "merge-admission-receipt=full gates=activation,enrollment-edit "
+            "context=merge-admission app_id=4528902 app_id_variable=AI_REVIEW_APP_ID "
+            "ruleset=merge-admission-required ruleset_id=41 enforcement=disabled",
+            result.stdout.splitlines(),
+        )
+
+    def test_merge_admission_ruleset_that_does_not_require_the_context_fails(self):
+        detail = merge_admission_ruleset(
+            41, {"context": "shell-tests", "integration_id": 15368}
+        )
+
+        result, _ = self.run_audit([[{"id": 41}]], {41: detail})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "ERROR: merge-admission ruleset merge-admission-required (41): does not require "
+            "the merge-admission context",
+            result.stderr,
+        )
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_two_live_rulesets_with_the_merge_admission_name_yield_no_receipt(self):
+        # After creation C6 pins the contract to the ruleset id, so a second bypass-less
+        # ruleset with the same name is not a contract finding; the receipt must not
+        # pick one of the two.
+        bound = {"context": "merge-admission", "integration_id": 4528902}
+        pinned = merge_admission_ruleset(41, bound)
+        shadow = merge_admission_ruleset(42, bound) | {"bypass_actors": []}
+        shadow["conditions"]["ref_name"]["include"] = ["refs/heads/release/*"]
+        policy = json.loads(self.committed_policy_without_bypass_contracts())
+        policy["bypass_actor_contracts"][0]["ruleset_id"] = 41
+
+        result, _ = self.run_audit(
+            [[{"id": 41}, {"id": 42}]], {41: pinned, 42: shadow}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "ERROR: merge-admission ruleset merge-admission-required: 2 live rulesets share "
+            "the name",
+            result.stderr,
+        )
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_app_id_variable_must_be_a_variable_name_before_it_reaches_an_api_path(self):
+        for name in ("AI_REVIEW_APP_ID/../../rulesets", "ai_review_app_id", "AI REVIEW"):
+            with self.subTest(name=name):
+                policy = json.loads(self.committed_policy_without_bypass_contracts())
+                policy["merge_admission_binding"]["app_id_variable"] = name
+
+                result, calls = self.run_audit(
+                    [[{"id": 1}]], {1: ruleset(1)}, raw_policy=json.dumps(policy)
+                )
+
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(
+                    "ruleset policy.merge_admission_binding.app_id_variable must be an "
+                    "organization variable name",
+                    result.stderr,
+                )
+                self.assertEqual(calls, [])
 
     def test_bindings_outside_default_branch_rulesets_are_still_required(self):
         detail = ruleset(

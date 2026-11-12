@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -137,14 +138,18 @@ def read_merge_admission_binding(value):
         {"context", "integration_id", "app_id_variable", "ruleset_name"},
         location,
     )
+    variable = require_string(binding["app_id_variable"], f"{location}.app_id_variable")
+    # It becomes an API path segment, so only the form GitHub stores a name in.
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", variable):
+        raise AuditDataError(
+            f"{location}.app_id_variable must be an organization variable name"
+        )
     return {
         "context": require_string(binding["context"], f"{location}.context"),
         "integration_id": require_positive_integer(
             binding["integration_id"], f"{location}.integration_id"
         ),
-        "app_id_variable": require_string(
-            binding["app_id_variable"], f"{location}.app_id_variable"
-        ),
+        "app_id_variable": variable,
         "ruleset_name": require_string(binding["ruleset_name"], f"{location}.ruleset_name"),
     }
 
@@ -741,6 +746,66 @@ def paused_baseline_review(rulesets: list[dict], contracts: list[dict], paused_p
     )
 
 
+def read_organization_variable(organization: str, name: str):
+    """The value of one organization Actions variable; never printed."""
+    pages = gh_json_pages(f"orgs/{organization}/actions/variables/{name}")
+    if len(pages) != 1:
+        raise AuditDataError(f"organization variable {name} returned {len(pages)} documents")
+    variable = require_mapping(pages[0], f"organization variable {name}")
+    if variable.get("name") != name:
+        raise AuditDataError(f"organization variable {name} response names another variable")
+    return require_string(variable.get("value"), f"organization variable {name}.value")
+
+
+def requires_context(ruleset: dict, context: str):
+    return any(
+        check["context"] == context
+        for rule in ruleset["rules"]
+        if rule["type"] == "required_status_checks"
+        for check in rule["parameters"]["required_status_checks"]
+    )
+
+
+def merge_admission_receipt(merge_admission: dict, rulesets: list[dict], app_id_variable: str):
+    """ARB-2031-2026-11-12 C10, two phases: before and after the ruleset exists.
+
+    Before creation only the organization variable is compared, and the ruleset is
+    reported absent. Once it exists, even disabled, it must also require the context;
+    its binding is producer_binding_findings' to judge, like every other ruleset's.
+    The receipt is printed only when the whole audit conforms: the pre-creation one
+    gates creation, the full one gates activation and each enrollment edit.
+    """
+    context = merge_admission["context"]
+    app_id = merge_admission["integration_id"]
+    name = merge_admission["ruleset_name"]
+    fields = (
+        f"context={context} app_id={app_id} "
+        f"app_id_variable={merge_admission['app_id_variable']} ruleset={name}"
+    )
+    named = [ruleset for ruleset in rulesets if ruleset["name"] == name]
+    if len(named) > 1:
+        return [f"merge-admission ruleset {name}: {len(named)} live rulesets share the name"], None
+    findings = []
+    if named:
+        [live] = named
+        label = f"merge-admission ruleset {name} ({live['id']})"
+        receipt = (
+            f"merge-admission-receipt=full gates=activation,enrollment-edit {fields} "
+            f"ruleset_id={live['id']} enforcement={live['enforcement']}"
+        )
+        if not requires_context(live, context):
+            findings.append(f"{label}: does not require the {context} context")
+    else:
+        label = f"merge-admission ruleset {name} is absent"
+        receipt = f"merge-admission-receipt=pre-creation gates=creation {fields} ruleset_state=absent"
+    if app_id_variable != str(app_id):
+        findings.append(
+            f"{label}: organization variable {merge_admission['app_id_variable']} does not "
+            f"name the policy's merge-admission producer App {app_id}"
+        )
+    return findings, receipt
+
+
 def canonical_bypass_actors(actors: list[dict]):
     return sorted(
         [
@@ -769,6 +834,9 @@ def main(arguments: list[str] | None = None) -> int:
         paused_policy = PAUSED.read_policy(PAUSED.CHECKED_IN_POLICY)
         ruleset_ids = list_ruleset_ids(organization)
         rulesets = [read_ruleset(organization, ruleset_id) for ruleset_id in ruleset_ids]
+        app_id_variable = read_organization_variable(
+            organization, merge_admission["app_id_variable"]
+        )
     except (OSError, AuditDataError, PAUSED.AuditDataError, RuntimeError) as error:
         print(f"ERROR: cannot establish organization ruleset state: {error}", file=sys.stderr)
         return 2
@@ -810,7 +878,17 @@ def main(arguments: list[str] | None = None) -> int:
     bypass_findings = baseline_findings + bypass_contract_findings(
         rulesets, bypass_contracts, frozenset({paused_policy["baseline_ruleset_id"]})
     )
-    if failures or paused_refusals or unbound or bypass_findings or unestablished:
+    admission_findings, admission_receipt = merge_admission_receipt(
+        merge_admission, rulesets, app_id_variable
+    )
+    if (
+        failures
+        or paused_refusals
+        or unbound
+        or bypass_findings
+        or admission_findings
+        or unestablished
+    ):
         for ruleset, refusal in paused_refusals:
             print(f"ERROR: {ruleset['name']} ({ruleset['id']}): {refusal}", file=sys.stderr)
         for ruleset in failures:
@@ -825,7 +903,7 @@ def main(arguments: list[str] | None = None) -> int:
                 f"required status check {context!r} {diagnostic}",
                 file=sys.stderr,
             )
-        for finding in bypass_findings:
+        for finding in bypass_findings + admission_findings:
             print(f"ERROR: {finding}", file=sys.stderr)
         # Findings above are still reported; an unread paused state makes the verdict unknown.
         for ruleset, error in unestablished:
@@ -840,6 +918,7 @@ def main(arguments: list[str] | None = None) -> int:
         print(f"paused-relaxation=accepted {ruleset['name']} ({ruleset['id']}) {acceptance}")
     if baseline_acceptance is not None:
         print(f"paused-baseline=accepted {baseline_acceptance}")
+    print(admission_receipt)
     print(
         f"ruleset-policy=conformant organization={organization} "
         f"rulesets={len(rulesets)} "

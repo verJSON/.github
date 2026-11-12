@@ -41,6 +41,26 @@ ruleset that requires it (`merge-admission-required`); the policy must carry tha
 ruleset's reviewed bypass contract before the ruleset exists, and the contract must
 never list the AI review App (ARB-2031-2026-11-12 C6).
 
+### Merge-admission receipts (ARB-2031-2026-11-12 C10)
+
+The same run also reads the organization variable the binding names
+(`AI_REVIEW_APP_ID`) and compares it with the binding, in two phases:
+
+- **Before the ruleset exists** it fails unless the variable names the bound App,
+  and a conformant run prints
+  `merge-admission-receipt=pre-creation gates=creation … ruleset_state=absent`.
+  The ruleset is reported absent explicitly, never passed over.
+- **Once it exists, even disabled**, the ruleset must also require
+  `merge-admission`, bound to that App (unbound or 15368 fails, as above), and a
+  conformant run prints
+  `merge-admission-receipt=full gates=activation,enrollment-edit … ruleset_id=<id> enforcement=<state>`.
+  Two live rulesets with that name print no receipt.
+
+A receipt is printed only on exit `0`. The pre-creation receipt gates creating the
+ruleset; the full receipt gates activating it and each enrollment edit. Neither is
+reusable across a later change: run the audit again immediately before each step.
+The variable's value is compared, never printed.
+
 The program has no mutation path. It calls only paginated GitHub REST GETs and
 does not print API response bodies, credential data, secret values, or variable
 values. Exit `0` means the exact-token policy conforms, exit `1` is policy drift,
