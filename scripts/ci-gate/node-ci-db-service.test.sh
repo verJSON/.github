@@ -252,7 +252,9 @@ rc_clash_a=$?
 run_db_step job-clash-b GITHUB_JOB=build-test MAPPED_PORT=49502 \
   RUNNER_NAME= RUNNER_WORKSPACE= DOCKER_NAMES="$clash_names"
 rc_clash_b=$?
-{ [ "$rc_clash_a" -eq 0 ] && [ "$rc_clash_b" -ne 0 ] \
+# The step exits with docker's own status, and the stub's refusal is 125.
+{ [ "$rc_clash_a" -eq 0 ] && [ "$rc_clash_b" -eq 125 ] \
+    && grep -qF 'failed to start the database container (name ' "$tmp/job-clash-b/out.txt" \
     && [ -n "$(published_handle_of job-clash-a)" ] \
     && [ -z "$(published_handle_of job-clash-b)" ]; } \
   && pass "a name collision fails the losing job and gives it no handle to tear down" \
@@ -567,7 +569,8 @@ if [ -n "$exported_bash_env" ]; then
   env -u BASH_ENV GH_TOKEN=fixture-token DB_ENV_HOOK_MARKER="$db_env_hook_marker" \
     BASH_ENV="$exported_bash_env" bash -c ':'
 fi
-{ [ "$rc" -ne 0 ] \
+{ [ "$rc" -eq 1 ] \
+    && grep -qxF "db-env: 'BASH_ENV' cannot override runner execution or workflow state" "$tmp/job-bash-env/out.txt" \
     && [ -z "$exported_bash_env" ] \
     && [ ! -e "$db_env_hook_marker" ] \
     && [ ! -s "$tmp/job-bash-env/docker.log" ]; } \
@@ -666,7 +669,9 @@ started_id="$(published_handle_of job-inspect-identity)"
 # so the step must fail instead of exporting a URL pointing nowhere.
 run_db_step job-noport "${job_a[@]}" MAPPED_PORT=
 rc=$?
-{ [ "$rc" -ne 0 ] && ! grep -q '^DATABASE_URL=' "$tmp/job-noport/github_env"; } \
+{ [ "$rc" -eq 1 ] \
+    && grep -qxF "could not read the mapped host port from '127.0.0.1:'" "$tmp/job-noport/out.txt" \
+    && ! grep -q '^DATABASE_URL=' "$tmp/job-noport/github_env"; } \
   && pass "an unreadable port mapping fails the step instead of exporting a dead URL" \
   || fail "step exited $rc and exported $(grep '^DATABASE_URL=' "$tmp/job-noport/github_env" || echo 'no URL') despite an unreadable port"
 

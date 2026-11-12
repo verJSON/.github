@@ -121,11 +121,21 @@ for valid_client_id in Iv23liIrniWY27YJKYDP Iv1.0123456789abcdef; do
     fail "the release workflow rejects supported client ID '$valid_client_id'"
   fi
 done
+# The guard's refusal is exit 1 with its own ::error:: line; a run that fails
+# for any other reason is nonzero too, so the line is what names the guard.
+client_id_err="$(mktemp)" || { echo "FAIL - could not create the client-ID stderr file"; exit 1; }
+trap 'rm -f "$client_id_err"' EXIT
 for invalid_client_id in '' 4583107 'Iv23liIrniWY27YJKYDP ' 'Ivabcdefgh$()' 'Iv23liÅbCdEfGh12'; do
-  if APP_CLIENT_ID="$invalid_client_id" LC_ALL=C bash -c "$client_id_run" >/dev/null 2>&1; then
+  client_id_status=0
+  APP_CLIENT_ID="$invalid_client_id" LC_ALL=C bash -c "$client_id_run" >/dev/null 2>"$client_id_err" \
+    || client_id_status=$?
+  if [ "$client_id_status" -eq 0 ]; then
     fail "the release workflow accepts malformed App client ID '${invalid_client_id:-<empty>}'"
-  else
+  elif [ "$client_id_status" -eq 1 ] \
+    && [ "$(cat "$client_id_err")" = '::error::GitHub App client ID is not accepted by the configured App policy' ]; then
     pass "the release workflow rejects malformed App client ID '${invalid_client_id:-<empty>}'"
+  else
+    fail "the release workflow refused App client ID '${invalid_client_id:-<empty>}' for another reason (exit $client_id_status): $(cat "$client_id_err")"
   fi
 done
 grep -qF 'git push --atomic origin \' "$workflow" \
@@ -133,6 +143,13 @@ grep -qF 'git push --atomic origin \' "$workflow" \
   && grep -qF '"refs/tags/$VERSION"' "$workflow" \
   && pass "the release still publishes commit and exact tag atomically" \
   || fail "the atomic commit+tag push shape changed"
+
+# Release commits and tags are authored under the organization's own domain;
+# a lookalike domain would publish immutable history under an identity the
+# organization does not control.
+grep -qxE '          git config user\.email release@verjson\.com' "$workflow" \
+  && pass "the release commits under the release@verjson.com identity" \
+  || fail "the release commit identity is not release@verjson.com"
 
 if [ "$fails" -eq 0 ]; then
   echo "All tests passed."

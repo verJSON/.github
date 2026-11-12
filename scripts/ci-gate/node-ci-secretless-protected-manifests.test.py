@@ -327,7 +327,7 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
         trusted_wrapper = artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
         self.assertIn("close_fds=True", trusted_wrapper)
         self.assertIn("libc.prctl(4, 0", trusted_wrapper)
-        self.assertIn("os.waitpid(-1", trusted_wrapper)
+        self.assertIn("os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)", trusted_wrapper)
         self.assertIn("cleanup-complete", trusted_wrapper)
 
         command = arguments_assignment.value
@@ -531,30 +531,37 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
                 root_only["normalized"], [(checkout_root.resolve(), "verify", [], False)]
             )
 
+            prefix = "normalized nested script-plan entr"
+            out_of_range = f"{prefix}y manifest index is out of range"
             invalid_entries = (
-                self._normalized_entry("verify", manifest_path="examples/two", manifest_index=0),
-                self._normalized_entry("verify", manifest_path="examples/two", manifest_index=True),
-            self._normalized_entry("verify", manifest_path="examples/two", manifest_index=-1),
-                self._normalized_entry("verify", manifest_path="examples/one", manifest_index=2),
-                self._normalized_entry("missing", manifest_path="examples/one", manifest_index=0),
+                (self._normalized_entry("verify", manifest_path="examples/two", manifest_index=0),
+                 f"{prefix}y manifest path does not match its index"),
+                (self._normalized_entry("verify", manifest_path="examples/two", manifest_index=True),
+                 f"{prefix}y manifest index must be a JSON integer"),
+                (self._normalized_entry("verify", manifest_path="examples/two", manifest_index=-1), out_of_range),
+                (self._normalized_entry("verify", manifest_path="examples/one", manifest_index=2), out_of_range),
+                (self._normalized_entry("missing", manifest_path="examples/one", manifest_index=0),
+                 f"{prefix}ies differ from manifest order"),
             )
-            for entry in invalid_entries:
-                with self.subTest(entry=entry), self.assertRaises(SystemExit):
+            for entry, reason in invalid_entries:
+                with self.subTest(entry=entry), self.assertRaises(SystemExit) as raised:
                     self._run_plan_fragments(
                         checkout_root, manifests, [entry], default_plan=False
                     )
+                self.assertEqual(raised.exception.code, reason)
 
             outside = base / "outside"
             self._write_package(outside, {"verify": "true"})
             linked = checkout_root / "examples/linked"
             linked.symlink_to(outside, target_is_directory=True)
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as raised:
                 self._run_plan_fragments(
                     checkout_root,
                     [self._nested_manifest("examples/linked")],
                     [],
                     default_plan=False,
                 )
+            self.assertEqual(raised.exception.code, "examples/linked must resolve to a directory inside the checkout")
 
     def _evaluate_candidate_argv(
         self,

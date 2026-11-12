@@ -82,8 +82,9 @@ fi
 fetch_pinned_commit() {
   local ref="$1"
   git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null && return 0
-  git -C "$root" fetch --quiet --no-tags --depth 1 origin "$ref" >/dev/null 2>&1 || return 1
-  git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null
+  # Serialized with every other fetch into this checkout (#2003); see
+  # node-workflow-pins.test.sh.
+  python3 "$here/shared_checkout_fetch.py" ensure-commit "$root" "$ref" >/dev/null 2>&1
 }
 
 read_pinned_generator() {
@@ -143,19 +144,29 @@ for pin in "${pins[@]}"; do
     fi
   done
 
+  # grep exits 1 for a mode that is absent and 2 for a file it cannot read, so
+  # only exit 1 is the semantic mode failure, and only on a mutant that was built.
   missing_mode="$generator_tmp/generator-$pin-missing-workflow.sh"
   awk '$0 != "  workflow)"' "$generator" >"$missing_mode"
-  if generator_supports_mode "$missing_mode" workflow; then
+  mode_status=0
+  generator_supports_mode "$missing_mode" workflow 2>/dev/null || mode_status=$?
+  if [ "$mode_status" -eq 0 ]; then
     fail "a generator missing the 'workflow' case was accepted"
-  else
+  elif [ "$mode_status" -eq 1 ] && [ -s "$missing_mode" ] && ! cmp -s "$generator" "$missing_mode"; then
     pass "a missing generator mode remains a semantic mode failure"
+  else
+    fail "a missing generator mode failed as something other than an absent mode (grep exit $mode_status)"
   fi
 
-  if read_pinned_generator 0000000000000000000000000000000000000000 \
-      "$generator_tmp/unreadable.sh" 2>/dev/null; then
+  # The destination is created before git runs, so an empty file beside a
+  # failed read shows that git, not the redirect, refused the source.
+  unreadable="$generator_tmp/unreadable.sh"
+  if read_pinned_generator 0000000000000000000000000000000000000000 "$unreadable" 2>/dev/null; then
     fail "an unreadable pinned generator was accepted"
-  else
+  elif [ -f "$unreadable" ] && [ ! -s "$unreadable" ]; then
     pass "an unreadable pinned generator remains a source-read failure"
+  else
+    fail "an unreadable pinned generator failed before git could read the source"
   fi
 
   mapfile -t changelog_floors < <(
@@ -179,7 +190,7 @@ for pin in "${pins[@]}"; do
         ancestry=true
         break
       fi
-      git -C "$root" fetch --quiet --no-tags --depth "$depth" origin "$pin" || break
+      python3 "$here/shared_checkout_fetch.py" deepen "$root" "$pin" "$depth" || break
     done
     if [ "$ancestry" = true ] || git -C "$root" merge-base --is-ancestor "$floor" "$pin" 2>/dev/null; then
       pass "recommended pin descends changelog capability floor ${floor:0:8}"

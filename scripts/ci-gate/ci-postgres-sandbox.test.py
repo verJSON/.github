@@ -68,6 +68,7 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 environment = os.environ.copy()
                 environment.update(
                     {
+                        "LC_ALL": "C",
                         "PATH": f"{bin_dir}:/usr/bin:/bin",
                         "RUNNER_TEMP": str(runner_temp),
                         "POSTGRES_STATE_FILE": str(runner_temp / expected_receipts[0]),
@@ -84,6 +85,10 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 )
 
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                # Only the stub's first failed cleanup may fail the step: no missing
+                # helper, no shell error, and a status of exactly 1.
+                self.assertEqual((result.returncode, result.stderr), (1, ""))
+                self.assertTrue(cleanup_marker.exists())
                 calls = cleanup_log.read_text(encoding="utf-8").splitlines()
                 for receipt in receipts:
                     self.assertEqual(
@@ -218,6 +223,22 @@ class PostgresSandboxProfileTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(
             'cls.primary_state_file = cls.runner_temp / "ci-postgres-sandbox-acceptance-state.json"',
+            acceptance_source,
+        )
+
+    def test_hosted_network_boundary_checks_host_listeners_before_the_candidate(self) -> None:
+        acceptance_source = Path(__file__).with_name(
+            "ci-postgres-sandbox-hosted-acceptance.test.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "    def _assert_network_boundary(self, state: dict[str, object]) -> None:\n"
+            "        scope = _sandbox_socket_scope(self._bubblewrap_command(state, []))\n"
+            "        _assert_no_host_distribution_tree_listeners(scope.host_trees)\n",
+            acceptance_source,
+        )
+        self.assertIn(
+            '"__DAEMON_ISOLATION_PROBE__", _daemon_isolation_probe_source(scope.unwalked)',
             acceptance_source,
         )
 
@@ -872,6 +893,8 @@ class PostgresSandboxProfileTests(unittest.TestCase):
             raise OSError("state write failed")
 
         faults = (
+            # Each fault names the exact OSError it injects, so a cleanup that
+            # replaced the cause with its own failure cannot pass.
             ("socket mkdir", lambda: patch.object(Path, "mkdir", new=fail_socket_mkdir)),
             ("socket chmod", lambda: patch.object(os, "chmod", new=fail_socket_chmod)),
             ("client mkdir", lambda: patch.object(Path, "mkdir", new=fail_client_mkdir)),
@@ -884,7 +907,7 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 runner = Path(directory)
                 state_file = runner / "ci-postgres-sandbox-state.json"
                 with fault(), patch.object(ci_postgres_sandbox, "_run_docker") as docker:
-                    with self.assertRaises(OSError):
+                    with self.assertRaisesRegex(OSError, f"^{label} failed$"):
                         ci_postgres_sandbox.provision_profile(
                             "postgres-17.11",
                             runner_temp=runner,

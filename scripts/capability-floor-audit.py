@@ -40,6 +40,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import shared_checkout_fetch  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$")
@@ -85,6 +89,11 @@ def _attempt_unshallow() -> bool:
     the check first, and only pay for a deepening fetch -- once -- when the
     checkout turns out to be shallow. Callers still fail closed with a typed
     `AuditError` if the retry after this doesn't resolve it.
+
+    Other actions-ci rows fetch into the same checkout concurrently, and git
+    aborts a shallow update another one raced (#2003), so the fetch goes
+    through `shared_checkout_fetch`, which also succeeds without fetching when
+    another row completed the history while this one waited.
     """
     global _unshallow_attempted
     if _unshallow_attempted:
@@ -92,12 +101,10 @@ def _attempt_unshallow() -> bool:
     _unshallow_attempted = True
     if not _is_shallow_repository():
         return False
-    result = subprocess.run(
-        ["git", "-C", str(ROOT), "fetch", "--no-tags", "--unshallow", "origin"],
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    try:
+        return shared_checkout_fetch.unshallow(ROOT, capture_output=True)
+    except shared_checkout_fetch.SharedCheckoutError as error:
+        raise AuditError(str(error)) from None
 
 
 def commit_exists(sha: str) -> bool:

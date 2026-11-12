@@ -4,4 +4,4 @@ id: 20261028T235500Z
 impact: patch
 title: Index active CI admission and release work
 ---
-Record the active admission, draft candidate, release selection, and source binding issues in the project guidance index.
+Record the active admission, draft candidate, release selection, and source binding issues in the project guidance index, and prune the closed #1696 entry.

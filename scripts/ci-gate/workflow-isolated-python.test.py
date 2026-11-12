@@ -110,7 +110,7 @@ RENDERED_WORKFLOWS = {
     "scripts/gen-gate-rearm-caller.sh": ((CONTRACT_REF,),),
     "scripts/gen-ai-review-caller.sh": ((CONTRACT_REF,),),
     "scripts/gen-ai-review-label-rearm-caller.sh": ((CONTRACT_REF,), ("--local",)),
-    "scripts/gen-ai-review-lifecycle-rearm-caller.sh": (("--local",),),
+    "scripts/gen-ai-review-lifecycle-rearm-caller.sh": ((CONTRACT_REF,), ("--local",)),
     "scripts/gen-renovate-compatibility-caller.sh": (
         (CONTRACT_REF, "@verjson/example", "1.2.3", "node"),
     ),

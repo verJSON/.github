@@ -61,6 +61,34 @@ every other property, fails if it is live-active or if an undeclared ruleset is
 disabled, and prints a `SUSPENDED:` line on every run. See ADR 0210's 2026-10-22
 amendment.
 
+## Actions-paused drift
+
+`scripts/actions-paused-drift.py` is the fail-closed check ADR 0252 requires
+while any repository is `verjson-actions-state=paused`. Its only ruleset IDs are
+in `config/actions-paused-drift-policy.json`, whose `source` is that ADR. It
+reads every repository carrying the property; one with no value is outside the
+ADR and is skipped. It reports drift (exit `1`) when:
+
+- a `paused` repository has Actions enabled
+  (`repos/{owner}/{repo}/actions/permissions` `.enabled`);
+- an `enabled` repository's default branch is still governed by the baseline
+  ruleset 26466984, or a `paused` one's is not, judged from the rules that apply
+  to that branch (`repos/{owner}/{repo}/rules/branches/{branch}`), or a `paused`
+  one's branch lacks any of the baseline's declared rule types
+  (`pull_request`, `non_fast_forward`, `deletion`);
+- a declared paused-only relaxation is not `evaluate` while its repository is
+  `paused`, or not `active` while it is `enabled`.
+
+The table lists the twelve rulesets ADR 0252 relaxed. temporal-kit's
+`temporal-kit-type-surface-required` (21564092) is deliberately absent: it was
+already `evaluate` before ADR 0252 (last changed 2026-08-29), so it is not a
+paused-only relaxation and re-enabling the repository does not restore it.
+
+Any failed read, unexpected response shape, unknown property value, or declared
+relaxation that no longer targets its repository exits `2`; drift already found
+is printed before that diagnosis. It issues only GETs.
+Retire it with the exclusion, once no repository is `paused`.
+
 ## Credential boundary
 
 As of 2026-08-15, the organization Actions secret-name inventory contains no

@@ -139,7 +139,7 @@ class NodeCiPythonHeredocsTest(unittest.TestCase):
                 wrapper = wrapper_assignment.value.value
                 self.assertIn("close_fds=True", wrapper)
                 self.assertIn("libc.prctl(4, 0", wrapper)
-                self.assertIn("os.waitpid(-1", wrapper)
+                self.assertIn("os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)", wrapper)
                 supervisor_calls = [
                     node
                     for node in ast.walk(tree)

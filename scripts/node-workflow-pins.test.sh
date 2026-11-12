@@ -106,8 +106,10 @@ ref_is_immutable() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 fetch_pinned_commit() {
   local ref="$1"
   git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null && return 0
-  git -C "$root" fetch --quiet --no-tags --depth 1 origin "$ref" >/dev/null 2>&1 || return 1
-  git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null
+  # Through the serializing helper: other actions-ci rows fetch into this
+  # checkout concurrently, and git aborts a shallow update another one raced
+  # (#2003). The helper re-checks presence under its lock.
+  python3 "$here/shared_checkout_fetch.py" ensure-commit "$root" "$ref" >/dev/null 2>&1
 }
 
 resolve_self_source() {

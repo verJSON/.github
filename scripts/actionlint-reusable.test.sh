@@ -142,9 +142,11 @@ workflow="${!#}"
 printf '%s\n' "$(basename "$workflow")" >>"$ACTIONLOG"
 case "$(basename "$workflow")" in
   valid.yml) exit 0 ;;
-  invalid-syntax.yml) exit "${PASS_INVALID_SYNTAX:-1}" ;;
-  invalid-expression.yml) exit "${PASS_INVALID_EXPRESSION:-1}" ;;
-  invalid-runner.yml) exit "${PASS_INVALID_RUNNER:-1}" ;;
+  # A rejection exits 3, not the step's own 1, so a propagated stub status
+  # cannot pass for the step's verdict.
+  invalid-syntax.yml) exit "${PASS_INVALID_SYNTAX:-3}" ;;
+  invalid-expression.yml) exit "${PASS_INVALID_EXPRESSION:-3}" ;;
+  invalid-runner.yml) exit "${PASS_INVALID_RUNNER:-3}" ;;
   *) exit 99 ;;
 esac
 SH
@@ -173,7 +175,8 @@ PASS_INVALID_SYNTAX=0
 export PASS_INVALID_SYNTAX
 run_behavior
 rc=$?
-[ "$rc" -ne 0 ] \
+[ "$rc" -eq 1 ] \
+  && grep -qxF '::error::actionlint accepted malformed workflow syntax' "$tmp/behavior.out" \
   && pass "accepted malformed syntax fails the behavior step" \
   || fail "behavior step passed when malformed syntax was accepted"
 unset PASS_INVALID_SYNTAX
@@ -182,7 +185,8 @@ PASS_INVALID_EXPRESSION=0
 export PASS_INVALID_EXPRESSION
 run_behavior
 rc=$?
-[ "$rc" -ne 0 ] \
+[ "$rc" -eq 1 ] \
+  && grep -qxF '::error::actionlint accepted an invalid workflow expression' "$tmp/behavior.out" \
   && pass "accepted invalid expression fails the behavior step" \
   || fail "behavior step passed when an invalid expression was accepted"
 unset PASS_INVALID_EXPRESSION
@@ -191,7 +195,8 @@ PASS_INVALID_RUNNER=0
 export PASS_INVALID_RUNNER
 run_behavior
 rc=$?
-[ "$rc" -ne 0 ] \
+[ "$rc" -eq 1 ] \
+  && grep -qxF '::error::actionlint accepted a runner label absent from the central policy' "$tmp/behavior.out" \
   && pass "accepted unknown runner label fails the behavior step" \
   || fail "behavior step passed when an unknown runner label was accepted"
 unset PASS_INVALID_RUNNER
