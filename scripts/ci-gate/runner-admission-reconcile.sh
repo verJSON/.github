@@ -29,6 +29,22 @@ die_undetermined() {
 command -v gh >/dev/null 2>&1 || die_undetermined "gh is not available"
 command -v jq >/dev/null 2>&1 || die_undetermined "jq is not available"
 
+# A failed validation's stderr is kept apart from its value: jq also writes
+# diagnostics when it succeeds, such as for a rejected earlier value in a
+# multi-value file, and those must never become part of the value.
+jq_stderr="$(mktemp)" || die_undetermined "could not create a temporary file for jq diagnostics"
+trap 'rm -f "$jq_stderr"' EXIT
+
+# The first line of a failed validation's stderr, without jq's
+# "jq: error (at ...): " prefix: for the checks below, the reason their error()
+# raised. A failure that wrote nothing is reported as such, never as a blank.
+jq_reason() {
+  local first_line=''
+  IFS= read -r first_line <"$jq_stderr" || true
+  [ -n "$first_line" ] || first_line='jq reported no reason'
+  printf '%s\n' "${first_line#jq: error (at *): }"
+}
+
 fetch() {
   local path="$1" jq_expr="$2" out
   if ! out="$(gh api --paginate "$path" --jq "$jq_expr" 2>&1)"; then
@@ -46,24 +62,26 @@ fetch() {
 # an organization-variable edit beside the setting this check governs.
 [ -r "$larger_runner_allowlist_file" ] \
   || die_undetermined "larger-runner allowlist is unreadable: $larger_runner_allowlist_file"
-larger_runner_allowlist="$(jq -ce '
-  if (type == "array"
-    and all(.[];
-      type == "object"
-      and keys == ["id", "name"]
-      and (.id | type) == "number"
-      and .id > 0
-      and .id == (.id | floor)
-      and (.name | type) == "string"
-      and (.name | test("\\S")))
-    and (map(.id) | length) == (map(.id) | unique | length)
-    and (map(.name | ascii_downcase) | length)
-      == (map(.name | ascii_downcase) | unique | length))
-  then .
-  else error("invalid allowlist")
+# Each predicate raises its own reason, so a rejection says which one held.
+if ! larger_runner_allowlist="$(jq -ce '
+  if type != "array" then error("not an array")
+  elif any(.[]; type != "object" or keys != ["id", "name"])
+  then error("an entry is not an exact id/name object")
+  elif any(.[];
+    (.id | type) != "number" or .id <= 0 or .id != (.id | floor))
+  then error("an id is not a positive integer")
+  elif any(.[]; (.name | type) != "string" or (.name | test("\\S") | not))
+  then error("a name is blank")
+  elif (map(.id) | length) != (map(.id) | unique | length)
+  then error("an id is duplicated")
+  elif (map(.name | ascii_downcase) | length)
+    != (map(.name | ascii_downcase) | unique | length)
+  then error("a name is duplicated")
+  else .
   end
-' "$larger_runner_allowlist_file" 2>/dev/null)" \
-  || die_undetermined "larger-runner allowlist must contain exact id/name objects with unique ids and names"
+' "$larger_runner_allowlist_file" 2>"$jq_stderr")"; then
+  die_undetermined "larger-runner allowlist must contain exact id/name objects with unique ids and names: $(jq_reason)"
+fi
 
 # Keep whole page objects until local validation. A server-side `.runners[]`
 # projection can erase a missing collection into an empty stream; an unreadable
@@ -101,8 +119,8 @@ if ! larger_runners="$(jq -cse '
       else $runners | map({id, name})
       end
   end
-' <<<"$larger_runner_pages" 2>/dev/null)"; then
-  die_undetermined "GitHub-hosted larger-runner inventory response was malformed, incomplete, or pagination-inconsistent"
+' <<<"$larger_runner_pages" 2>"$jq_stderr")"; then
+  die_undetermined "GitHub-hosted larger-runner inventory response was malformed, incomplete, or pagination-inconsistent: $(jq_reason)"
 fi
 
 unapproved_larger_runners="$(jq -c --argjson allowed "$larger_runner_allowlist" '

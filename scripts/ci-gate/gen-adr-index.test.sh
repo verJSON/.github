@@ -30,6 +30,19 @@ new_fixture() {
 # adr <root> <slug> <h1> <date>
 adr() { mkdir -p "$1/docs/decisions/$2"; printf '# %s\n\n- **Date:** %s\n' "$3" "$4" > "$1/docs/decisions/$2/README.md"; }
 gen() { local fixture="$1"; shift; bash "$fixture/scripts/gen-adr-index.sh" "$@" >/dev/null 2>&1; }
+# Every refusal is exit 1 with its own `gen-adr-index:` line; a crash or another
+# check is nonzero too, so the line is what names the guard. Returns 0 only for
+# that refusal, 1 when the script succeeded, and 2 for any other failure.
+gen_refuses() { # gen_refuses <stderr line> <fixture> [args...]
+  local reason="$1" fixture="$2" status=0
+  shift 2
+  LC_ALL=C bash "$fixture/scripts/gen-adr-index.sh" "$@" >/dev/null 2>"$fixture/refusal.err" || status=$?
+  [ "$status" -ne 0 ] || return 1
+  [ "$status" -eq 1 ] && grep -qxF -- "gen-adr-index: $reason" "$fixture/refusal.err" && return 0
+  printf 'diag - exit %s, expected 1 with: gen-adr-index: %s\n' "$status" "$reason"
+  sed 's/^/diag - /' "$fixture/refusal.err"
+  return 2
+}
 
 # 1. Happy path: valid ADRs generate a reverse-sorted table; --check then passes.
 d="$(new_fixture)"
@@ -299,38 +312,47 @@ else
 fi
 # 2. ADR directory with no README -> fail fast.
 d="$(new_fixture)"; mkdir -p "$d/docs/decisions/0001-noreadme"
-gen "$d" && fail "an ADR dir without README must fail" || pass "ADR dir without README fails fast"
+gen_refuses '0001-noreadme/ has no README.md — an ADR directory must contain one' "$d" \
+  && pass "ADR dir without README fails fast" || fail "an ADR dir without README must fail"
 
 # 3. Malformed ADR (missing **Date:**) -> fail fast.
 d="$(new_fixture)"; mkdir -p "$d/docs/decisions/0001-nodate"
 printf '# 0001 — No Date\n\n(no date line here)\n' > "$d/docs/decisions/0001-nodate/README.md"
-gen "$d" && fail "missing **Date:** must fail" || pass "missing **Date:** fails fast"
+gen_refuses "0001-nodate/README.md missing an '# NNNN — Title' H1 or '- **Date:**' line" "$d" \
+  && pass "missing **Date:** fails fast" || fail "missing **Date:** must fail"
 
 # 4. Malformed **Date:** value -> fail fast.
 d="$(new_fixture)"
 adr "$d" "0001-bad-date" "0001 — Bad Date" "July 1, 2026"
-gen "$d" && fail "malformed **Date:** must fail (#78)" || pass "malformed **Date:** fails fast (#78)"
+gen_refuses "0001-bad-date/README.md has invalid date 'July 1, 2026' — expected a valid YYYY-MM-DD calendar date" "$d" \
+  && pass "malformed **Date:** fails fast (#78)" || fail "malformed **Date:** must fail (#78)"
 
 # 5. ISO-shaped but impossible dates -> fail fast; leap-day boundaries matter.
 d="$(new_fixture)"
 adr "$d" "0001-bad-day" "0001 — Bad Day" "2026-02-30"
-gen "$d" && fail "impossible calendar date must fail (#78)" || pass "impossible calendar date fails fast (#78)"
+gen_refuses "0001-bad-day/README.md has invalid date '2026-02-30' — expected a valid YYYY-MM-DD calendar date" "$d" \
+  && pass "impossible calendar date fails fast (#78)" || fail "impossible calendar date must fail (#78)"
 
 d="$(new_fixture)"
 adr "$d" "0001-non-leap" "0001 — Non Leap" "2025-02-29"
-gen "$d" && fail "non-leap February 29 must fail (#78)" || pass "non-leap February 29 fails fast (#78)"
+gen_refuses "0001-non-leap/README.md has invalid date '2025-02-29' — expected a valid YYYY-MM-DD calendar date" "$d" \
+  && pass "non-leap February 29 fails fast (#78)" || fail "non-leap February 29 must fail (#78)"
 
 # 6. Index README missing the markers -> fail fast.
 d="$(new_fixture)"; printf '# Decisions\n(no markers)\n' > "$d/docs/decisions/README.md"
 adr "$d" "0001-x" "0001 — X" "2026-07-01"
-gen "$d" && fail "missing index markers must fail" || pass "missing index markers fails fast"
+gen_refuses "both markers '<!-- BEGIN ADR INDEX -->' and '<!-- END ADR INDEX -->' must be present in $d/docs/decisions/README.md" "$d" \
+  && pass "missing index markers fails fast" || fail "missing index markers must fail"
 
 for missing_marker in BEGIN END; do
   d="$(new_fixture)"
   adr "$d" "0001-x" "0001 — X" "2026-07-01"
   sed -i "/<!-- $missing_marker ADR INDEX -->/d" "$d/docs/decisions/README.md"
   before="$(cat "$d/docs/decisions/README.md")"
-  if gen "$d"; then
+  marker_status=0
+  gen_refuses "both markers '<!-- BEGIN ADR INDEX -->' and '<!-- END ADR INDEX -->' must be present in $d/docs/decisions/README.md" "$d" \
+    || marker_status=$?
+  if [ "$marker_status" -ne 0 ]; then
     fail "missing $missing_marker marker must fail"
   elif [ "$(cat "$d/docs/decisions/README.md")" != "$before" ]; then
     fail "missing $missing_marker marker modified the index"
@@ -342,7 +364,8 @@ done
 # 7. --check detects a stale table (new ADR added without regenerating).
 d="$(new_fixture)"; adr "$d" "0001-x" "0001 — X" "2026-07-01"; gen "$d"
 adr "$d" "0002-y" "0002 — Y" "2026-07-02"
-gen "$d" --check && fail "--check must detect a stale table" || pass "--check detects a stale table"
+gen_refuses 'docs/decisions/README.md is stale — run scripts/gen-adr-index.sh and commit.' "$d" --check \
+  && pass "--check detects a stale table" || fail "--check must detect a stale table"
 
 # 8. Different slugs cannot reuse one durable ADR number. Both conflicting
 # paths must be actionable, and a failed generation must not rewrite the index.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import importlib.util
 import json
 import subprocess
 import sys
@@ -7,6 +8,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKED_IN_POLICY = ROOT / "config/org-ruleset-conformance-policy.json"
+# ADR 0252's paused state is read only through the drift check that owns it.
+_PAUSED_SPEC = importlib.util.spec_from_file_location(
+    "actions_paused_drift", ROOT / "scripts/actions-paused-drift.py"
+)
+PAUSED = importlib.util.module_from_spec(_PAUSED_SPEC)
+_PAUSED_SPEC.loader.exec_module(PAUSED)
 
 
 class AuditDataError(Exception):
@@ -501,6 +508,17 @@ def is_exact_bypassless_required_workflow(ruleset: dict, exceptions: list[dict])
     )
 
 
+def paused_evaluate_acceptance(ruleset: dict, exceptions: list[dict]):
+    """ADR 0252: a bypassless exception at `evaluate` differs from its image only there."""
+    if ruleset["enforcement"] != "evaluate" or not is_exact_bypassless_required_workflow(
+        {**ruleset, "enforcement": "active"}, exceptions
+    ):
+        return None
+    return PAUSED.accept_paused_evaluate(
+        ruleset["id"], ruleset["conditions"]["repository_id"]["repository_ids"]
+    )
+
+
 def producer_binding_findings(ruleset: dict, producer_app_id: int):
     """Required contexts an App other than the declared producer could satisfy."""
     findings = []
@@ -522,8 +540,11 @@ def producer_binding_findings(ruleset: dict, producer_app_id: int):
     return findings
 
 
-def bypass_contract_findings(rulesets: list[dict], contracts: list[dict]):
-    """Require every non-empty bypass list to match one reviewed actor image."""
+def bypass_contract_findings(rulesets: list[dict], contracts: list[dict], derived_ids=frozenset()):
+    """Require every non-empty bypass list to match one reviewed actor image.
+
+    A ruleset in derived_ids is reviewed against a derived image by its own check.
+    """
     live_by_id = {ruleset["id"]: ruleset for ruleset in rulesets}
     contracts_by_id = {
         contract["ruleset_id"]: contract
@@ -559,7 +580,7 @@ def bypass_contract_findings(rulesets: list[dict], contracts: list[dict]):
             findings.append(f"{label}: bypass actors differ from the reviewed contract")
 
     for ruleset in rulesets:
-        if not ruleset["bypass_actors"]:
+        if not ruleset["bypass_actors"] or ruleset["id"] in derived_ids:
             continue
         contract = contracts_by_id.get(ruleset["id"]) or name_keyed.get(ruleset["name"])
         if contract is None or contract["name"] != ruleset["name"]:
@@ -568,6 +589,89 @@ def bypass_contract_findings(rulesets: list[dict], contracts: list[dict]):
                 "by a reviewed contract"
             )
     return findings
+
+
+def is_paused_baseline_rules(rules: list[dict], rule_types: frozenset):
+    """ADR 0252's stand-in rules: each declared type once, a pull request with no approvals."""
+    rules_by_type = {}
+    for rule in rules:
+        rules_by_type.setdefault(rule["type"], []).append(rule)
+    if (
+        "pull_request" not in rule_types
+        or set(rules_by_type) != rule_types
+        or any(len(matching) != 1 for matching in rules_by_type.values())
+    ):
+        return False
+    if any(rules_by_type[rule_type] != [{"type": rule_type}] for rule_type in rule_types - {"pull_request"}):
+        return False
+    [pull_request] = rules_by_type["pull_request"]
+    parameters = pull_request.get("parameters")
+    approvals = parameters.get("required_approving_review_count") if isinstance(parameters, dict) else None
+    return set(pull_request) == {"type", "parameters"} and type(approvals) is int and approvals == 0
+
+
+def paused_baseline_conditions(property_name: str):
+    return {
+        "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
+        "repository_property": {
+            "include": [{"name": property_name, "property_values": ["paused"], "source": "custom"}],
+            "exclude": [],
+        },
+    }
+
+
+def paused_baseline_review(rulesets: list[dict], contracts: list[dict], paused_policy: dict):
+    """ADR 0252's stand-in carries a reviewed contract's bypass actors, never its own.
+
+    Returns the findings and, when there are none, the acceptance to report.
+    """
+    baseline = next(
+        (ruleset for ruleset in rulesets if ruleset["id"] == paused_policy["baseline_ruleset_id"]),
+        None,
+    )
+    if baseline is None:
+        return [], None
+    label = f"{baseline['name']} ({baseline['id']})"
+    reference_id = paused_policy["baseline_bypass_contract_ruleset_id"]
+    reference = next(
+        (contract for contract in contracts if contract["ruleset_id"] == reference_id), None
+    )
+    if reference is None:
+        return [
+            f"{label}: bypass actors are not covered by a reviewed contract; ADR 0252 "
+            f"derives them from contract {reference_id}, which is absent"
+        ], None
+    findings = []
+    if canonical_bypass_actors(baseline["bypass_actors"]) != canonical_bypass_actors(
+        reference["bypass_actors"]
+    ):
+        findings.append(
+            f"{label}: bypass actors differ from the reviewed {reference['name']} "
+            f"({reference['ruleset_id']}) contract (ADR 0252)"
+        )
+    if baseline["enforcement"] != "active":
+        findings.append(
+            f"{label}: enforcement is {baseline['enforcement']}, "
+            "but ADR 0252's baseline protection must be active"
+        )
+    if baseline["target"] != "branch" or baseline["conditions"] != paused_baseline_conditions(
+        paused_policy["property"]
+    ):
+        findings.append(
+            f"{label}: target differs from ADR 0252's ~DEFAULT_BRANCH of "
+            f"{paused_policy['property']}=paused repositories"
+        )
+    if not is_paused_baseline_rules(baseline["rules"], paused_policy["baseline_rule_types"]):
+        findings.append(
+            f"{label}: rules differ from ADR 0252's pull_request with 0 approvals, "
+            "non_fast_forward and deletion"
+        )
+    if findings:
+        return findings, None
+    return [], (
+        f"{label} matches ADR 0252 with the bypass actors of the reviewed "
+        f"{reference['name']} ({reference['ruleset_id']}) contract"
+    )
 
 
 def canonical_bypass_actors(actors: list[dict]):
@@ -594,30 +698,51 @@ def main(arguments: list[str] | None = None) -> int:
             bypassless_exceptions,
             bypass_contracts,
         ) = read_policy(policy)
+        paused_policy = PAUSED.read_policy(PAUSED.CHECKED_IN_POLICY)
         ruleset_ids = list_ruleset_ids(organization)
         rulesets = [read_ruleset(organization, ruleset_id) for ruleset_id in ruleset_ids]
-    except (OSError, AuditDataError, RuntimeError) as error:
+    except (OSError, AuditDataError, PAUSED.AuditDataError, RuntimeError) as error:
         print(f"ERROR: cannot establish organization ruleset state: {error}", file=sys.stderr)
         return 2
 
     default_branch_token_rulesets = [
         ruleset for ruleset in rulesets if targets_default_branch_token(ruleset)
     ]
-    failures = [
-        ruleset
-        for ruleset in default_branch_token_rulesets
-        if not has_expected_actor(ruleset, expected_actor)
-        and not is_exact_bypassless_required_workflow(
+    failures = []
+    paused_acceptances = []
+    paused_refusals = []
+    unestablished = []
+    for ruleset in default_branch_token_rulesets:
+        if has_expected_actor(ruleset, expected_actor) or is_exact_bypassless_required_workflow(
             ruleset, bypassless_exceptions
-        )
-    ]
+        ):
+            continue
+        try:
+            acceptance = paused_evaluate_acceptance(ruleset, bypassless_exceptions)
+        except PAUSED.PausedRelaxationRefused as refusal:
+            paused_refusals.append((ruleset, str(refusal)))
+            continue
+        except PAUSED.PausedStateUnreadable as error:
+            unestablished.append((ruleset, str(error)))
+            continue
+        if acceptance is None:
+            failures.append(ruleset)
+        else:
+            paused_acceptances.append((ruleset, acceptance))
     unbound = [
         (ruleset, context, diagnostic)
         for ruleset in rulesets
         for context, diagnostic in producer_binding_findings(ruleset, producer_app_id)
     ]
-    bypass_findings = bypass_contract_findings(rulesets, bypass_contracts)
-    if failures or unbound or bypass_findings:
+    baseline_findings, baseline_acceptance = paused_baseline_review(
+        rulesets, bypass_contracts, paused_policy
+    )
+    bypass_findings = baseline_findings + bypass_contract_findings(
+        rulesets, bypass_contracts, frozenset({paused_policy["baseline_ruleset_id"]})
+    )
+    if failures or paused_refusals or unbound or bypass_findings or unestablished:
+        for ruleset, refusal in paused_refusals:
+            print(f"ERROR: {ruleset['name']} ({ruleset['id']}): {refusal}", file=sys.stderr)
         for ruleset in failures:
             print(
                 f"ERROR: {ruleset['name']} ({ruleset['id']}): "
@@ -632,8 +757,19 @@ def main(arguments: list[str] | None = None) -> int:
             )
         for finding in bypass_findings:
             print(f"ERROR: {finding}", file=sys.stderr)
-        return 1
+        # Findings above are still reported; an unread paused state makes the verdict unknown.
+        for ruleset, error in unestablished:
+            print(
+                f"ERROR: cannot establish organization ruleset state: "
+                f"{ruleset['name']} ({ruleset['id']}): {error}",
+                file=sys.stderr,
+            )
+        return 2 if unestablished else 1
 
+    for ruleset, acceptance in paused_acceptances:
+        print(f"paused-relaxation=accepted {ruleset['name']} ({ruleset['id']}) {acceptance}")
+    if baseline_acceptance is not None:
+        print(f"paused-baseline=accepted {baseline_acceptance}")
     print(
         f"ruleset-policy=conformant organization={organization} "
         f"rulesets={len(rulesets)} "

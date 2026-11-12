@@ -54,6 +54,75 @@ def ruleset(
     }
 
 
+def actions_state_responses(repositories):
+    """The ADR 0252 paused-state reads, for repositories mapped to (id, verjson-actions-state)."""
+    return {
+        "orgs/Verjson/repos?type=all&per_page=100": [[
+            {"id": repository_id, "name": name, "default_branch": "main"}
+            for name, (repository_id, _) in repositories.items()
+        ]],
+        "orgs/Verjson/properties/values?per_page=100": [[
+            {
+                "repository_id": repository_id,
+                "repository_name": name,
+                "properties": [{"property_name": "verjson-actions-state", "value": state}],
+            }
+            for name, (repository_id, state) in repositories.items()
+        ]],
+    }
+
+
+CORE_CHECKS_NODE_BYPASS = [
+    {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},
+    {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+    {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"},
+]
+
+
+def paused_baseline():
+    """The live image of ADR 0252's stand-in baseline ruleset 26466984 (2026-11-03)."""
+    return {
+        "id": 26466984,
+        "name": "actions-paused-baseline-protection",
+        "source_type": "Organization",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": copy.deepcopy(CORE_CHECKS_NODE_BYPASS),
+        "conditions": {
+            "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]},
+            "repository_property": {
+                "exclude": [],
+                "include": [{
+                    "name": "verjson-actions-state",
+                    "property_values": ["paused"],
+                    "source": "custom",
+                }],
+            },
+        },
+        "rules": [
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "allowed_merge_methods": ["merge", "squash", "rebase"],
+                    "dismiss_stale_reviews_on_push": False,
+                    "require_code_owner_review": False,
+                    "require_extra_approval_for_unattributed_changes": True,
+                    "require_last_push_approval": False,
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": False,
+                    "required_reviewers": [],
+                },
+            },
+            {"type": "non_fast_forward"},
+            {"type": "deletion"},
+        ],
+    }
+
+
+CLI_PROJECTS = "verjson-cli-projects"
+CLI_PROJECTS_ID = 1277452690
+
+
 class OrgRulesetConformanceTest(unittest.TestCase):
     def run_audit(
         self,
@@ -65,6 +134,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         use_test_policy=True,
         inherited_policy=None,
         extra_arguments=None,
+        extra_responses=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -120,6 +190,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             responses.update(
                 {f"orgs/Verjson/rulesets/{ruleset_id}": [detail] for ruleset_id, detail in details.items()}
             )
+            responses.update(extra_responses or {})
             env = os.environ | {
                 "PATH": f"{temp}:{os.environ['PATH']}",
                 "RESPONSES": json.dumps(responses),
@@ -468,6 +539,280 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def run_cli_projects_at_evaluate(self, detail=None, *, state="paused", **options):
+        detail = detail or self.cli_projects_required_workflow()
+        detail["enforcement"] = "evaluate"
+        options.setdefault("extra_responses", actions_state_responses({CLI_PROJECTS: (CLI_PROJECTS_ID, state)}))
+        return self.run_audit(
+            [[{"id": detail["id"]}]],
+            {detail["id"]: detail},
+            raw_policy=self.committed_policy_without_bypass_contracts(),
+            **options,
+        )
+
+    def test_recorded_relaxation_at_evaluate_is_accepted_while_its_repository_is_paused(self):
+        result, _ = self.run_cli_projects_at_evaluate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(
+            "paused-relaxation=accepted cli-projects-package-surface-required-workflow (21830367) "
+            "enforcement=evaluate while verjson-cli-projects is verjson-actions-state=paused (ADR 0252)",
+            result.stdout,
+        )
+
+    def test_recorded_relaxation_at_evaluate_is_refused_once_its_repository_is_enabled(self):
+        result, _ = self.run_cli_projects_at_evaluate(state="enabled")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: cli-projects-package-surface-required-workflow (21830367): enforcement is "
+            "evaluate but verjson-cli-projects is verjson-actions-state=enabled; "
+            "restore enforcement to active (ADR 0252)",
+            result.stderr,
+        )
+
+    def test_recorded_relaxation_at_evaluate_is_unestablished_when_its_repository_state_is_unreadable(self):
+        # An outage is not drift: advising a restore here would re-block paused repositories.
+        result, _ = self.run_cli_projects_at_evaluate(
+            failing_paths=["orgs/Verjson/properties/values?per_page=100"]
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertEqual(
+            "ERROR: cannot establish organization ruleset state: "
+            "cli-projects-package-surface-required-workflow (21830367): enforcement is "
+            "evaluate but verjson-actions-state of verjson-cli-projects cannot be read "
+            "(GitHub API read failed for orgs/Verjson/properties/values?per_page=100)\n",
+            result.stderr,
+        )
+
+    def test_drift_beside_an_unestablished_paused_state_is_reported_and_the_verdict_is_unknown(self):
+        # An unread paused state must neither hide a finding the audit did establish
+        # nor let that finding's exit 1 claim the verdict is known.
+        unreadable = self.cli_projects_required_workflow()
+        unreadable["enforcement"] = "evaluate"
+        drift = ruleset(
+            20515822,
+            name="core-checks-actions",
+            bypass_actors=[
+                {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}
+            ],
+        )
+
+        result, _ = self.run_audit(
+            [[{"id": unreadable["id"]}, {"id": drift["id"]}]],
+            {unreadable["id"]: unreadable, drift["id"]: drift},
+            raw_policy=self.committed_policy_without_bypass_contracts(),
+            failing_paths=["orgs/Verjson/properties/values?per_page=100"],
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: core-checks-actions (20515822): required release authorization bypass is absent",
+            result.stderr,
+        )
+        self.assertIn(
+            "ERROR: cannot establish organization ruleset state: "
+            "cli-projects-package-surface-required-workflow (21830367)",
+            result.stderr,
+        )
+        self.assertNotIn("ruleset-policy=conformant", result.stdout)
+
+    def test_recorded_relaxation_at_evaluate_is_refused_when_its_repository_has_no_actions_state(self):
+        result, _ = self.run_cli_projects_at_evaluate(state=None)
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: cli-projects-package-surface-required-workflow (21830367): enforcement is "
+            "evaluate but verjson-cli-projects has no verjson-actions-state value; "
+            "restore enforcement to active (ADR 0252)",
+            result.stderr,
+        )
+
+    def test_unrecorded_ruleset_at_evaluate_is_refused(self):
+        detail = self.cli_projects_required_workflow()
+        detail["id"] = 99
+
+        result, _ = self.run_cli_projects_at_evaluate(detail)
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: cli-projects-package-surface-required-workflow (99): enforcement is "
+            "evaluate but ADR 0252 records no paused-only relaxation for this ruleset; "
+            "restore enforcement to active (ADR 0252)",
+            result.stderr,
+        )
+
+    def test_relaxation_at_evaluate_is_refused_when_its_target_is_not_the_recorded_repository(self):
+        # The paused property read must be the targeted repository's, not a namesake's.
+        result, _ = self.run_cli_projects_at_evaluate(
+            extra_responses=actions_state_responses({CLI_PROJECTS: (5, "paused")})
+        )
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: cli-projects-package-surface-required-workflow (21830367): enforcement is "
+            f"evaluate but it targets [{CLI_PROJECTS_ID}], not exactly verjson-cli-projects (5); "
+            "restore enforcement to active (ADR 0252)",
+            result.stderr,
+        )
+
+    def test_relaxation_at_evaluate_with_any_other_drift_is_still_refused(self):
+        detail = self.cli_projects_required_workflow()
+        detail["rules"][0]["parameters"]["workflows"][0]["ref"] = "refs/heads/unreviewed"
+
+        result, _ = self.run_cli_projects_at_evaluate(detail)
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: cli-projects-package-surface-required-workflow (21830367): "
+            "required release authorization bypass is absent",
+            result.stderr,
+        )
+        self.assertNotIn("paused-relaxation=accepted", result.stdout)
+
+    def run_with_paused_baseline(self, baseline):
+        """Audit the stand-in beside core-checks-node, the only reviewed contract present."""
+        core_checks_node = ruleset(
+            20515817, name="core-checks-node", bypass_actors=copy.deepcopy(CORE_CHECKS_NODE_BYPASS)
+        )
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        policy["bypass_actor_contracts"] = [
+            contract
+            for contract in policy["bypass_actor_contracts"]
+            if contract["ruleset_id"] == 20515817
+        ]
+        return self.run_audit(
+            [[{"id": 20515817}, {"id": baseline["id"]}]],
+            {20515817: core_checks_node, baseline["id"]: baseline},
+            raw_policy=json.dumps(policy),
+        )
+
+    def test_paused_baseline_with_the_reviewed_core_checks_bypass_set_is_accepted(self):
+        result, _ = self.run_with_paused_baseline(paused_baseline())
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(
+            "paused-baseline=accepted actions-paused-baseline-protection (26466984) matches "
+            "ADR 0252 with the bypass actors of the reviewed core-checks-node (20515817) contract",
+            result.stdout,
+        )
+
+    def test_paused_baseline_with_an_extra_or_altered_bypass_actor_is_refused(self):
+        renovate = {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"}
+        mutations = {
+            "extra actor": lambda actors: actors.append(renovate),
+            "altered mode": lambda actors: actors[1].update(bypass_mode="pull_request"),
+            "missing actor": lambda actors: actors.pop(),
+        }
+        for name, mutate in mutations.items():
+            baseline = paused_baseline()
+            mutate(baseline["bypass_actors"])
+            with self.subTest(name):
+                result, _ = self.run_with_paused_baseline(baseline)
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn(
+                    "ERROR: actions-paused-baseline-protection (26466984): bypass actors differ "
+                    "from the reviewed core-checks-node (20515817) contract (ADR 0252)",
+                    result.stderr,
+                )
+
+    def test_paused_baseline_with_any_other_rule_is_refused(self):
+        def pull_request(rules):
+            return rules[0]["parameters"]
+
+        mutations = {
+            "extra rule": lambda rules: rules.append({"type": "required_linear_history"}),
+            "missing rule": lambda rules: rules.pop(),
+            "duplicated rule": lambda rules: rules.append(copy.deepcopy(rules[0])),
+            "approvals required": lambda rules: pull_request(rules).update(
+                required_approving_review_count=1
+            ),
+            "parameterized deletion": lambda rules: rules[2].update(parameters={}),
+            "extra pull_request key": lambda rules: rules[0].update(conditions={}),
+            "boolean approvals": lambda rules: pull_request(rules).update(
+                required_approving_review_count=False
+            ),
+        }
+        for name, mutate in mutations.items():
+            baseline = paused_baseline()
+            mutate(baseline["rules"])
+            with self.subTest(name):
+                result, _ = self.run_with_paused_baseline(baseline)
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn(
+                    "ERROR: actions-paused-baseline-protection (26466984): rules differ from "
+                    "ADR 0252's pull_request with 0 approvals, non_fast_forward and deletion",
+                    result.stderr,
+                )
+
+    def test_paused_baseline_with_any_other_target_is_refused(self):
+        def property_condition(conditions):
+            return conditions["repository_property"]["include"][0]
+
+        mutations = {
+            "another branch": lambda c: c["ref_name"]["include"].append("refs/heads/develop"),
+            "branch exclusion": lambda c: c["ref_name"]["exclude"].append("~DEFAULT_BRANCH"),
+            "enabled repositories": lambda c: property_condition(c).update(
+                property_values=["paused", "enabled"]
+            ),
+            "another property": lambda c: property_condition(c).update(name="verjson-core-checks"),
+            "repository exclusion": lambda c: c["repository_property"]["exclude"].append(
+                {"name": "verjson-actions-state", "property_values": ["paused"], "source": "custom"}
+            ),
+            "all repositories": lambda c: c.update(
+                repository_name={"include": ["~ALL"], "exclude": []}
+            ),
+            "tag target": lambda c: None,
+        }
+        for name, mutate in mutations.items():
+            baseline = paused_baseline()
+            mutate(baseline["conditions"])
+            if name == "tag target":
+                baseline["target"] = "tag"
+            with self.subTest(name):
+                result, _ = self.run_with_paused_baseline(baseline)
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn(
+                    "ERROR: actions-paused-baseline-protection (26466984): target differs from "
+                    "ADR 0252's ~DEFAULT_BRANCH of verjson-actions-state=paused repositories",
+                    result.stderr,
+                )
+
+    def test_paused_baseline_that_is_not_enforced_is_refused(self):
+        for enforcement in ("evaluate", "disabled"):
+            baseline = paused_baseline()
+            baseline["enforcement"] = enforcement
+            with self.subTest(enforcement):
+                result, _ = self.run_with_paused_baseline(baseline)
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn(
+                    f"ERROR: actions-paused-baseline-protection (26466984): enforcement is "
+                    f"{enforcement}, but ADR 0252's baseline protection must be active",
+                    result.stderr,
+                )
+
+    def test_paused_baseline_without_its_reference_contract_is_refused(self):
+        baseline = paused_baseline()
+
+        result, _ = self.run_audit(
+            [[{"id": baseline["id"]}]],
+            {baseline["id"]: baseline},
+            raw_policy=self.committed_policy_without_bypass_contracts(),
+        )
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: actions-paused-baseline-protection (26466984): bypass actors are not "
+            "covered by a reviewed contract; ADR 0252 derives them from contract 20515817, "
+            "which is absent",
+            result.stderr,
+        )
 
     def cli_projects_exception(self, policy):
         [entry] = [

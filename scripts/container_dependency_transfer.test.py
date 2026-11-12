@@ -22,6 +22,18 @@ class ContainerDependencyTransferTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.directory.cleanup()
 
+    def assertRefused(self, result: subprocess.CompletedProcess, reason: str) -> None:
+        self.assertEqual((1, f"dependency transfer failed: {reason}\n"), (result.returncode, result.stderr))
+
+    def assertExtractionRefused(self, result: subprocess.CompletedProcess, member: str) -> None:
+        # The tail is CPython's tarfile filter wording; pin only this script's prefix and the verdict.
+        self.assertEqual(1, result.returncode)
+        self.assertTrue(
+            result.stderr.startswith(f"dependency transfer failed: dependency archive extraction failed: {member!r} "),
+            result.stderr,
+        )
+        self.assertIn("outside the destination", result.stderr)
+
     def run_transfer(self, operation: str, source: Path, destination: Path, key: str | None = None):
         environment = os.environ.copy()
         if key is not None:
@@ -59,6 +71,7 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         decrypted = self.run_transfer("decrypt", self.encrypted, self.decrypted, "cd" * 32)
 
         self.assertNotEqual(0, decrypted.returncode)
+        self.assertRefused(decrypted, "encrypted dependency transfer authentication failed")
         self.assertFalse(self.decrypted.exists())
 
     def test_tampered_ciphertext_fails_before_plaintext_is_written(self) -> None:
@@ -70,6 +83,7 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         decrypted = self.run_transfer("decrypt", self.encrypted, self.decrypted, self.key)
 
         self.assertNotEqual(0, decrypted.returncode)
+        self.assertRefused(decrypted, "encrypted dependency transfer authentication failed")
         self.assertFalse(self.decrypted.exists())
 
     def test_destination_is_never_overwritten(self) -> None:
@@ -78,12 +92,15 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         encrypted = self.run_transfer("encrypt", self.source, self.encrypted, self.key)
 
         self.assertNotEqual(0, encrypted.returncode)
+        self.assertIn("transfer destination already exists", encrypted.stderr)
         self.assertEqual("preserve", self.encrypted.read_text(encoding="utf-8"))
 
     def test_invalid_key_is_rejected(self) -> None:
-        encrypted = self.run_transfer("encrypt", self.source, self.encrypted, "not-a-key")
+        # Uppercase hex still decodes, so only the key-format check rejects it (#1995).
+        encrypted = self.run_transfer("encrypt", self.source, self.encrypted, "AB" * 32)
 
         self.assertNotEqual(0, encrypted.returncode)
+        self.assertIn("TRANSFER_KEY must be 32 random bytes encoded as lowercase hex", encrypted.stderr)
         self.assertFalse(self.encrypted.exists())
 
     def _encrypted_archive(self, member_name: str = "node_modules/private-package.js") -> Path:
@@ -123,6 +140,7 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         result = self.run_transfer("restore-tar", encrypted_archive, destination, self.key)
 
         self.assertNotEqual(0, result.returncode)
+        self.assertRefused(result, "encrypted dependency transfer authentication failed")
         self.assertFalse(destination.exists())
         self.assertEqual([], list(self.root.glob(".dependency-restore-*")))
 
@@ -133,6 +151,7 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         result = self.run_transfer("restore-tar", encrypted_archive, destination, self.key)
 
         self.assertNotEqual(0, result.returncode)
+        self.assertExtractionRefused(result, "../escaped-package.js")
         self.assertFalse(destination.exists())
         self.assertFalse((self.root / "escaped-package.js").exists())
 
@@ -174,6 +193,7 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         result = self.run_transfer("restore-tar", encrypted_archive, destination, self.key)
 
         self.assertNotEqual(0, result.returncode)
+        self.assertExtractionRefused(result, "node_modules/escape")
         self.assertFalse(destination.exists())
         self.assertFalse((self.root.parent / "outside/escaped.js").exists())
 

@@ -53,7 +53,9 @@ export DISPATCH_FAIL=true
 if run_dispatch >/dev/null 2>&1; then fail "dispatch failure reported green"; elif grep -q 'method PATCH.*check-runs/9001' "$CALLS"; then pass "dispatch failure completes the dedicated-App check as failure"; else fail "dispatch failure did not fail the authorization"; fi
 unset DISPATCH_FAIL
 DEFAULT_BRANCH='../bad?ref'
-if run_dispatch >/dev/null 2>&1; then fail "unsafe default branch reached dispatch"; else pass "unsafe dispatch ref fails closed"; fi
+if run_dispatch >"$tmp/unsafe-ref.out" 2>&1; then fail "unsafe default branch reached dispatch"
+elif grep -qF '::error::default branch is not a safe review dispatch ref' "$tmp/unsafe-ref.out" && [ ! -s "$CALLS" ]; then pass "unsafe dispatch ref fails closed"
+else fail "unsafe dispatch ref failed for another reason or after a gh call: $(tail -1 "$tmp/unsafe-ref.out")"; fi
 DEFAULT_BRANCH=main
 
 printf 'present\n' >"$LABEL_FILE"

@@ -108,11 +108,12 @@ extractor_digest="$(git -C "$root" show "$ref:scripts/container_artifact_extract
 attestation_verifier_digest="$(git -C "$root" show "$ref:scripts/container_attestation_verify.py" | sha256sum | cut -d' ' -f1)"
 cosign_helper_digest="$(git -C "$root" show "$ref:scripts/container_cosign_provenance.py" | sha256sum | cut -d' ' -f1)"
 if [ -z "$reconcile_json" ]; then
-reconcile_assertions="! grep -q 'reconcile-allowlist' .github/workflows/container-release.yml
+reconcile_assertions="assert_absent grep -q 'reconcile-allowlist' .github/workflows/container-release.yml
 test ! -e scripts/release-reconcile.sh"
 else
 reconcile_assertions="reconcile_allowlist='$reconcile_json'
-grep -Fqx \"      reconcile-allowlist: '\$reconcile_allowlist'\" .github/workflows/container-release.yml
+grep -Fqx \"      reconcile-allowlist: '\$reconcile_allowlist'\" .github/workflows/container-release.yml \\
+  || contract_fail \"the caller does not declare exactly the reviewed reconciliation allowlist: \$reconcile_allowlist\"
 test -f scripts/release-reconcile.sh
 test ! -L scripts/release-reconcile.sh
 test -x scripts/release-reconcile.sh"
@@ -126,31 +127,62 @@ cat <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 ref='$ref'
-printf '%s  %s\n' '$workflow_digest' .github/workflows/container-release.yml | sha256sum --check --strict
+# Every refusal names itself, so an adopter never has to bisect this file to
+# find the unmet assertion. The reporting only adds diagnostics: the ERR trap
+# re-exits with the failing command's status, naming its line and command.
+contract_fail() {
+  printf 'container-release contract FAILED: %s\n' "\$*" >&2
+  exit 1
+}
+report_failed_assertion() {
+  local status=\$?
+  printf 'container-release contract FAILED: line %s: %s (exit %s)\n' "\$1" "\$2" "\$status" >&2
+  exit "\$status"
+}
+trap 'report_failed_assertion "\$LINENO" "\$BASH_COMMAND"' ERR
+assert_digest() {
+  local path="\$1" expected="\$2" observed
+  printf '%s  %s\n' "\$expected" "\$path" | sha256sum --check --strict --status 2>/dev/null && return 0
+  observed="\$(sha256sum -- "\$path" 2>/dev/null | cut -d' ' -f1)" || observed=unreadable
+  contract_fail "\$path drifted from contract \$ref: expected sha256 \$expected, observed \${observed:-unreadable}"
+}
+# \`!\` exempts a command from \`set -e\`, so a bare \`! grep\` can never fail this
+# file; and a grep that cannot read its input exits 2, which a negation would
+# take for absence.
+# The search runs at the call site's own words (\`assert_absent grep ...\`), so
+# its pattern stays visible to a reader and to the guard inventory.
+assert_absent() {
+  local search_status=0
+  "\$@" || search_status=\$?
+  [ "\$search_status" -ne 1 ] || return 0
+  [ "\$search_status" -ne 0 ] || contract_fail "found what must be absent: \$*"
+  contract_fail "could not search (exit \$search_status): \$*"
+}
+assert_digest .github/workflows/container-release.yml '$workflow_digest'
 grep -Fq "container-release.yml@\$ref" .github/workflows/container-release.yml
 grep -Fq "contract-ref: \$ref" .github/workflows/container-release.yml
 grep -q "workflow_dispatch:" .github/workflows/container-release.yml
-! grep -Eq '^  (push|pull_request):' .github/workflows/container-release.yml
+assert_absent grep -Eq '^  (push|pull_request):' .github/workflows/container-release.yml
 grep -q 'RELEASE_APP_CLIENT_ID' .github/workflows/container-release.yml
 grep -q 'release_environment: release-app' .github/workflows/container-release.yml
 grep -q '^    secrets: inherit$' .github/workflows/container-release.yml
-! grep -Eq 'PRIVATE_KEY' .github/workflows/container-release.yml
+assert_absent grep -Eq 'PRIVATE_KEY' .github/workflows/container-release.yml
 legacy_release_token='RELEASE_'"TOKEN"
 legacy_org_release_token='VERJSON_RELEASE_'"TOKEN"
-! grep -Eq "\$legacy_release_token|\$legacy_org_release_token" .github/workflows/container-release.yml
+assert_absent grep -Eq "\$legacy_release_token|\$legacy_org_release_token" .github/workflows/container-release.yml
 test -f scripts/container_release_promotion.py
 test -f scripts/container_release_manifest.py
 test -f scripts/container_registry_destinations.py
 test -f scripts/container_artifact_extract.py
 test -f scripts/container_attestation_verify.py
 test -f scripts/container_cosign_provenance.py
-printf '%s  %s\n' '$promotion_digest' scripts/container_release_promotion.py | sha256sum --check --strict
-printf '%s  %s\n' '$manifest_digest' scripts/container_release_manifest.py | sha256sum --check --strict
-printf '%s  %s\n' '$destination_helper_digest' scripts/container_registry_destinations.py | sha256sum --check --strict
-printf '%s  %s\n' '$extractor_digest' scripts/container_artifact_extract.py | sha256sum --check --strict
-printf '%s  %s\n' '$attestation_verifier_digest' scripts/container_attestation_verify.py | sha256sum --check --strict
-printf '%s  %s\n' '$cosign_helper_digest' scripts/container_cosign_provenance.py | sha256sum --check --strict
-! grep -Eq 'gh attestation verify|actions/attest-build-provenance@' .github/workflows/container-release.yml
+assert_digest scripts/container_release_promotion.py '$promotion_digest'
+assert_digest scripts/container_release_manifest.py '$manifest_digest'
+assert_digest scripts/container_registry_destinations.py '$destination_helper_digest'
+assert_digest scripts/container_artifact_extract.py '$extractor_digest'
+assert_digest scripts/container_attestation_verify.py '$attestation_verifier_digest'
+assert_digest scripts/container_cosign_provenance.py '$cosign_helper_digest'
+assert_absent grep -Eq 'gh attestation verify|actions/attest-build-provenance@' .github/workflows/container-release.yml
 grep -q 'Generated by Verjson/.github/scripts/gen-container-release.sh' .github/workflows/container-release.yml
 $reconcile_assertions
 echo 'container release contract passed'

@@ -454,3 +454,62 @@ The reusable `ai-review-merge.yml` worker has no workflow-level concurrency or d
 - **Issue:** [Verjson/.github#1930](https://github.com/Verjson/.github/issues/1930), repository-controlled caller-workflow blob size.
 - **ARB:** GO on the 1 MiB admission cap and bounded hashing; Astra and Sol converged. Fable and Opus Agent review tools were unavailable.
 The caller workflow blob at `CALLER_WORKFLOW_SHA` is rejected before extraction when its Git-reported size exceeds 1 MiB. Accepted blobs are written to a temporary file with a 30-second subprocess timeout, checked for exact byte count and successful extraction, and hashed in 64 KiB chunks. The limit bounds verifier output and hashing work; it does not claim to bound Git's internal object reconstruction or prior fetch and checkout costs. Digest comparison, path and mode checks, fallback selection, and enrollment gates are unchanged.
+
+## Amendment 2026-11-02 — authenticate the inner supervisor before control
+
+- **Issue:** [Verjson/.github#1966](https://github.com/Verjson/.github/issues/1966).
+
+Treat Bubblewrap's reported host PID and its pidfd as provisional until the blocked
+trusted PID 1 returns a fresh host challenge on its private result stream. Version 3
+of the wrapper protocol requires the proof between readiness and the separate
+launch or abort decision. The host compares the nonce and PID namespace, verifies
+the pinned process remains live across namespace inspection, and only then may
+publish the namespace or signal the inner pidfd. Missing, malformed, stale, or
+duplicate proof fails closed; pre-authentication cancellation uses the outer pinned
+group and preserves the host signal. A cancellation-source failure prevents plan
+receipt acceptance even if the source later recovers.
+
+This restores the intended identity boundary; a numeric PID and a namespace inode
+alone do not authenticate a process after PID reuse. The challenge relies on the
+pre-candidate wrapper exclusively holding its control and result endpoints. It does
+not establish hosted AppArmor or kernel support, and the outer atomic launcher and
+trusted build handoff remain separate delivery requirements. Signaling the pinned
+supervisor group uses `PIDFD_SIGNAL_PROCESS_GROUP`, so secretless script plans
+require Linux 6.9 or later and fail closed with a message naming that requirement on
+older kernels, including `ubuntu-22.04` lanes selected through `CI_LANE_*`.
+
+## Amendment 2026-11-02 — disclose the shared-workspace writer assumption
+
+- **Issue:** [Verjson/.github#1966](https://github.com/Verjson/.github/issues/1966).
+
+The operator accepts the residual risk that another host process with write access
+can replace or move workspace mount destinations while a secretless script plan
+is prepared or running. Both standard and protected jobs must disclose this
+assumption in an Actions warning and job summary before starting the script plan.
+A pinned source descriptor does not pin the destination, and this disclosure is
+not evidence that competing host writers are absent. Candidate-process cleanup,
+receipt validation, hosted sandbox acceptance, and merge protections remain
+independent requirements.
+
+## Amendment 2026-11-06 — PID 1 reaps adopted orphans while the candidate runs
+
+- **Issue:** [Verjson/.github#2043](https://github.com/Verjson/.github/issues/2043).
+
+The 2026-10-25 amendment had PID 1 wait exclusively for its direct child and reap
+adopted children only during cleanup. Under `--as-pid-1` the supervisor is the
+namespace init, so every orphan is re-parented to it; a killed orphan stayed a zombie,
+and therefore a process-group member, until the candidate ended. Candidates that kill
+a process tree and wait for `kill(-pgid, 0)` to fail timed out, which broke
+`ci / build-test` for v4.4.0 adopters (Verjson/verjson-ai run 42152694304).
+
+PID 1 now reaps adopted children on every candidate polling cycle, as an init does.
+The reaper must never consume the candidate's own status: `Popen` maps a lost status
+(`ECHILD`) to return code 0, so a bare `waitpid(-1)` that wins the race would turn a
+failing candidate into a pass. The reaper therefore peeks with
+`waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT)` and reaps only the specific exited pid,
+stopping when the peeked pid is a candidate whose `Popen.returncode` is still unset;
+`Popen.poll()` remains the only consumer of that status. A zombie's pid cannot be
+reused until it is reaped, so the peek and the targeted reap name the same process.
+Recording a stolen status back onto the `Popen` object was rejected: it depends on
+every reaping path remembering to forward the status, and a single omission fails open.
+`reaped` in the terminal record still counts the candidate once plus each adopted child.

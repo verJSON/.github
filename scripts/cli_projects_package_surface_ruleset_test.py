@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -30,6 +31,20 @@ GENERATOR_SPEC.loader.exec_module(GENERATOR_MODULE)
 SHA = "a" * 40
 HEAD = "b" * 40
 PREVIOUS = "c" * 40
+CLI_PROJECTS_ID = 1277452690
+
+
+def actions_state_pages(state):
+    """The ADR 0252 paused-state reads for verjson-cli-projects, as gh pages."""
+    return {
+        "orgs/Verjson/repos?type=all&per_page=100": [[
+            {"id": CLI_PROJECTS_ID, "name": "verjson-cli-projects", "default_branch": "main"},
+        ]],
+        "orgs/Verjson/properties/values?per_page=100": [[{
+            "repository_name": "verjson-cli-projects",
+            "properties": [{"property_name": "verjson-actions-state", "value": state}],
+        }]],
+    }
 
 # Admission mutants applied to the generator's rendered output: each is (anchor, replacement).
 # M: widened comparisons; N: reviewer bypasses of a reference-pattern denylist (indirect
@@ -250,6 +265,8 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 output_path.unlink(missing_ok=True)
                 environment = {
                     **os.environ,
+                    "LC_ALL": "C",
+                    "PS4": "+ ",
                     "PATH": f"{directory}:{os.environ['PATH']}",
                     "GH_TOKEN": "bounded-test-token",
                     "REPOSITORY": "Verjson/verjson-cli-projects",
@@ -266,13 +283,20 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                     "CANDIDATE_FILE": str(candidate_path),
                     "GITHUB_OUTPUT": str(output_path),
                 }
+                # The admission guards reject silently, so the trace names the
+                # one that stopped the script (the EXIT trap runs after it).
                 return subprocess.run(
-                    ["bash", "-c", admission_script],
+                    ["bash", "-xc", admission_script],
                     env=environment,
                     capture_output=True,
                     text=True,
                     check=False,
                 )
+
+            def failed_guard(result):
+                commands = [line for line in result.stderr.splitlines()
+                            if line.startswith("+ ") and not line.startswith("+ rm -f -- ")]
+                return commands[-1] if commands else None
 
             current = execute(generated_bytes)
             self.assertEqual(0, current.returncode, current.stderr)
@@ -282,11 +306,17 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 legacy.returncode,
                 "legacy PR caller must fail even when no default-main state is read",
             )
+            self.assertEqual(
+                failed_guard(legacy),
+                f"+ '[' {hashlib.sha256(legacy_bytes).hexdigest()} = "
+                f"{hashlib.sha256(generated_bytes).hexdigest()} ']'",
+            )
             non_main = execute(generated_bytes, base_ref="release")
             self.assertNotEqual(
                 0, non_main.returncode,
                 "admission must reject pull requests that are not based on main",
             )
+            self.assertEqual(failed_guard(non_main), "+ '[' release = main ']'")
 
     def test_workflow_is_exact_repository_hosted_credentialless_boundary(self):
         MODULE.validate_workflow()
@@ -729,8 +759,10 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 )
 
     def test_obsolete_repository_activation_mode_is_removed(self):
-        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
             MODULE.main(["activate-repository", "--workflow-sha", SHA])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("argument mode: invalid choice: 'activate-repository'", stderr.getvalue())
 
     def test_apply_requires_acknowledgement_before_mutation(self):
         with (
@@ -931,6 +963,76 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             self.assertEqual(0, MODULE.main(["audit"]))
         audit.assert_called_once_with(PREVIOUS)
         mutate.assert_not_called()
+
+    def audit_at_evaluate(self, *, state="paused", refusal=None, unreadable=None, mutate=lambda live: None):
+        live = MODULE.render_payload(self.contract, PREVIOUS) | {
+            "id": 21830367, "source_type": "Organization", "source": "Verjson",
+            "enforcement": "evaluate",
+        }
+        mutate(live)
+        pages = actions_state_pages(state)
+
+        def read_pages(path):
+            if path == unreadable:
+                raise RuntimeError(f"GitHub API read failed for {path}")
+            return pages[path]
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21830367}]),
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=read_pages),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            mock.patch.object(MODULE, "gh_json_input") as mutate_api,
+            contextlib.redirect_stdout(output),
+        ):
+            if refusal is None:
+                MODULE.main(["audit"])
+            else:
+                with self.assertRaisesRegex(MODULE.ContractError, refusal):
+                    MODULE.main(["audit"])
+        mutate_api.assert_not_called()
+        if refusal is None:
+            audit.assert_called_once_with(PREVIOUS)
+        else:
+            audit.assert_not_called()
+        return output.getvalue()
+
+    def test_audit_accepts_the_recorded_relaxation_at_evaluate_while_its_repository_is_paused(self):
+        output = self.audit_at_evaluate()
+
+        self.assertIn(
+            f"verified: organization ruleset 21830367 runs {PREVIOUS}, the reviewed required "
+            "workflow on protected main; enforcement=evaluate while verjson-cli-projects is "
+            "verjson-actions-state=paused (ADR 0252)",
+            output,
+        )
+
+    def test_audit_refuses_the_recorded_relaxation_at_evaluate_once_its_repository_is_enabled(self):
+        self.audit_at_evaluate(
+            state="enabled",
+            refusal=(
+                r"^enforcement is evaluate but verjson-cli-projects is verjson-actions-state=enabled; "
+                r"restore enforcement to active \(ADR 0252\)$"
+            ),
+        )
+
+    def test_audit_cannot_establish_the_relaxation_at_evaluate_when_its_repository_state_is_unreadable(self):
+        # An outage is not drift, so the audit gives no restore advice.
+        self.audit_at_evaluate(
+            unreadable="orgs/Verjson/properties/values?per_page=100",
+            refusal=(
+                r"^cannot establish ADR 0252 paused state: enforcement is evaluate but "
+                r"verjson-actions-state of verjson-cli-projects cannot be read \(GitHub API read failed for "
+                r"orgs/Verjson/properties/values\?per_page=100\)$"
+            ),
+        )
+
+    def test_audit_refuses_the_recorded_relaxation_at_evaluate_with_any_other_drift(self):
+        def widen(live):
+            live["bypass_actors"] = [{"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}]
+
+        self.audit_at_evaluate(mutate=widen, refusal=r"^live organization ruleset differs from reviewed image$")
 
     def test_audit_refuses_a_live_image_that_is_not_the_reviewed_active_one(self):
         def image(mutate):
