@@ -130,6 +130,27 @@ OUT="$("$script" "$REPO" "$PR" "${HEAD_SHA^^}" 2>&1)"
 RC=$?
 expect "an expected head that is not a lowercase 40-hex SHA is a usage error" 2 "usage:"
 
+# --- hardening (#2031) ----------------------------------------------------------------------
+# Once the ruleset binds merge-admission to the AI review App, Gate A no longer evaluates
+# that context, so Gate C is the only gate left that sees a forged same-named check. A Gate C
+# that skipped required context names would admit the forgery in exactly the configuration
+# the rollout canaries run.
+reset_env
+RULES_FIXTURE="$(required_rule "[{\"context\":\"CI / test\",\"integration_id\":$ACTIONS_APP_ID},{\"context\":\"merge-admission\",\"integration_id\":$AI_REVIEW_APP_ID}]")"
+with_checks "$ci_check" "$(check_run 2 merge-admission in_progress '' "$AI_REVIEW_APP_ID")" \
+  "$(check_run 3 merge-admission completed failure "$ACTIONS_APP_ID")"
+run
+expect "a forged GitHub Actions merge-admission stays a Gate C failure while the ruleset binds the context to the AI review App" 5 \
+  "Gate C: $REPO#$PR head $HEAD_SHA has pending or non-passing checks outside the required set — merge-admission=FAILURE"
+
+# A check run that names no App is not the bound App's; an unknown producer is never read as
+# the producer.
+reset_env
+with_checks "$ci_check" "$(check_run 2 merge-admission in_progress '' "$AI_REVIEW_APP_ID" | jq -c 'del(.app)')"
+run
+expect "a merge-admission check run that names no App stays a Gate C pending check" 5 \
+  "Gate C: $REPO#$PR head $HEAD_SHA has pending or non-passing checks outside the required set — merge-admission=IN_PROGRESS"
+
 if [ "$fails" -ne 0 ]; then
   printf '%s merge-admission self-exclusion case(s) failed\n' "$fails" >&2
   exit 1

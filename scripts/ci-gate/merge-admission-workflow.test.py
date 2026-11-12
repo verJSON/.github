@@ -45,6 +45,13 @@ class CallerTriggerTests(unittest.TestCase):
         self.assertEqual(rest, ["*", "*", "*", "*"])
         self.assertRegex(minute, r"^\*/([1-9]|1[0-5])$")
 
+    def test_the_producer_is_not_started_by_its_own_completion(self):
+        # ADR 0260 action 5 excludes the producer's own path: listing it would start a new
+        # evaluation on the completion of every evaluation.
+        doc = workflow("merge-admission-caller")
+        own_names = {doc["name"], workflow("merge-admission")["name"]}
+        self.assertFalse(own_names & set(triggers(doc)["workflow_run"]["workflows"]))
+
 
 
 class TriggerWorkflowTests(unittest.TestCase):

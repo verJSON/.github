@@ -104,6 +104,19 @@ else
   fail "a listing page that is not an array plans nothing, names why, and succeeds (rc=$RC, output: $OUT, stderr: $ERR)"
 fi
 
+# --- pagination -------------------------------------------------------------------------------
+# `gh api --paginate` prints one array per page, back to back. A pull request on a later page
+# that is never planned never gets a superseding check, so it keeps whatever result it had.
+reset_env
+PULLS_FIXTURE="[$(pull 7 "$SHA_A" false)]
+[$(pull 9 "$SHA_C" false)]"
+run "$REPO"
+if [ "$RC" -eq 0 ] && [ "$OUT" = "[{\"pr\":7,\"head_sha\":\"$SHA_A\"},{\"pr\":9,\"head_sha\":\"$SHA_C\"}]" ] && [ -z "$ERR" ]; then
+  pass "a paginated listing plans the open pull requests of every page"
+else
+  fail "a paginated listing plans the open pull requests of every page (rc=$RC, output: $OUT, stderr: $ERR)"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%s merge-admission plan case(s) failed\n' "$fails" >&2
   exit 1
