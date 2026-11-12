@@ -353,6 +353,10 @@ resolves the same environment-only key; its run 43223952797 passed
 `validate-ai-review-key` on the same day.
 
 The fix adopts that transport. The caller's `admit` job inherits the caller's secrets.
+That widens what the producer can read to every secret the caller can reach, including
+the model provider keys, not only the App key. ADR 0171 accepts the widening on the
+condition that each secret is referenced only where it is required: the producer
+references `AI_REVIEW_APP_PRIVATE_KEY` alone, at the grant and in `evaluate`.
 The producer's `app-key-policy` edge carries only
 `AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}`. `evaluate` keeps
 its `ai-review-app` environment binding, and the main-only policy and its

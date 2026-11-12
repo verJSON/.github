@@ -286,7 +286,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
         targets = {f"./.github/workflows/{name}.yml" for name in KEY_CONSUMERS}
         edges = {
             (path.name, name): job.get("secrets")
-            for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+            for path in sorted(p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern))
             for name, job in (yaml.safe_load(path.read_text()).get("jobs") or {}).items()
             if job.get("uses") in targets
         }
