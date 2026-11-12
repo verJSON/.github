@@ -419,12 +419,18 @@ took 85s locally on the re-reviewed head under host load average 15, and 89-90s 
 the final head under load average 9-10, which leaves about 30s of margin. CI ran its predecessor in 51s on `main` run 38799238936. The mutation table is on the pull
 request.
 
-## Amendment (2026-11-12, PROPOSED pending ARB) — a guard-yielded caller run is no family candidate
+## Amendment (2026-11-12) — a guard-yielded caller run is no family candidate
 
-**Status of this amendment: proposed.** It changes Gate C admission, a sensitive
-class, and takes effect only on an ARB decision recorded on
-[#1905](https://github.com/verJSON/.github/issues/1905). It is not covered by
-ARB-G1-2026-11-06 C1.
+**Status of this amendment: Adopted (ARB decision 2026-11-12,
+[ARB-2059-2026-11-12](https://github.com/verJSON/.github/issues/1905#issuecomment-6825840976)).** It changes Gate C admission, a sensitive class. The
+board adopted the exclusion (C1) and the same-second tie exclusion (C1-TIE) with
+constraints, and required the first-attempt condition (C2) and the map test's yield
+premise (C3) before merge. ARB-G1-2026-11-06 C1 did not cover this change; that
+decision's C1(3) still stands (see *What the exclusion is not*). The board's
+delivery condition C1(d), a read-only live run of this script against a real
+displaced-plus-yield head, is recorded on
+[#1905](https://github.com/verJSON/.github/issues/1905) and is not part of this
+amendment's verification.
 
 ### Context
 
@@ -448,7 +454,7 @@ its `SKIPPED` check blocks the set-aside, and Gate C exits `5` on
 precondition 5 asked for a fixture showing the set-aside; the fixture showed this
 refusal instead ([#1905 comment of 2026-11-06](https://github.com/verJSON/.github/issues/1905)).
 
-### Decision (proposed)
+### Decision
 
 When the displacer is chosen (condition 3 of the 2026-10-15 family amendment), a
 **guard-yielded run** is left out of the candidates and out of the same-second
@@ -470,6 +476,19 @@ ambiguity count. A run is guard-yielded only when all of the following hold:
    the run's `check_suite_id`, from the same check inventory the displacer's
    `SUCCESS`-only rule reads, number exactly two: one named for the guard job with
    conclusion `SUCCESS`, and one named for the calling job with conclusion `SKIPPED`.
+4. **It is the run's first attempt** (ARB C2). Its `run_attempt` is the number `1`.
+   The check inventory's default `filter=latest` collapses re-run attempts within a
+   suite, so a later attempt's yield-shaped suite could hide an earlier attempt whose
+   calling job entered the group. A missing attempt, a string, or any other number
+   keeps the run a candidate. The condition sits in the shared predicate, so it
+   governs the same-second tie as well.
+
+**What the exclusion rests on.** The whole case for leaving a run out is the calling
+job's `SKIPPED` inside a run that concluded `success`. GitHub reports that the job
+never started, and the family's group engages only when the calling job starts. The
+map test pins that premise (ARB C3): a yielding caller declares no workflow-level
+group, and its calling job carries no `concurrency` key, so nothing in the run can
+hold the group before the skip.
 
 The predicate is `guard_yielded` in `scripts/assert-mergeable-head.sh`. Everything
 else in the family rule is unchanged: the displacer must still be created strictly
@@ -486,6 +505,7 @@ was before this amendment:
 - an extra check in the suite, or a missing one (no check at all, or a skipped
   `rearm` with no guard);
 - the run concluded anything but `success` (it still counts toward a same-second tie);
+- the run is not a first attempt: `run_attempt` is `2`, missing, or the string `"1"`;
 - another family caller, such as `AI review label re-arm`, even with `guard` and
   `rearm` checks: the map declares no yield for it.
 
@@ -501,6 +521,15 @@ run's own checks stay in the inventory and are judged as before (`SUCCESS` and
 `SKIPPED` are passing conclusions already). Gate W reads only the required
 workflow's own runs and is untouched, and Gate B still reads the raw inventory.
 
+**What the exclusion is not.** It only removes displacer candidates. It is never
+arming evidence and never vouches for any check: Gate W alone decides whether the
+head was armed, from the required workflow's own runs, so ARB-G1-2026-11-06 C1(3)
+([ADR 0255, F-1R amendment precondition 3](../0255-gate-w-required-workflow-run-precondition/README.md#amendment-2026-11-06--f-1r-the-local-caller-yields-to-the-required-arm),
+"the guard is never admission evidence") is preserved. Any widening of the yield
+shape (another caller, another job set, another conclusion, a later attempt, or a
+reading of the job listing in place of the check inventory) needs a new ARB
+decision; the map test and the fixtures below fail on each.
+
 **Why the check inventory and not the job listing.** The displacer's `SUCCESS`-only
 rule already reads the candidate's suite from the check inventory, which the script
 reads, paginates, and reconciles before any gate. A `SKIPPED` conclusion is GitHub's
@@ -514,7 +543,11 @@ count wrong, which keeps the run a candidate.
 of two runs created in one second cannot be told. A guard-yielded run took no part
 in the group, so which of the two is newer does not matter; counting it would refuse
 the realistic case, since the yielding run is created about a second after the
-required run.
+required run. The tie exclusion is not severable from the candidate exclusion: the
+board adopted them together (ARB C1-TIE), both use the identical `guard_yielded`
+predicate, and the live yielding run 42278249000 shares its creation second with the
+required run 42278248583, so the candidate exclusion alone would still refuse the
+realistic case with exit `5`.
 
 ### Alternatives rejected
 
@@ -555,8 +588,13 @@ section headed "F-1R: a guard-yielded local run is no family participant":
 | yield-shaped run that concluded `failure`, in the required run's second | exit `5`, same reason |
 | `AI review label re-arm` with `guard`/`rearm` checks | exit `5`, same reason |
 | required run created before the displaced run, yielding run after | exit `5`, same reason |
+| yield-shaped run on `run_attempt` `2` (ARB C2) | exit `5`, same reason |
+| yield-shaped run whose `run_attempt` is the string `"1"` (ARB C2) | exit `5`, same reason |
+| yield-shaped run with no `run_attempt` (ARB C2) | exit `5`, same reason |
 
-`scripts/ci-gate/concurrency-family-map.test.py` derives the `yield` declaration.
+`scripts/ci-gate/concurrency-family-map.test.py` derives the `yield` declaration and,
+for a yielding caller, asserts that its workflow-level group is `None` and that its
+calling job has no `concurrency` key (ARB C3).
 
 **Live shape, read on 2026-11-12.** Canary (a)'s yielding run
 verjson-git-runners 42278249000 (`gate re-arm`, `.github/workflows/gate-rearm.yml`,
@@ -584,6 +622,11 @@ Each condition was mutated out and a suite failed for its asserted reason:
 | match the calling job by name prefix, no count | extra check; rearm ran with nested checks |
 | rename the map's calling job `rearm` to `arm` | map test; precondition 5; same-second case |
 | declare a yield on the label caller | map test; label caller case |
+| drop the `run_attempt == 1` condition (ARB C2) | attempt `2`; string `"1"`; no attempt |
+| default a missing attempt to `1` (`(.run_attempt // 1) == 1`) | no attempt |
+| coerce the attempt to a number (`tonumber`) | string `"1"` |
+| generator adds the family group at workflow level (ARB C3) | map test: "must declare no workflow-level group when it yields" |
+| generator adds a job-level `concurrency` group on `rearm` (ARB C3) | map test: "must hold no group on its calling job when it yields" |
 
 Every mutant was killed; the concurrency-family suite stayed green except where
-noted, and the script was restored byte-for-byte.
+noted, and the script and the generator were restored byte-for-byte.
