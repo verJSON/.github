@@ -1619,6 +1619,73 @@ raise SystemExit(0)
         self.assertNotIn("x" * 241, diagnostic)
 
 
+class SupplyChainGuardTests(unittest.TestCase):
+    """Each guard is exercised directly; the provisioning tests patch them out."""
+
+    def test_signed_index_record_that_differs_from_the_pin_is_refused(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        record = profile["packages"]["xvfb"]
+        planned = {("xvfb", "amd64"): record["version"]}
+        tampered = {**record, "sha256": "0" * 64}
+        indexes = {("xvfb", "amd64", record["version"]): tampered}
+
+        with self.assertRaisesRegex(
+            playwright_profile.PlaywrightProfileError,
+            "^signed Ubuntu package metadata differs from the pinned manifest$",
+        ):
+            playwright_profile._validate_signed_metadata(indexes, planned, profile)
+
+    def test_correctly_sized_archive_with_a_different_digest_is_refused(self) -> None:
+        payload = b"!<arch>\nnot the reviewed package bytes\n"
+        record = {
+            "package": "xvfb",
+            "architecture": "amd64",
+            "version": "2:21.1.12-1ubuntu1.5",
+            "size": len(payload),
+            "sha256": hashlib.sha256(b"reviewed package bytes").hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "xvfb.deb"
+            archive.write_bytes(payload)
+            with patch.object(playwright_profile, "_exact_output") as dpkg_deb:
+                with self.assertRaisesRegex(
+                    playwright_profile.PlaywrightProfileError,
+                    "^pinned Playwright package archive digest mismatch$",
+                ):
+                    playwright_profile._verify_archive(archive, "xvfb", record)
+            dpkg_deb.assert_not_called()
+
+    def test_receipt_path_outside_run_is_refused(self) -> None:
+        with self.assertRaisesRegex(
+            playwright_profile.PlaywrightProfileError,
+            "^Playwright receipt must be stored directly under /run$",
+        ):
+            playwright_profile._state_file_path("/tmp/verjson-playwright-1-1-x.json")
+
+    def test_provision_command_requires_secretless_mode_before_provisioning(self) -> None:
+        environment = {key: value for key, value in os.environ.items() if key != "VERJSON_CI_SECRETLESS_MODE"}
+        with patch.dict(os.environ, environment, clear=True), patch.object(
+            playwright_profile, "provision"
+        ) as provision, patch("sys.stderr", io.StringIO()) as error_stream:
+            result = playwright_profile._command_line(
+                [
+                    "provision",
+                    "--profile",
+                    PROFILE_ID,
+                    "--state-file",
+                    "/run/verjson-playwright-1-1-ci.json",
+                    "--runner-environment",
+                    "github-hosted",
+                    "--runner-os",
+                    "Linux",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        provision.assert_not_called()
+        self.assertIn("requires a secretless script plan", error_stream.getvalue())
+
+
 class AuthenticatedKeySnapshotTests(unittest.TestCase):
     @staticmethod
     def _root_stat(metadata: Any, *, uid: int = 0, mode: int | None = None) -> SimpleNamespace:
