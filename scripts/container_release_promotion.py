@@ -64,6 +64,8 @@ def release(
         raise ManifestError("release identity, timestamps, and verified provenance are required")
     if not re.fullmatch(r"[0-9a-f]{40}", str(release_context.get("sourceCommit", ""))):
         raise ManifestError("release source commit must be a 40-hex commit")
+    if candidate["source"]["commit"] != release_context["sourceCommit"]:
+        raise ManifestError("candidate source commit must match the release source commit")
     previous = state.get("previousRelease")
     if previous is not None:
         if not isinstance(previous, dict) or not SEMVER.fullmatch(str(previous.get("releaseVersion", ""))):
