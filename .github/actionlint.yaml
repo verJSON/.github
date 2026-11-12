@@ -64,6 +64,9 @@ paths:
     ignore:
       - '^property "workflow_repository" is not defined in object type .*'
       - '^property "workflow_sha" is not defined in object type .*'
+  .github/workflows/merge-admission.yml:
+    ignore:
+      - '^property "workflow_sha" is not defined in object type \{container: \{id: string; network: string\}; services: \{string => \{id: string; network: string; ports: \{string => string\}\}\}; status: string\}$'
   .github/workflows/node-release.yml:
     ignore:
       - '^property "workflow_repository" is not defined in object type \{container: \{id: string; network: string\}; services: \{string => \{id: string; network: string; ports: \{string => string\}\}\}; status: string\}$'
