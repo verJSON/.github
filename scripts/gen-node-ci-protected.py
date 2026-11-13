@@ -93,6 +93,7 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
           import stat
           import subprocess
           from pathlib import Path
+          from urllib.parse import quote
 
           repository = os.environ["REPOSITORY"]
           declaration_path = os.environ["DECLARATION_PATH"]
@@ -148,7 +149,7 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
               [
                   "-H",
                   "Accept: application/vnd.github.raw+json",
-                  f"repos/{repository}/contents/{declaration_path}?ref={base_sha}",
+                  f"repos/{repository}/contents/{declaration_path}?ref={quote(base_sha)}",
               ]
           )
 
@@ -263,7 +264,7 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
                   raise SystemExit("baseline recovery changes unauthorized files")
               head_bytes = github_api([
                   "-H", "Accept: application/vnd.github.raw+json",
-                  f"repos/{repository}/contents/{declaration_path}?ref={head_sha}",
+                  f"repos/{repository}/contents/{declaration_path}?ref={quote(head_sha)}",
               ])
               _, head_version, _ = parse_declaration(head_bytes)
               if (stable_version.fullmatch(head_version) is None
