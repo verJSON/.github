@@ -1711,7 +1711,29 @@ def _validate_archive_lock(path: Path) -> None:
         raise PlaywrightProfileError("APT archive lock has an unsafe file identity")
 
 
+def _seal_archive_cache(paths: dict[str, Path]) -> None:
+    archive_dir = paths["archives"]
+    directories = (paths["cache"], archive_dir, archive_dir / "partial")
+    for directory in directories:
+        try:
+            metadata = os.lstat(directory)
+        except OSError as error:
+            raise PlaywrightProfileError("APT archive cache directory has an unsafe identity") from error
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise PlaywrightProfileError("APT archive cache directory has an unsafe identity")
+        os.chown(directory, 0, 0, follow_symlinks=False)
+
+    try:
+        with os.scandir(archive_dir) as entries:
+            for entry in entries:
+                if entry.name != "partial":
+                    os.chown(entry.path, 0, 0, follow_symlinks=False)
+    except OSError as error:
+        raise PlaywrightProfileError("APT archive cache could not be sealed root-owned") from error
+
+
 def _validate_archive_cache(paths: dict[str, Path], planned: dict[tuple[str, str], str], profile: dict[str, Any]) -> None:
+    _seal_archive_cache(paths)
     archive_dir = paths["archives"]
     expected: dict[str, tuple[str, dict[str, Any]]] = {}
     total_bytes = 0

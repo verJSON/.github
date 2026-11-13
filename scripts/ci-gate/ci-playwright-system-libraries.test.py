@@ -795,7 +795,9 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
         planned = {(package, record["architecture"]): record["version"]}
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            archive_dir = Path(temporary_directory)
+            cache_dir = Path(temporary_directory) / "cache"
+            archive_dir = cache_dir / "archives"
+            (archive_dir / "partial").mkdir(parents=True)
             archive = archive_dir / playwright_profile._apt_cache_filename(
                 package, record["version"], record["architecture"]
             )
@@ -803,27 +805,83 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             lock = archive_dir / "lock"
             lock.touch()
             lock.chmod(0o640)
-            with patch.object(playwright_profile, "_verify_archive") as verify_archive:
+            paths = {"cache": cache_dir, "archives": archive_dir}
+            with patch.object(playwright_profile.os, "chown"), patch.object(
+                playwright_profile, "_verify_archive"
+            ) as verify_archive:
                 playwright_profile._validate_archive_cache(
-                    {"archives": archive_dir}, planned, profile
+                    paths, planned, profile
                 )
             verify_archive.assert_called_once_with(archive, package, record)
 
             lock.unlink()
             lock.symlink_to(archive)
-            with patch.object(playwright_profile, "_verify_archive"):
+            with patch.object(playwright_profile.os, "chown"), patch.object(
+                playwright_profile, "_verify_archive"
+            ):
                 with self.assertRaises(playwright_profile.PlaywrightProfileError):
                     playwright_profile._validate_archive_cache(
-                        {"archives": archive_dir}, planned, profile
+                        paths, planned, profile
                     )
 
             lock.unlink()
             (archive_dir / "unexpected.deb").touch()
-            with patch.object(playwright_profile, "_verify_archive"):
+            with patch.object(playwright_profile.os, "chown"), patch.object(
+                playwright_profile, "_verify_archive"
+            ):
                 with self.assertRaises(playwright_profile.PlaywrightProfileError):
-                    playwright_profile._validate_archive_cache(
-                        {"archives": archive_dir}, planned, profile
-                    )
+                    playwright_profile._validate_archive_cache(paths, planned, profile)
+
+    def test_archive_cache_is_root_owned_before_archive_digest_verification(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        record = next(iter(profile["packages"].values()))
+        package = record["package"]
+        planned = {(package, record["architecture"]): record["version"]}
+        events: list[tuple[str, Path, int | None, int | None]] = []
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_dir = Path(temporary_directory) / "cache"
+            archive_dir = cache_dir / "archives"
+            partial_dir = archive_dir / "partial"
+            partial_dir.mkdir(parents=True)
+            archive = archive_dir / playwright_profile._apt_cache_filename(
+                package, record["version"], record["architecture"]
+            )
+            archive.touch()
+            lock = archive_dir / "lock"
+            lock.touch()
+            lock.chmod(0o640)
+
+            def record_chown(
+                path: str | os.PathLike[str],
+                uid: int,
+                gid: int,
+                *,
+                follow_symlinks: bool = True,
+            ) -> None:
+                del follow_symlinks
+                events.append(("chown", Path(path), uid, gid))
+
+            def record_verification(path: Path, *_args: Any) -> None:
+                events.append(("verify", path, None, None))
+
+            with patch.object(playwright_profile.os, "chown", side_effect=record_chown), patch.object(
+                playwright_profile, "_verify_archive", side_effect=record_verification
+            ):
+                playwright_profile._validate_archive_cache(
+                    {"cache": cache_dir, "archives": archive_dir}, planned, profile
+                )
+
+        sealed_paths = {path for action, path, _uid, _gid in events if action == "chown"}
+        self.assertEqual(sealed_paths, {cache_dir, archive_dir, partial_dir, lock, archive})
+        self.assertTrue(
+            all((uid, gid) == (0, 0) for action, _path, uid, gid in events if action == "chown")
+        )
+        last_seal = max(index for index, event in enumerate(events) if event[0] == "chown")
+        first_archive_verification = next(
+            index for index, event in enumerate(events) if event[0] == "verify"
+        )
+        self.assertLess(last_seal, first_archive_verification)
 
     def test_namespace_install_is_fixed_private_and_no_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1517,6 +1575,79 @@ raise SystemExit(0)
                 cleanup["env"]["PLAYWRIGHT_STATE_IDENTITY"],
             )
             self.assertIn("--expected-identity", cleanup["run"])
+
+    def test_privileged_workflow_steps_run_only_a_digest_verified_root_copy_of_the_helper(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        digest_output = "${{ steps.validate-playwright-profile.outputs.helper-sha256 }}"
+        commands = {
+            "Provision Playwright system-library profile": "provision",
+            "Remove Playwright system-library receipt": "cleanup",
+        }
+
+        for relative_path in (
+            ".github/workflows/node-ci.yml",
+            ".github/workflows/node-ci-protected.yml",
+        ):
+            with self.subTest(workflow=relative_path):
+                workflow = yaml.safe_load((root / relative_path).read_text(encoding="utf-8"))
+                steps = workflow["jobs"]["build-test"]["steps"]
+                validate = next(
+                    step
+                    for step in steps
+                    if step.get("name") == "Validate Playwright system-library profile request"
+                )
+                self.assertEqual(validate.get("id"), "validate-playwright-profile")
+                self.assertIn(
+                    'https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}'
+                    '/scripts/ci_playwright_system_libraries.py',
+                    validate["run"],
+                )
+                self.assertIn(
+                    'helper_sha256="$(sha256sum -- "$RUNNER_TEMP/ci_playwright_system_libraries.py")"',
+                    validate["run"],
+                )
+                self.assertIn('helper_sha256="${helper_sha256%% *}"', validate["run"])
+                self.assertIn('[[ "$helper_sha256" =~ ^[0123456789abcdef]{64}$ ]]', validate["run"])
+                self.assertIn('echo "helper-sha256=$helper_sha256" >> "$GITHUB_OUTPUT"', validate["run"])
+
+                for step_name, command in commands.items():
+                    step = next(item for item in steps if item.get("name") == step_name)
+                    self.assertEqual(step["env"]["PLAYWRIGHT_HELPER_SHA256"], digest_output)
+                    self.assertIn(
+                        '[[ "$PLAYWRIGHT_HELPER_SHA256" =~ ^[0123456789abcdef]{64}$ ]]',
+                        step["run"],
+                    )
+                    self.assertIn(
+                        'helper_copy_dir="$(sudo /usr/bin/mktemp -d /run/verjson-playwright-helper.XXXXXX)"',
+                        step["run"],
+                    )
+                    self.assertIn(
+                        'sudo /usr/bin/install -o root -g root -m 0500 -- '
+                        '"$RUNNER_TEMP/ci_playwright_system_libraries.py" "$helper_copy"',
+                        step["run"],
+                    )
+                    self.assertIn(
+                        'helper_copy_sha256="$(sudo /usr/bin/sha256sum -- "$helper_copy")"',
+                        step["run"],
+                    )
+                    self.assertIn(
+                        '[[ "${helper_copy_sha256%% *}" == "$PLAYWRIGHT_HELPER_SHA256" ]]',
+                        step["run"],
+                    )
+                    self.assertIn("trap cleanup_helper_copy EXIT", step["run"])
+                    self.assertIn(
+                        'sudo /usr/bin/rm -f -- "$helper_copy_dir/ci_playwright_system_libraries.py"',
+                        step["run"],
+                    )
+                    self.assertIn('sudo /usr/bin/rmdir -- "$helper_copy_dir"', step["run"])
+                    self.assertIn(
+                        f'/usr/bin/python3 -I "$helper_copy" {command}',
+                        step["run"],
+                    )
+                    self.assertNotIn(
+                        f'/usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" {command}',
+                        step["run"],
+                    )
 
     def test_hosted_acceptance_is_same_repository_read_only_and_path_gated(self) -> None:
         root = Path(__file__).resolve().parents[2]

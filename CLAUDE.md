@@ -79,6 +79,8 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open and natively blocking #1945, verified 2026-11-13 via `gh issue view` and the native dependency API.
 
+- [#1875](https://github.com/VerJSON/.github/issues/1875) — ADR 0238's Playwright profile merged as #1938; privileged-helper and APT-cache integrity follow-up is in progress. Item 5 remains tracked under #1692, which natively blocks #1875. Verified open and blocked 2026-11-13 via `gh issue view` and native dependency metadata.
+
 - [#2066](https://github.com/Verjson/.github/issues/2066) — Protected type-surface baseline recovery is needed after retention removes the declared release; open, verified 2026-11-13 with `gh issue view` and Verjson/authz#207.
 
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
