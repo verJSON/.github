@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,10 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def exactly(reason):
+    return "^" + re.escape(reason) + "$"
 
 
 def token(payload):
@@ -40,9 +45,15 @@ class OidcTokenTests(unittest.TestCase):
         self.assertEqual(MODULE.decode_github_oidc_claims(token(claims)), claims)
 
     def test_rejects_malformed_token_or_missing_payload(self):
-        for value in ("", "not-a-jwt", "header.!.signature", token([])):
+        malformed = "GitHub OIDC token is malformed"
+        for value, reason in (
+            ("", malformed),
+            ("not-a-jwt", malformed),
+            ("header.!.signature", "GitHub OIDC token payload is malformed"),
+            (token([]), "GitHub OIDC token claims must be an object"),
+        ):
             with self.subTest(value=value):
-                with self.assertRaises(MODULE.CosignEvidenceError):
+                with self.assertRaisesRegex(MODULE.CosignEvidenceError, exactly(reason)):
                     MODULE.decode_github_oidc_claims(value)
 
     def test_requests_a_sigstore_audience_token_into_a_private_file(self):
@@ -97,7 +108,9 @@ class OidcTokenTests(unittest.TestCase):
             with patch.object(urllib.request, "build_opener") as build_opener:
                 for endpoint in endpoints:
                     with self.subTest(endpoint=endpoint):
-                        with self.assertRaises(MODULE.CosignEvidenceError):
+                        with self.assertRaisesRegex(
+                            MODULE.CosignEvidenceError, exactly("GitHub OIDC request endpoint is invalid")
+                        ):
                             MODULE.write_github_oidc_token(output, endpoint, "request-secret")
             build_opener.assert_not_called()
             self.assertFalse(output.exists())
@@ -107,7 +120,7 @@ class OidcTokenTests(unittest.TestCase):
             "https://pipelines.actions.githubusercontent.com/_apis/oidc/token",
             headers={"Authorization": "Bearer request-secret"},
         )
-        with self.assertRaises(MODULE.CosignEvidenceError):
+        with self.assertRaisesRegex(MODULE.CosignEvidenceError, exactly("GitHub OIDC request endpoint redirected")):
             MODULE.NoOidcRedirectHandler().redirect_request(
                 request, None, 302, "Found", {}, "https://evil.example/steal"
             )
@@ -127,7 +140,9 @@ class OidcTokenTests(unittest.TestCase):
             output = Path(directory) / "oidc-token"
             with patch.object(urllib.request, "build_opener") as build_opener:
                 build_opener.return_value.open.return_value = Response()
-                with self.assertRaises(MODULE.CosignEvidenceError):
+                with self.assertRaisesRegex(
+                    MODULE.CosignEvidenceError, exactly("GitHub OIDC endpoint returned an invalid token")
+                ):
                     MODULE.write_github_oidc_token(
                         output,
                         "https://token.actions.githubusercontent.com/",
@@ -326,13 +341,14 @@ class SigstoreBundleTests(unittest.TestCase):
             "reference": "ghcr.io/verjson/example@sha256:" + "b" * 64,
             "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
         }
-        for discovery, repository in (
-            ({"referrers": []}, "ghcr.io/verjson/example"),
-            ({"referrers": [valid, valid]}, "ghcr.io/verjson/example"),
-            ({"referrers": [valid]}, "ghcr.io/verjson/other"),
+        ambiguous = "expected exactly one direct Sigstore bundle referrer"
+        for discovery, repository, reason in (
+            ({"referrers": []}, "ghcr.io/verjson/example", ambiguous),
+            ({"referrers": [valid, valid]}, "ghcr.io/verjson/example", ambiguous),
+            ({"referrers": [valid]}, "ghcr.io/verjson/other", "Sigstore referrer points outside the image repository"),
         ):
             with self.subTest(discovery=discovery, repository=repository):
-                with self.assertRaises(MODULE.CosignEvidenceError):
+                with self.assertRaisesRegex(MODULE.CosignEvidenceError, exactly(reason)):
                     MODULE.select_sigstore_bundle_referrer(
                         discovery,
                         repository=repository,
@@ -352,19 +368,25 @@ class SigstoreBundleTests(unittest.TestCase):
         self.assertEqual(MODULE.statement_from_sigstore_bundle(bundle), statement)
 
     def test_rejects_missing_or_malformed_signed_statements(self):
-        for bundle in (
-            {},
-            {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"},
-            {
-                "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-                "dsseEnvelope": {
-                    "payloadType": "application/vnd.in-toto+json",
-                    "payload": "!",
+        for bundle, reason in (
+            ({}, "Sigstore bundle format is unsupported"),
+            (
+                {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"},
+                "Sigstore bundle does not contain an in-toto statement",
+            ),
+            (
+                {
+                    "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                    "dsseEnvelope": {
+                        "payloadType": "application/vnd.in-toto+json",
+                        "payload": "!",
+                    },
                 },
-            },
+                "Sigstore bundle statement payload is malformed",
+            ),
         ):
             with self.subTest(bundle=bundle):
-                with self.assertRaises(MODULE.CosignEvidenceError):
+                with self.assertRaisesRegex(MODULE.CosignEvidenceError, exactly(reason)):
                     MODULE.statement_from_sigstore_bundle(bundle)
 
     def test_attest_image_cli_attaches_evidence_to_the_subject_repository(self):

@@ -474,7 +474,7 @@ run_plan() {
     CI_ENTRY_WORKFLOW_SHA=89abcdef0123456789abcdef0123456789abcdef \
     CI_ENTRY_RUN_ID=24680 CI_ENTRY_RUN_ATTEMPT=3 CI_ENTRY_JOB_ID=build-test \
     CI_LEVEL_ID=unit CI_LEVEL_FAIL_FAST=true \
-    RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+    RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux PRISMA_SCHEMA_ENGINE_AVAILABLE=false \
     RUNNER_TEMP="$plan_fixture/runner-temp" \
     GITHUB_ENV="$plan_fixture/runner-temp/_runner_file_commands/GITHUB_ENV" \
     GITHUB_OUTPUT="$plan_fixture/runner-temp/_runner_file_commands/GITHUB_OUTPUT" \

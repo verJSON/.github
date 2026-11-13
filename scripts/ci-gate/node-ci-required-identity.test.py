@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "20c09e52bef77b4719d85af594d32afae49bb622a5cc1995160ccf5d53630b2c"
+LEGACY_SHA256 = "08f6dace220580c55eab9c729a93453c50cf2fa30362f4ae4f6dc306f2491cbe"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -124,7 +124,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             source_error = StringIO()
             with redirect_stderr(source_error), self.assertRaises(SystemExit):
                 generator.main(["--check"])
-            self.assertIn("source workflow exceeds 480000 UTF-8 bytes", source_error.getvalue())
+            self.assertIn("source workflow exceeds 490000 UTF-8 bytes", source_error.getvalue())
             self.assertEqual(sentinel, target.read_bytes())
             self.assertEqual(before_source_guard, target.stat().st_mtime_ns)
 
@@ -134,7 +134,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             output_error = StringIO()
             with redirect_stderr(output_error), self.assertRaises(SystemExit):
                 generator.main(["--check"])
-            self.assertIn("generated protected workflow exceeds 480000 UTF-8 bytes", output_error.getvalue())
+            self.assertIn("generated protected workflow exceeds 490000 UTF-8 bytes", output_error.getvalue())
             self.assertEqual(sentinel, target.read_bytes())
             self.assertEqual(before_output_guard, target.stat().st_mtime_ns)
 
@@ -1825,7 +1825,8 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                 "RUNNER_TEMP": str(runner_temp),
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
-            "GITHUB_ENV": str(command_file),
+                "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
+                "GITHUB_ENV": str(command_file),
                 "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                 "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
                 **plan_environment,
@@ -2085,20 +2086,21 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                             "RUNNER_TEMP": str(runner_temp),
                             "RUNNER_ENVIRONMENT": "github-hosted",
                             "RUNNER_OS": "Linux",
+                            "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
                             "GITHUB_ENV": str(command_file),
                             "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
-                        "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
-                        "CI_ENTRY_REPOSITORY": "Verjson/fixture",
-                        "CI_ENTRY_EVENT": "pull_request",
-                        "CI_ENTRY_REF": "refs/pull/7/merge",
-                        "CI_ENTRY_COMMIT": "a" * 40,
-                        "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
-                        "CI_ENTRY_RUN_ID": "123",
-                        "CI_ENTRY_RUN_ATTEMPT": "1",
-                        "CI_ENTRY_JOB_ID": "build-test",
-                        "CI_LEVEL_ID": "test-levels",
-                        "CI_LEVEL_FAIL_FAST": "true",
-                        "PWD": str(workspace),
+                            "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
+                            "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                            "CI_ENTRY_EVENT": "pull_request",
+                            "CI_ENTRY_REF": "refs/pull/7/merge",
+                            "CI_ENTRY_COMMIT": "a" * 40,
+                            "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                            "CI_ENTRY_RUN_ID": "123",
+                            "CI_ENTRY_RUN_ATTEMPT": "1",
+                            "CI_ENTRY_JOB_ID": "build-test",
+                            "CI_LEVEL_ID": "test-levels",
+                            "CI_LEVEL_FAIL_FAST": "true",
+                            "PWD": str(workspace),
                             **self.script_plan_environment(runner_temp, '["first"]'),
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
@@ -2606,6 +2608,7 @@ PY
                     "RUNNER_TEMP": str(runner_temp),
                     "RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_OS": "Linux",
+                    "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
                     "GITHUB_ENV": str(command_file),
                     "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                     "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),

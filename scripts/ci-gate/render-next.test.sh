@@ -50,14 +50,22 @@ order="$(printf '%s\n' "$out" | grep -E '^## ' | paste -sd, -)"
 [ "$(printf '%s\n' "$out" | grep -c '^# archive$')" -eq 0 ] \
   && pass "0000-archive.md is excluded from the log" || fail "archive must be excluded"
 
+# The engine exits 1 for every refusal and names it on a `changelog:` line; a
+# missing NEXT/ directory holds no fragments, so both cases share that line.
+renders_nothing() { # renders_nothing <fixture>
+  local status=0
+  LC_ALL=C bash "$1/scripts/render-next.sh" >/dev/null 2>"$1/render.err" || status=$?
+  [ "$status" -eq 1 ] && [ "$(cat "$1/render.err")" = 'changelog: no unreleased fragments' ]
+}
+
 # 2. Missing NEXT/ directory -> non-zero exit.
 d="$(new_fixture)"; rm -rf "$d/NEXT"
-bash "$d/scripts/render-next.sh" >/dev/null 2>&1 \
-  && fail "missing NEXT/ must exit non-zero" || pass "missing NEXT/ exits non-zero"
+renders_nothing "$d" \
+  && pass "missing NEXT/ exits non-zero" || fail "missing NEXT/ must exit non-zero: $(cat "$d/render.err")"
 
 # 3. No fragments (only README) -> non-zero exit.
 d="$(new_fixture)"; printf 'x\n' > "$d/NEXT/README.md"
-bash "$d/scripts/render-next.sh" >/dev/null 2>&1 \
-  && fail "no fragments must exit non-zero" || pass "no fragments exits non-zero"
+renders_nothing "$d" \
+  && pass "no fragments exits non-zero" || fail "no fragments must exit non-zero: $(cat "$d/render.err")"
 
 if [ "$fails" -eq 0 ]; then echo "All tests passed."; exit 0; else echo "$fails test(s) failed."; exit 1; fi

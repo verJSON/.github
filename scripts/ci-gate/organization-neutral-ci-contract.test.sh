@@ -4,6 +4,20 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
+# Under set -e a bare `! grep` can never fail the script, and grep's exit 2 (an
+# unreadable file) would read as "absent". Only exit 1 proves absence.
+assert_absent() {
+  local search_status=0
+  grep "$@" || search_status=$?
+  [ "$search_status" -eq 1 ] && return 0
+  if [ "$search_status" -eq 0 ]; then
+    printf 'FAIL - %s: found what must be absent: grep %s\n' "${0##*/}" "$*" >&2
+  else
+    printf 'FAIL - %s: could not search (grep exit %s): grep %s\n' "${0##*/}" "$search_status" "$*" >&2
+  fi
+  exit 1
+}
+
 legacy_prefix="VERJSON_"
 contract_paths=(.github scripts docs)
 
@@ -124,8 +138,8 @@ done
 grep -qF 'vars.CI_LANE_PRIVILEGED' scripts/gen-privileged-merge-caller.sh
 grep -qF 'vars.CI_RUNNER_DEFAULT' scripts/gen-changelog-caller.sh
 grep -qF 'release_environment: release-app' scripts/gen-container-release.sh
-! grep -qF 'secrets.RELEASE_APP_PRIVATE_KEY' scripts/gen-container-release.sh
-! grep -qF 'secrets.RUNNER_DEPLOY_TOKEN' .github/workflows/container-deployment.yml
+assert_absent -qF 'secrets.RELEASE_APP_PRIVATE_KEY' scripts/gen-container-release.sh
+assert_absent -qF 'secrets.RUNNER_DEPLOY_TOKEN' .github/workflows/container-deployment.yml
 grep -qF 'secrets.DIGITALOCEAN_RUNNER_FLEET_TOKEN' .github/workflows/container-deployment.yml
 grep -qF 'secrets.GH_RUNNER_REGISTRATION_APP_PRIVATE_KEY' .github/workflows/container-deployment.yml
 

@@ -83,9 +83,16 @@ assert_contract() {
 }
 
 assert_mutation_rejected() {
-  local description="$1" errors
+  local description="$1" reason="$2" errors
   errors="$(contract_errors "$tmp/review.yml" "$tmp/privileged.yml")"
-  if [ -n "$errors" ]; then pass "$description"; else fail "$description"; fi
+  if [ -z "$errors" ]; then
+    fail "$description"
+  elif grep -qxF -- "$reason" <<<"$errors"; then
+    pass "$description"
+  else
+    printf '  %s\n' "$errors"
+    fail "$description: rejected without naming: $reason"
+  fi
 }
 
 reset_fixtures() {
@@ -98,31 +105,38 @@ assert_contract "$review_workflow" "$privileged_workflow" \
 
 reset_fixtures
 sed -i '/^permissions:$/i\\  ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}' "$tmp/review.yml"
-assert_mutation_rejected 'mutation: review workflow cannot receive ORG_ADMIN_TOKEN'
+assert_mutation_rejected 'mutation: review workflow cannot receive ORG_ADMIN_TOKEN' \
+  'review workflow receives ORG_ADMIN_TOKEN'
 
 reset_fixtures
 sed -i '/^  privileged_merge:$/a\\    needs: attacker_route\n    runs-on: ${{ needs.attacker_route.outputs.selector }}' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: runner-produced output cannot route the terminal credential'
+assert_mutation_rejected 'mutation: runner-produced output cannot route the terminal credential' \
+  'runner-produced data can select terminal credential placement'
 
 reset_fixtures
 sed -i '/^  invalid_verjson_route:$/a\\    env:\n      GH_TOKEN: ${{ secrets.MERGE_APP_PRIVATE_KEY }}' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: invalid-route observability cannot receive the terminal credential'
+assert_mutation_rejected 'mutation: invalid-route observability cannot receive the terminal credential' \
+  'invalid-route observability guard receives a terminal credential'
 
 reset_fixtures
 sed -i '0,/persist-credentials: false/s//persist-credentials: true/' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: immutable verifier checkout cannot persist credentials'
+assert_mutation_rejected 'mutation: immutable verifier checkout cannot persist credentials' \
+  'verifier checkout persists credentials'
 
 reset_fixtures
 sed -i '0,/repository: Verjson\/.github/s//repository: ${{ github.repository }}/' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: verifier cannot be checked out from the target repository'
+assert_mutation_rejected 'mutation: verifier cannot be checked out from the target repository' \
+  'verifier checkout is not restricted to the canonical repository'
 
 reset_fixtures
 sed -i '0,/ref: ${{ steps.trusted-revision.outputs.sha }}/s//ref: ${{ inputs.expected_head_sha }}/' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: verifier cannot be checked out from the PR head'
+assert_mutation_rejected 'mutation: verifier cannot be checked out from the PR head' \
+  'verifier checkout is not bound to the executing trusted revision'
 
 reset_fixtures
 sed -i '/^      - name: Authorize terminal merge from trusted metadata$/i\\      - uses: attacker/pr-controlled-action@main' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: terminal merge job cannot execute an additional action'
+assert_mutation_rejected 'mutation: terminal merge job cannot execute an additional action' \
+  'terminal merge job action boundary drifted'
 
 if [ "$failures" -ne 0 ]; then
   printf '%d test(s) failed.\n' "$failures" >&2
