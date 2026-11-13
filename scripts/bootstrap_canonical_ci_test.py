@@ -488,6 +488,27 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn(f"secret {name}", receipt["error"])
             self.assertNotIn("top-secret", json.dumps(receipt))
 
+    def test_invalid_utf8_manifest_reports_pre_effect_failure_on_stdout(self):
+        manifest_path = self.root / "invalid-utf8.json"
+        receipt_path = self.root / "receipt.json"
+        manifest_path.write_bytes(b"\xff")
+
+        with mock.patch.object(bootstrap, "GitHub") as github, mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout, mock.patch.object(
+            sys,
+            "argv",
+            ["bootstrap-canonical-ci.py", "apply", str(manifest_path), "--receipt", str(receipt_path)],
+        ):
+            self.assertEqual(bootstrap.main(), 1)
+
+        github.assert_not_called()
+        self.assertFalse(receipt_path.exists())
+        receipt = json.loads(stdout.getvalue())
+        self.assertEqual(receipt["mode"], "apply")
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("UTF-8", receipt["error"])
+
     def test_traversal_duplicate_output_and_unknown_generator_are_rejected(self):
         for mutation in ("repository", "output", "generator", "duplicate"):
             value = manifest()

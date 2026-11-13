@@ -419,7 +419,11 @@ def main() -> int:
     exit_code = 0
     partial_effects = False
     try:
-        manifest = validate_manifest(json.loads(arguments.manifest.read_text(encoding="utf-8")))
+        try:
+            manifest_text = arguments.manifest.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise BootstrapError("manifest must be UTF-8") from error
+        manifest = validate_manifest(json.loads(manifest_text))
         receipt = converge(manifest, GitHub(arguments.gh), arguments.workspace, arguments.contract_root, arguments.mode)
     except (BootstrapError, OSError, json.JSONDecodeError) as error:
         partial_effects = isinstance(error, ConvergenceError)
