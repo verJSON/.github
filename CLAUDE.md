@@ -77,13 +77,13 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open and natively blocking #1945, verified 2026-11-13 via `gh issue view` and the native dependency API.
+
 - [#2066](https://github.com/Verjson/.github/issues/2066) — Protected type-surface baseline recovery is needed after retention removes the declared release; open, verified 2026-11-13 with `gh issue view` and Verjson/authz#207.
 
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
 
-- [#1944](https://github.com/verJSON/.github/issues/1944) — Generated container-candidate callers still run full multi-architecture candidate validation on draft pull requests; canonical draft/ready scheduling is unimplemented. GitHub's native relationships record #1944 as blocking #1945, among others (it has no `blocked by` edge). Verified open 2026-11-12 via live `gh issue view` and a GraphQL relationship query.
-
-- [#1945](https://github.com/verJSON/.github/issues/1945) — The terminal merge still uses `gh pr merge --admin` (`scripts/ci-gate/terminal-merge.sh:43`). [ADR 0260](docs/decisions/0260-native-merge-admission-through-a-producer-posted-check/README.md) and #2055 ship a producer-posted `merge-admission` check that no ruleset requires yet. The remaining work is to replace the admin merge with a native merge gated on `merge-admission` after ADR 0260's rollout enables that ruleset. Draft ADR proposal #1946 is still open. Native relationships: blocked by #1944; blocking #1949, among others. Verified open 2026-11-12 via live `gh issue view`.
+- [#1945](https://github.com/verJSON/.github/issues/1945) — The autonomous terminal helper is disabled pending non-bypass admission (#1956). [ADR 0260](docs/decisions/0260-native-merge-admission-through-a-producer-posted-check/README.md) and #2055 ship a producer-posted `merge-admission` check that no ruleset requires yet. Draft [ecosystem ADR 0014](https://github.com/VerJSON/verjson-docs/pull/34) now carries the queue proposal; #1946 retains its pointer and evidence. Native relationships show #1945 blocked by #1964 and blocking #1949. Verified open 2026-11-13 via `gh issue view` and the native dependency API.
 
 - [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
 

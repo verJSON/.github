@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "observed_date_utc": "2026-10-29",
+  "repository_family": "VerJSON",
+  "organization_plan": "team",
+  "actions_allowed_repositories": {
+    "total": 4,
+    "public": 2,
+    "private": 2
+  },
+  "public_candidates": [
+    {
+      "repository": "VerJSON/.github",
+      "default_branch_sha": "4abc3be930da8489ea4d028637973c20c7885722",
+      "default_branch_pr_target_opened_rearm": true,
+      "review_key_validation_path": true
+    },
+    {
+      "repository": "VerJSON/verjson-git-runners",
+      "default_branch_sha": "f00fe06b68bb72113930a0a7d5ce90fa95d81c17",
+      "default_branch_pr_target_opened_rearm": true,
+      "reusable_workflow_pin": "2d1ea177fdafe361f9369526cbab8bc05f9e476d",
+      "review_secret_reference": true,
+      "trusted_lane_can_select_self_hosted": true
+    }
+  ],
+  "organization_actions_secret_visibility_counts": {
+    "all": 12,
+    "private": 0,
+    "selected": 0
+  },
+  "organization_actions_variable_visibility_counts": {
+    "all": 43,
+    "private": 0,
+    "selected": 0
+  },
+  "organization_app_repository_selection_counts": {
+    "all": 10,
+    "selected": 10
+  },
+  "organization_required_workflow_ref_scope": "default branch and, for authorization arm, develop",
+  "source_urls": [
+    "https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target",
+    "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue"
+  ],
+  "limitations": "Point-in-time read-only metadata inventory. Counts and configurations may change. No secret names or values are recorded. Trigger and configuration inspection does not prove a secret was used or a production runner actually executed; private-repository queue eligibility and end-to-end queue behavior were not tested."
+}
