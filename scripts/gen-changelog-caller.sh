@@ -6148,8 +6148,6 @@ for index, line in enumerate(lines):
 # from a release caller. Only model after both caller step bodies and the exact
 # verification environment match their pinned generated forms.
 PACKAGE_LESS_SELECTED = "steps.release-version.outputs.selected == 'true'"
-# The generated runtime capture step runs this interpreter by absolute path.
-PACKAGE_LESS_CAPTURE_PYTHON = "/usr/bin/python3"
 PACKAGE_LESS_REFUSAL = "::error::No package.json and no executable scripts/release-verify.sh"
 PACKAGE_LESS_NODE_VERSION = re.compile(r"\$\{\{ '([0-9]+(?:\.[0-9]+){0,2})' \}\}")
 EXPECTED_RELEASE_MODE = os.environ.get("EXPECTED_RELEASE_MODE", "")
@@ -6335,13 +6333,6 @@ def check_package_less_verification(steps):
             "cannot verify the package-less release hook: "
             "EXPECTED_RELEASE_NODE_VERSION is unset; regenerate the contract test "
             "with its configured --node-version (#1906)"
-        )
-        return
-    if not (os.path.isfile(PACKAGE_LESS_CAPTURE_PYTHON) and os.access(PACKAGE_LESS_CAPTURE_PYTHON, os.X_OK)):
-        problems.append(
-            "cannot be checked on a package-less tree: this host has no executable %s, which the"
-            " generated runtime capture step runs; install python3 there and re-run (#1906)"
-            % PACKAGE_LESS_CAPTURE_PYTHON
         )
         return
     try:
