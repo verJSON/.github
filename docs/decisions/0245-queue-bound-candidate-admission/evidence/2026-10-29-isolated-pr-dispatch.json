@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "repository": "test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32",
+  "pull_request": "https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/pull/1",
+  "initial_observation": {
+    "head": "4de76d99644b2c4e44be911a0c918a5aa3e86802",
+    "workflow_registry_count": 0,
+    "run_count": 0,
+    "head_check_run_count": 0
+  },
+  "seed": {
+    "branch": "pm-queue-seed-20261029171908-e6821b0d",
+    "initial_sha": "0fe3c7fac109f60d6b133ba675d4d8cc096d0ae5",
+    "workflow_commit_sha": "7a8eec65fefe72f21e2e6ecd3296ffb8304e90d2",
+    "workflow_sha256": "13889e4649340e43b6cac8a5a8a913c768c9d1a445935bde360534f16e365622",
+    "registration": {
+      "id": 400898642,
+      "name": "Isolated queue canary",
+      "path": ".github/workflows/queue-canary.yml",
+      "state": "active"
+    },
+    "runs_before_pr_sync": 0
+  },
+  "pr_sync": {
+    "head": "4e63fcd3fc1d299d3ad2eccf50cb7516f0bb393f",
+    "target": "7a8eec65fefe72f21e2e6ecd3296ffb8304e90d2",
+    "default_branch": "pm-queue-seed-20261029171908-e6821b0d",
+    "draft": true,
+    "tree": "2c54a2ad9e11d97eb9fefe1d43a9b5ad123b829a"
+  },
+  "successful_pr_head_evidence": {
+    "run": {
+      "id": 40920898226,
+      "workflow_id": 400898642,
+      "attempt": 1,
+      "event": "pull_request",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "4e63fcd3fc1d299d3ad2eccf50cb7516f0bb393f",
+      "pull_requests": [
+        {
+          "number": 1,
+          "head_sha": "4e63fcd3fc1d299d3ad2eccf50cb7516f0bb393f",
+          "base_sha": "7a8eec65fefe72f21e2e6ecd3296ffb8304e90d2"
+        }
+      ]
+    },
+    "job": {
+      "id": 123613504993,
+      "name": "canary-signal",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_group_name": "GitHub Actions"
+    },
+    "check": {
+      "id": 123613504993,
+      "name": "canary-signal",
+      "status": "completed",
+      "conclusion": "success",
+      "app_id": 15368,
+      "app_slug": "github-actions",
+      "details_url": "https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/actions/runs/40920898226/job/123613504993"
+    }
+  },
+  "teardown": {
+    "original_default": "main",
+    "original_main_sha": "0fe3c7fac109f60d6b133ba675d4d8cc096d0ae5",
+    "default_restored": true,
+    "seed_deleted_404": true,
+    "seed_commit_retained_by_target": true,
+    "target_sha": "7a8eec65fefe72f21e2e6ecd3296ffb8304e90d2",
+    "head_sha": "4e63fcd3fc1d299d3ad2eccf50cb7516f0bb393f",
+    "rule_id": 26142157,
+    "draft": true,
+    "review_decision": "REVIEW_REQUIRED",
+    "in_merge_queue": false,
+    "auto_merge_request": null
+  },
+  "webhooks": {
+    "owner_reported_no_active_organization_webhooks": true,
+    "organization_webhook_api_inventory": "unreadable; not API-verified"
+  },
+  "local_receipt_sha256": {
+    "read-only-workflow-diagnosis": "1ab5f2c91709f4dfc0d767db8a2f68fe921ce8bc8e9f19d8c0219a1b1b09d96b",
+    "seed-diagnostic-proposal": "3fbd443c5687e466b370dc1a67dc159f2270311dd0a39d386e809979db012138",
+    "seed-create-readback": "35f3aadeee8e311fcd8a0c79bf3d0b88d5db6418bc95568e1030fc689dd23442",
+    "seed-default-readback": "952256a5d9987a3f078e9241397f472e2584e8289c1e13e2f461c7b27d235993",
+    "seed-workflow-readback": "6581a4f33ee813ead49aa9b2b1f885190329c325bfda9980d0832976e236dfdc",
+    "seed-pr-sync-readback": "6b898903514f958902ab6d5f701028db2c2e938dbbd589465dad4dd467568e67",
+    "seed-pr-check-evidence": "6e9650d64a726ac9eeedd61e47496af6843b269d8f10acd556af0fb82ae43318",
+    "seed-default-restored-readback": "79ff897a2df1337be2a5a42621dc1aaf8050d40063ac739fc7e6fbaa5a24a058",
+    "seed-delete-verify": "c46ba73f60e7a0a88f05c4d1d1ff657e1c2d4c900d2284a01de911dece7f3665",
+    "seed-final-readback": "dff9d15da7f8b2cc2947f8f42796c292f2b22842cae399bae1749a26600e3183",
+    "seed-final-queue-readback": "b54578d90eae320da9903f18645404cb4df4258a1da9ececa2925b1bfcd4820d",
+    "default-diagnostic-preflight": "d0b976fb573455599fd62cb839dffcee37e6b5b7c9bfe1556933b693e5008262"
+  },
+  "limitations": "Single observed PR-head workflow dispatch in an isolated public organization. Does not establish a general default-branch registration prerequisite, merge-group execution, approval enforcement, private behavior, or production readiness. Local receipt hashes bind files but do not authenticate GitHub responses."
+}
