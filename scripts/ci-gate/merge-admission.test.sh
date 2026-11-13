@@ -259,14 +259,24 @@ unset DETAILS_URL
 
 # --- one App binding ---------------------------------------------------------------------------
 # The producer checks the App it created as; the assertion sets aside that App's checks. Two
-# different ids would make every evaluation read its own in-progress check as pending.
+# different ids would make every evaluation read its own in-progress check as pending, and an
+# id other than the conformance policy's merge-admission binding, which the ruleset requires,
+# makes the asserted --admin path refuse every merge (ARB-2031-2026-11-12 C10 (i)(a)).
 bound_id() { sed -n 's/^readonly MERGE_ADMISSION_APP_ID=\([0-9][0-9]*\)$/\1/p' "$1"; }
 producer_app="$(bound_id "$here/merge-admission.sh")"
 assertion_app="$(bound_id "$here/../assert-mergeable-head.sh")"
-if [ -n "$producer_app" ] && [ "$producer_app" = "$assertion_app" ] && [ "$producer_app" = "$AI_REVIEW_APP_ID" ]; then
-  pass "the producer and the assertion bind the same AI review App id"
+policy_app="$(jq -r '.merge_admission_binding.integration_id | numbers | tostring' \
+  "$here/../../config/org-ruleset-conformance-policy.json")"
+if [ -n "$policy_app" ] && [ "$producer_app" = "$policy_app" ] && [ "$assertion_app" = "$policy_app" ]; then
+  pass "the producer, the assertion, and the conformance policy bind the same AI review App id"
 else
-  fail "the producer and the assertion bind the same AI review App id (producer: '$producer_app', assertion: '$assertion_app', expected: $AI_REVIEW_APP_ID)"
+  fail "the producer, the assertion, and the conformance policy bind the same AI review App id (producer: '$producer_app', assertion: '$assertion_app', policy: '$policy_app')"
+fi
+# The equality above holds if all three drift together; this test's fixtures pin the App.
+if [ "$policy_app" = "$AI_REVIEW_APP_ID" ]; then
+  pass "the bound AI review App id is this test's AI review App $AI_REVIEW_APP_ID"
+else
+  fail "the bound AI review App id is this test's AI review App $AI_REVIEW_APP_ID (policy: '$policy_app')"
 fi
 
 if [ "$fails" -ne 0 ]; then

@@ -75,7 +75,10 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
           DECLARATION_PATH: ${{ inputs.protected-type-surface-declaration-path }}
           EXPECTED_PACKAGE: ${{ inputs.protected-type-surface-expected-package }}
           EXPECTED_SCRIPT: ${{ inputs.protected-type-surface-expected-script }}
+          EXPECTED_HEAD_SHA: ${{ inputs.head-sha }}
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -88,9 +91,11 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
           import json
           import os
           import re
+          import shutil
           import stat
           import subprocess
           from pathlib import Path
+          from urllib.parse import quote
 
           repository = os.environ["REPOSITORY"]
           declaration_path = os.environ["DECLARATION_PATH"]
@@ -121,18 +126,32 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
                   raise SystemExit("authenticated GitHub declaration lookup failed")
               return result.stdout
 
-          # This is the sole pull-request lookup. The immutable base SHA it
-          # returns is the only ref used for the declaration request below.
-          base_sha = github_api(
-              [f"repos/{repository}/pulls/{pull_request_number}", "--jq", ".base.sha"]
-          ).decode("utf-8", errors="strict").strip()
-          if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
-              raise SystemExit("pull-request base SHA is not an immutable commit")
+          def pull_record():
+              try:
+                  record = json.loads(github_api([f"repos/{repository}/pulls/{pull_request_number}"]))
+                  base = record["base"]["sha"]
+                  head = record["head"]["sha"]
+                  head_repo = record["head"]["repo"]["full_name"]
+              except (ValueError, KeyError, TypeError) as error:
+                  raise SystemExit("pull-request identity is malformed") from error
+              if (record.get("state") != "open"
+                  or not isinstance(base, str)
+                  or re.fullmatch(r"[0-9a-f]{40}", base) is None
+                  or base != os.environ["EXPECTED_BASE_SHA"]
+                  or not isinstance(head, str)
+                  or re.fullmatch(r"[0-9a-f]{40}", head) is None
+                  or head != os.environ["EXPECTED_HEAD_SHA"]
+                  or not isinstance(head_repo, str)
+                  or head_repo.lower() != repository.lower()):
+                  raise SystemExit("pull-request base or head identity is unauthorized")
+              return record, base, head
+
+          pull, base_sha, head_sha = pull_record()
           declaration_bytes = github_api(
               [
                   "-H",
                   "Accept: application/vnd.github.raw+json",
-                  f"repos/{repository}/contents/{declaration_path}?ref={base_sha}",
+                  f"repos/{repository}/contents/{declaration_path}?ref={quote(base_sha)}",
               ]
           )
 
@@ -147,42 +166,126 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
                   result[key] = value
               return result
 
-          try:
-              declaration = json.loads(
-                  declaration_bytes.decode("utf-8"),
-                  object_pairs_hook=reject_duplicate_object_keys,
-              )
-          except (UnicodeDecodeError, json.JSONDecodeError, DuplicateObjectKeyError) as error:
-              raise SystemExit(f"protected type-surface declaration is invalid: {error}")
-          if not isinstance(declaration, dict) or set(declaration) != {"package", "version", "script"}:
-              raise SystemExit("protected type-surface declaration requires exactly package, version, and script")
-
-          package = declaration["package"]
-          version = declaration["version"]
-          script = declaration["script"]
           package_pattern = r"@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*"
           version_core = r"(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)"
           stable_version = re.compile(version_core)
           prerelease_version = re.compile(
               version_core + r"-(?:[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)"
           )
-          if (
-              not isinstance(package, str)
-              or re.fullmatch(package_pattern, package) is None
-              or package != expected_package
-              or not isinstance(version, str)
-              or (stable_version.fullmatch(version) is None
-                  and not (os.environ["ALLOW_PRERELEASE"] == "true"
-                           and prerelease_version.fullmatch(version)))
-              or version == "latest"
-              or not isinstance(script, str)
-              or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", script) is None
-              or script != expected_script
-          ):
-              raise SystemExit("protected type-surface declaration is unauthorized")
+          def parse_declaration(content):
+              try:
+                  declaration = json.loads(
+                      content.decode("utf-8"), object_pairs_hook=reject_duplicate_object_keys,
+                  )
+              except (UnicodeDecodeError, json.JSONDecodeError, DuplicateObjectKeyError) as error:
+                  raise SystemExit(f"protected type-surface declaration is invalid: {error}")
+              if not isinstance(declaration, dict) or set(declaration) != {"package", "version", "script"}:
+                  raise SystemExit("protected type-surface declaration requires exactly package, version, and script")
+              package, version, script = (declaration[key] for key in ("package", "version", "script"))
+              if (
+                  not isinstance(package, str)
+                  or re.fullmatch(package_pattern, package) is None
+                  or package != expected_package
+                  or not isinstance(version, str)
+                  or (stable_version.fullmatch(version) is None
+                      and not (os.environ["ALLOW_PRERELEASE"] == "true"
+                               and prerelease_version.fullmatch(version)))
+                  or not isinstance(script, str)
+                  or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", script) is None
+                  or script != expected_script
+              ):
+                  raise SystemExit("protected type-surface declaration is unauthorized")
+              return package, version, script
+
+          package, version, script = parse_declaration(declaration_bytes)
+          base_version = version
+          base_declaration_sha256 = hashlib.sha256(declaration_bytes).hexdigest()
+
+          # The registry query runs after setup-node and the consumer npm-config guard.
+          # Keep credentials out of the checked-out tree and out of diagnostics.
+          config_root = Path(os.environ["RUNNER_TEMP"]) / (
+              f"protected-baseline-registry-{os.environ['RUN_ID']}-{os.environ['RUN_ATTEMPT']}"
+          )
+          config_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+          user_config = config_root / "user.npmrc"
+          global_config = config_root / "global.npmrc"
+          try:
+              user_config.write_text(
+                  f"{package.split('/')[0]}:registry=https://npm.pkg.github.com/\\n"
+                  "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\\n",
+                  encoding="utf-8",
+              )
+              global_config.write_text("", encoding="utf-8")
+              npm_environment = {
+                  **os.environ,
+                  "NPM_CONFIG_USERCONFIG": str(user_config),
+                  "NPM_CONFIG_GLOBALCONFIG": str(global_config),
+                  "NPM_CONFIG_CACHE": str(config_root / "cache"),
+              }
+              registry = subprocess.run(
+                  ["npm", "view", package, "versions", "--json"],
+                  check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                  env=npm_environment,
+              )
+          finally:
+              shutil.rmtree(config_root)
+          if registry.returncode != 0 or len(registry.stdout) > 1024 * 1024:
+              raise SystemExit("protected baseline registry lookup failed")
+          try:
+              versions = json.loads(registry.stdout)
+          except (UnicodeDecodeError, json.JSONDecodeError) as error:
+              raise SystemExit("protected baseline registry response is invalid") from error
+          if isinstance(versions, str):
+              versions = [versions]
+          if (not isinstance(versions, list) or not versions
+              or len(versions) > 10000
+              or any(not isinstance(item, str) for item in versions)):
+              raise SystemExit("protected baseline registry versions are invalid")
+
+          recovery_fields = {}
+          if version not in versions:
+              if stable_version.fullmatch(version) is None:
+                  raise SystemExit("protected prerelease baseline is unavailable; recovery requires a stable base")
+              if type(pull.get("changed_files")) is not int or pull["changed_files"] != 2:
+                  raise SystemExit("baseline recovery requires only the declaration and one NEXT entry")
+              try:
+                  changed = json.loads(github_api([
+                      f"repos/{repository}/pulls/{pull_request_number}/files?per_page=100"
+                  ]))
+              except (ValueError, TypeError) as error:
+                  raise SystemExit("baseline recovery changed-file list is invalid") from error
+              next_path = next((item.get("filename") for item in changed
+                  if isinstance(item, dict) and item.get("status") == "added"
+                  and isinstance(item.get("filename"), str)
+                  and re.fullmatch(r"NEXT/[0-9]{4}-[0-9]{2}-[0-9]{2}-issue-[A-Za-z0-9-]{1,120}\\.md", item["filename"])), None) if isinstance(changed, list) else None
+              if (not isinstance(changed, list) or len(changed) != 2
+                  or next_path is None
+                  or not any(isinstance(item, dict)
+                      and item.get("filename") == declaration_path
+                      and item.get("status") == "modified" for item in changed)):
+                  raise SystemExit("baseline recovery changes unauthorized files")
+              head_bytes = github_api([
+                  "-H", "Accept: application/vnd.github.raw+json",
+                  f"repos/{repository}/contents/{declaration_path}?ref={quote(head_sha)}",
+              ])
+              _, head_version, _ = parse_declaration(head_bytes)
+              if (stable_version.fullmatch(head_version) is None
+                  or tuple(map(int, head_version.split("."))) <= tuple(map(int, version.split(".")))
+                  or head_version not in versions):
+                  raise SystemExit("baseline recovery requires a newer published stable version")
+              _, current_base, current_head = pull_record()
+              if current_base != base_sha or current_head != head_sha:
+                  raise SystemExit("baseline recovery pull request moved during verification")
+              recovery_fields = {
+                  "headSha": head_sha,
+                  "baseVersion": base_version,
+                  "baseDeclarationSha256": base_declaration_sha256,
+              }
+              declaration_bytes = head_bytes
+              version = head_version
 
           receipt = {
-              "schemaVersion": 1,
+              "schemaVersion": 2 if recovery_fields else 1,
               "repository": repository,
               "declarationPath": declaration_path,
               "baseSha": base_sha,
@@ -190,6 +293,7 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
               "package": package,
               "version": version,
               "script": script,
+              **recovery_fields,
           }
           run_root = Path(os.environ["RUNNER_TEMP"]) / (
               f"protected-type-surface-{os.environ['RUN_ID']}-{os.environ['RUN_ATTEMPT']}"
@@ -208,6 +312,8 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
               output.write(f"compatibility-ranges={request}\\n")
               output.write(f"receipt-path={receipt_path}\\n")
               output.write(f"base-sha={base_sha}\\n")
+              output.write(f"base-version={base_version}\\n")
+              output.write(f"base-declaration-sha256={base_declaration_sha256}\\n")
               output.write(f"declaration-sha256={receipt['declarationSha256']}\\n")
               output.write(f"package={package}\\n")
               output.write(f"version={version}\\n")
@@ -225,6 +331,7 @@ PROTECTED_BASELINE_BIND_STEP = """      - name: Bind protected baseline receipt 
           python3 -I - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
 
           class DuplicateObjectKeyError(ValueError):
@@ -252,7 +359,19 @@ PROTECTED_BASELINE_BIND_STEP = """      - name: Bind protected baseline receipt 
               "schemaVersion", "repository", "declarationPath", "baseSha",
               "declarationSha256", "package", "version", "script",
           }
-          if not isinstance(receipt, dict) or set(receipt) != receipt_fields or receipt["schemaVersion"] != 1:
+          recovery_fields = {"headSha", "baseVersion", "baseDeclarationSha256"}
+          if (not isinstance(receipt, dict)
+              or (receipt.get("schemaVersion"), set(receipt)) not in (
+                  (1, receipt_fields), (2, receipt_fields | recovery_fields)
+              )
+              or (receipt["schemaVersion"] == 2 and (
+                  not isinstance(receipt["headSha"], str)
+                  or re.fullmatch(r"[0-9a-f]{40}", receipt["headSha"]) is None
+                  or not isinstance(receipt["baseDeclarationSha256"], str)
+                  or re.fullmatch(r"[0-9a-f]{64}", receipt["baseDeclarationSha256"]) is None
+                  or not isinstance(receipt["baseVersion"], str)
+                  or re.fullmatch(r"(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)", receipt["baseVersion"]) is None
+              ))):
               raise SystemExit("protected baseline receipt has an invalid shape")
           provenance_path = Path(os.environ["COMPATIBILITY_PROVENANCE"])
           provenance = read_json(provenance_path)
@@ -304,13 +423,21 @@ PROTECTED_BASELINE_TRANSFER_VALIDATION = """          protected_baseline = prove
                   "schemaVersion", "repository", "declarationPath", "baseSha",
                   "declarationSha256", "package", "version", "script", "artifact",
               }
-              if not isinstance(protected_baseline, dict) or set(protected_baseline) != receipt_fields:
+              recovery_fields = {"headSha", "baseVersion", "baseDeclarationSha256"}
+              if (not isinstance(protected_baseline, dict)
+                  or (protected_baseline.get("schemaVersion"), set(protected_baseline)) not in (
+                      (1, receipt_fields), (2, receipt_fields | recovery_fields)
+                  )):
                   raise SystemExit("protected baseline receipt is missing or malformed")
               if (
-                  protected_baseline["schemaVersion"] != 1
-                  or protected_baseline["repository"] != os.environ["PROTECTED_BASELINE_REPOSITORY"]
+                  protected_baseline["repository"] != os.environ["PROTECTED_BASELINE_REPOSITORY"]
                   or protected_baseline["declarationPath"] != expected_path
                   or protected_baseline["baseSha"] != os.environ["EXPECTED_PROTECTED_BASELINE_BASE_SHA"]
+                  or (protected_baseline["schemaVersion"] == 2 and (
+                      protected_baseline["headSha"] != os.environ["EXPECTED_PROTECTED_BASELINE_HEAD_SHA"]
+                      or protected_baseline["baseVersion"] != os.environ["EXPECTED_PROTECTED_BASELINE_BASE_VERSION"]
+                      or protected_baseline["baseDeclarationSha256"] != os.environ["EXPECTED_PROTECTED_BASELINE_BASE_DECLARATION_SHA256"]
+                  ))
                   or protected_baseline["declarationSha256"] != os.environ["EXPECTED_PROTECTED_BASELINE_DECLARATION_SHA256"]
                   or protected_baseline["package"] != os.environ["PROTECTED_BASELINE_EXPECTED_PACKAGE"]
                   or protected_baseline["script"] != os.environ["PROTECTED_BASELINE_EXPECTED_SCRIPT"]
@@ -2052,9 +2179,9 @@ def remove_step(document: str, step_name: str) -> str:
 
 def insert_protected_baseline_step(document: str) -> str:
     acquisition_start = document.index("  acquire-secretless-dependencies:\n")
-    checkout_marker = "      - uses: actions/checkout@"
-    checkout_start = document.index(checkout_marker, acquisition_start)
-    return document[:checkout_start] + PROTECTED_BASELINE_STEP + document[checkout_start:]
+    lock_marker = "      - name: Validate approved internal dependency lock\n"
+    lock_start = document.index(lock_marker, acquisition_start)
+    return document[:lock_start] + PROTECTED_BASELINE_STEP + document[lock_start:]
 
 
 def configure_protected_baseline(document: str) -> str:
@@ -2102,6 +2229,60 @@ def configure_protected_baseline(document: str) -> str:
         "COMPATIBILITY_RANGES: ${{ inputs.secretless-compatibility-ranges }}",
         dynamic_request,
     )
+    policy_environment = "          TRUSTED_PACKAGE_POLICY: ${{ vars.CI_SECRETLESS_PACKAGE_POLICY }}\n"
+    if acquisition.count(policy_environment) != 1:
+        raise SystemExit("protected node-ci repository policy environment drifted")
+    acquisition = acquisition.replace(
+        policy_environment,
+        policy_environment
+        + "          PROTECTED_BASELINE_RECEIPT_PATH: ${{ steps.resolve-protected-type-surface.outputs.receipt-path }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_HEAD_SHA: ${{ inputs.head-sha }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_BASE_DECLARATION_SHA256: ${{ steps.resolve-protected-type-surface.outputs.base-declaration-sha256 }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_DECLARATION_SHA256: ${{ steps.resolve-protected-type-surface.outputs.declaration-sha256 }}\n"
+        + "          PROTECTED_BASELINE_DECLARATION_PATH: ${{ inputs.protected-type-surface-declaration-path }}\n"
+        + "          PROTECTED_BASELINE_REPOSITORY: ${{ github.repository }}\n",
+        1,
+    )
+    policy_guard = (
+        "                  if not set(ranges).issubset(protected_ranges):\n"
+        "                      sys.exit(\"secretless compatibility package and ranges must be authorized by trusted repository policy\")\n"
+    )
+    if acquisition.count(policy_guard) != 1:
+        raise SystemExit("protected node-ci compatibility policy guard drifted")
+    acquisition = acquisition.replace(policy_guard, """                  if not set(ranges).issubset(protected_ranges):
+                      receipt_path = os.environ.get("PROTECTED_BASELINE_RECEIPT_PATH", "")
+                      try:
+                          receipt_file = Path(receipt_path)
+                          if not receipt_path or receipt_file.is_symlink() or not receipt_file.is_file():
+                              raise ValueError("recovery receipt is absent")
+                          receipt = json.loads(
+                              receipt_file.read_text(encoding="utf-8"),
+                              object_pairs_hook=reject_duplicate_object_keys,
+                          )
+                      except (OSError, ValueError, TypeError):
+                          sys.exit("secretless compatibility package and ranges must be authorized by trusted repository policy")
+                      recovery_fields = {
+                          "schemaVersion", "repository", "declarationPath", "baseSha",
+                          "headSha", "baseVersion", "baseDeclarationSha256",
+                          "declarationSha256", "package", "version", "script",
+                      }
+                      if (not isinstance(receipt, dict)
+                          or set(receipt) != recovery_fields
+                          or type(receipt["schemaVersion"]) is not int
+                          or receipt["schemaVersion"] != 2
+                          or receipt["repository"] != os.environ.get("PROTECTED_BASELINE_REPOSITORY")
+                          or receipt["declarationPath"] != os.environ.get("PROTECTED_BASELINE_DECLARATION_PATH")
+                          or receipt["baseSha"] != os.environ.get("EXPECTED_PROTECTED_BASELINE_BASE_SHA")
+                          or receipt["headSha"] != os.environ.get("EXPECTED_PROTECTED_BASELINE_HEAD_SHA")
+                          or receipt["baseDeclarationSha256"] != os.environ.get("EXPECTED_PROTECTED_BASELINE_BASE_DECLARATION_SHA256")
+                          or receipt["declarationSha256"] != os.environ.get("EXPECTED_PROTECTED_BASELINE_DECLARATION_SHA256")
+                          or receipt["baseVersion"] not in protected_ranges
+                          or receipt["package"] != compatibility_package
+                          or receipt["script"] != script
+                          or ranges != [receipt["version"]]):
+                          sys.exit("secretless compatibility package and ranges must be authorized by trusted repository policy")
+""", 1)
 
     acquisition_gate = "if: inputs.secretless-compatibility-ranges != ''"
     if acquisition.count(acquisition_gate) != 1:
@@ -2156,6 +2337,8 @@ def configure_protected_baseline(document: str) -> str:
         outputs_marker
         + "      protected-baseline-request: ${{ steps.resolve-protected-type-surface.outputs.compatibility-ranges }}\n"
         + "      protected-baseline-base-sha: ${{ steps.resolve-protected-type-surface.outputs.base-sha }}\n"
+        + "      protected-baseline-base-version: ${{ steps.resolve-protected-type-surface.outputs.base-version }}\n"
+        + "      protected-baseline-base-declaration-sha256: ${{ steps.resolve-protected-type-surface.outputs.base-declaration-sha256 }}\n"
         + "      protected-baseline-declaration-sha256: ${{ steps.resolve-protected-type-surface.outputs.declaration-sha256 }}\n",
         1,
     )
@@ -2200,6 +2383,9 @@ def configure_protected_baseline(document: str) -> str:
         expected_provenance,
         expected_provenance
         + "          EXPECTED_PROTECTED_BASELINE_BASE_SHA: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-base-sha }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_HEAD_SHA: ${{ inputs.head-sha }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_BASE_VERSION: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-base-version }}\n"
+        + "          EXPECTED_PROTECTED_BASELINE_BASE_DECLARATION_SHA256: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-base-declaration-sha256 }}\n"
         + "          EXPECTED_PROTECTED_BASELINE_DECLARATION_SHA256: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-declaration-sha256 }}\n"
         + "          PROTECTED_BASELINE_DECLARATION_PATH: ${{ inputs.protected-type-surface-declaration-path }}\n"
         + "          PROTECTED_BASELINE_EXPECTED_PACKAGE: ${{ inputs.protected-type-surface-expected-package }}\n"

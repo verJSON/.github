@@ -481,10 +481,13 @@ class ConfigTest(unittest.TestCase):
     def test_every_ruleset_has_the_matching_name_keyed_conformance_contract(self):
         policy = json.loads(
             (ROOT / "config/org-ruleset-conformance-policy.json").read_text(encoding="utf-8"))
+        # Other name-keyed contracts, such as ADR 0260's merge-admission ruleset, are
+        # not required-reviewer rulesets; the suffix is this family's identity.
         name_keyed = {
             contract["name"]: contract["bypass_actors"]
             for contract in policy["bypass_actor_contracts"]
             if contract["ruleset_id"] is None
+            and contract["name"].endswith("-sensitive-path-admin-review")
         }
         self.assertEqual(
             {ruleset["name"]: ruleset["bypass_actors"] for ruleset in desired_rulesets()},

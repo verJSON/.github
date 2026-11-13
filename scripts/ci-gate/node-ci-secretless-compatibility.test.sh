@@ -277,6 +277,9 @@ for name, filename in {
     "Run runtime-resolved compatibility lanes without credentials": "run-lanes-executor.sh",
 }.items():
     Path(sys.argv[2], filename).write_text(steps[name]["run"], encoding="utf-8")
+protected_validate = next(step for step in protected_acquire_steps
+                          if step.get("name") == "Validate approved internal dependency lock")
+Path(sys.argv[2], "protected-validate.sh").write_text(protected_validate["run"], encoding="utf-8")
 parser = shlex.quote(str(Path(sys.argv[4]) / ".github/actions/node-ci-script-plan/script_plan.py"))
 def compatibility_wrapper(executor_name):
     executor = shlex.quote(str(Path(sys.argv[2]) / executor_name))
@@ -425,6 +428,70 @@ if run_policy_validator "$two_call_root/general" \
 else
   fail "the authn two-call policy shape cannot authorize both exact dependency graphs"
 fi
+
+recovery_request='{"package":"@verjson/authn","ranges":["1.0.4"],"script":"test:type-surface-compatibility"}'
+recovery_receipt="$tmp/protected-baseline-recovery.json"
+python3 - "$recovery_receipt" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text(json.dumps({
+    "schemaVersion": 2,
+    "repository": "Verjson/verjson-authn",
+    "declarationPath": ".github/ci/type-surface-baseline.json",
+    "baseSha": "b" * 40,
+    "headSha": "a" * 40,
+    "baseVersion": "1.0.3",
+    "baseDeclarationSha256": "d" * 64,
+    "declarationSha256": "e" * 64,
+    "package": "@verjson/authn",
+    "version": "1.0.4",
+    "script": "test:type-surface-compatibility",
+}), encoding="utf-8")
+PY
+if recovery_output=$(PROTECTED_BASELINE_RECEIPT_PATH="$recovery_receipt" \
+    EXPECTED_PROTECTED_BASELINE_BASE_SHA="$(printf 'b%.0s' {1..40})" \
+    EXPECTED_PROTECTED_BASELINE_HEAD_SHA="$(printf 'a%.0s' {1..40})" \
+    EXPECTED_PROTECTED_BASELINE_BASE_DECLARATION_SHA256="$(printf 'd%.0s' {1..64})" \
+    EXPECTED_PROTECTED_BASELINE_DECLARATION_SHA256="$(printf 'e%.0s' {1..64})" \
+    PROTECTED_BASELINE_DECLARATION_PATH=.github/ci/type-surface-baseline.json \
+    PROTECTED_BASELINE_REPOSITORY=Verjson/verjson-authn \
+    run_policy_validator "$two_call_root/type-surface" \
+      $'@verjson/authn\n@verjson/identity-contracts\n@verjson/tsconfig' \
+      "$recovery_request" "$two_call_policy" '@verjson' \
+      "$tmp/protected-validate.sh" 2>&1); then
+  pass "a verified recovery receipt can advance a deleted exact protected baseline"
+elif [ "$recovery_output" = "secretless compatibility package and ranges must be authorized by trusted repository policy" ]; then
+  fail "a declaration-only recovery PR remains deadlocked on the deleted policy version"
+else
+  fail "protected baseline recovery failed outside its policy authorization boundary: $recovery_output"
+fi
+
+for old_version_policy in "$two_call_policy" "${two_call_policy//1.0.3/1.0.2}"; do
+  if [ "$old_version_policy" = "$two_call_policy" ]; then
+    expected_head="$(printf 'c%.0s' {1..40})"
+  else
+    expected_head="$(printf 'a%.0s' {1..40})"
+  fi
+  if recovery_output=$(PROTECTED_BASELINE_RECEIPT_PATH="$recovery_receipt" \
+      EXPECTED_PROTECTED_BASELINE_BASE_SHA="$(printf 'b%.0s' {1..40})" \
+      EXPECTED_PROTECTED_BASELINE_HEAD_SHA="$expected_head" \
+      EXPECTED_PROTECTED_BASELINE_BASE_DECLARATION_SHA256="$(printf 'd%.0s' {1..64})" \
+      EXPECTED_PROTECTED_BASELINE_DECLARATION_SHA256="$(printf 'e%.0s' {1..64})" \
+      PROTECTED_BASELINE_DECLARATION_PATH=.github/ci/type-surface-baseline.json \
+      PROTECTED_BASELINE_REPOSITORY=Verjson/verjson-authn \
+      run_policy_validator "$two_call_root/type-surface" \
+        $'@verjson/authn\n@verjson/identity-contracts\n@verjson/tsconfig' \
+        "$recovery_request" "$old_version_policy" '@verjson' \
+        "$tmp/protected-validate.sh" 2>&1); then
+    fail "a mismatched recovery head or unauthorized old version bypassed protected policy"
+  elif [ "$recovery_output" = "secretless compatibility package and ranges must be authorized by trusted repository policy" ]; then
+    pass "recovery refuses a mismatched head or an old version absent from protected policy"
+  else
+    fail "recovery was refused for the wrong reason: $recovery_output"
+  fi
+done
 
 if run_policy_validator "$two_call_root/package-expansion" \
     $'@verjson/identity-contracts\n@verjson/private-target\n@verjson/tsconfig' \
