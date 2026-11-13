@@ -83,7 +83,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
 
-- [#1945](https://github.com/verJSON/.github/issues/1945) — The autonomous terminal helper is disabled pending non-bypass admission (#1956). [ADR 0260](docs/decisions/0260-native-merge-admission-through-a-producer-posted-check/README.md) and #2055 ship a producer-posted `merge-admission` check that no ruleset requires yet. Draft queue proposal #1946 remains under revision; native relationships show #1945 blocked by #1964 and blocking #1949. Verified open 2026-11-13 via `gh issue view` and the native dependency API.
+- [#1945](https://github.com/verJSON/.github/issues/1945) — The autonomous terminal helper is disabled pending non-bypass admission (#1956). [ADR 0260](docs/decisions/0260-native-merge-admission-through-a-producer-posted-check/README.md) and #2055 ship a producer-posted `merge-admission` check that no ruleset requires yet. Draft [ecosystem ADR 0014](https://github.com/VerJSON/verjson-docs/pull/34) now carries the queue proposal; #1946 retains its pointer and evidence. Native relationships show #1945 blocked by #1964 and blocking #1949. Verified open 2026-11-13 via `gh issue view` and the native dependency API.
 
 - [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
 

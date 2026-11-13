@@ -1,7 +1,7 @@
 # Isolated public merge-queue canary plan
 
 **Status:** Proposed plan; an isolated execution with an explicit review waiver
-is recorded in the [decision record](README.md#isolated-public-queue-execution-2026-10-30).
+is recorded in the [archived proposal](https://github.com/VerJSON/.github/blob/c4a63a6117bb8cf33176becbc9e0077eab68cf95/docs/decisions/0245-queue-bound-candidate-admission/README.md#isolated-public-queue-execution-2026-10-30).
 **Issue:** [verJSON/.github#1945](https://github.com/verJSON/.github/issues/1945).
 This is a platform experiment, not a production admission design or authority to
 change VerJSON settings.
@@ -15,7 +15,7 @@ another VerJSON repository would inherit organization-wide secrets and App
 installations. A temporary base branch alone does not isolate those paths.
 GitHub documents public merge queues for organization-owned repositories;
 a personal public repository is not a supported substitute. The configuration
-probes and their limits are recorded in the parent ADR.
+probes and their limits are recorded in the [archived proposal](https://github.com/VerJSON/.github/blob/c4a63a6117bb8cf33176becbc9e0077eab68cf95/docs/decisions/0245-queue-bound-candidate-admission/README.md#limited-public-repository-configuration-probe-2026-10-29).
 
 ## Environment and preflight
 
