@@ -43,26 +43,43 @@ ordinary_encoded = run("encode", ordinary_canonical)
 assert ordinary_encoded.returncode == 0
 assert run("decode", ordinary_encoded.stdout.strip()).stdout.strip() == ordinary_canonical
 
+# Each mutation names the guard that must reject it: an envelope rejected by an
+# earlier, unrelated check would otherwise prove nothing about its own guard.
 mutations = {
-    "quote stripping": canonical.replace('"', ""),
-    "key reordering": json.dumps(dict(reversed(tuple(policy.items()))), separators=(",", ":")),
-    "whitespace": json.dumps(policy, sort_keys=True),
-    "duplicate keys": canonical[:-1] + ',"provider":"deepseek"}',
-    "extra field": canonical[:-1] + ',"extra":"x"}',
-    "missing field": json.dumps({k: v for k, v in policy.items() if k != "model"}, sort_keys=True, separators=(",", ":")),
-    "string explicit flag": canonical.replace('"explicit_rereview":true', '"explicit_rereview":"true"'),
+    "quote stripping": (canonical.replace('"', ""), "policy envelope cannot be decoded"),
+    "key reordering": (
+        json.dumps(dict(reversed(tuple(policy.items()))), separators=(",", ":")),
+        "policy JSON or envelope is not canonical",
+    ),
+    "whitespace": (json.dumps(policy, sort_keys=True), "policy JSON or envelope is not canonical"),
+    "duplicate keys": (canonical[:-1] + ',"provider":"deepseek"}', "duplicate policy field: provider"),
+    "extra field": (canonical[:-1] + ',"extra":"x"}', "policy must contain exactly one supported field set"),
+    "missing field": (
+        json.dumps({k: v for k, v in policy.items() if k != "model"}, sort_keys=True, separators=(",", ":")),
+        "policy must contain exactly one supported field set",
+    ),
+    "string explicit flag": (
+        canonical.replace('"explicit_rereview":true', '"explicit_rereview":"true"'),
+        "explicit_rereview must be a boolean",
+    ),
 }
-for name, raw in mutations.items():
-    candidate = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-    result = run("decode", candidate)
-    assert result.returncode != 0, f"accepted {name}"
 
-for name, candidate in {
-    "invalid alphabet": envelope + "+",
-    "explicit padding": envelope + "=",
-    "oversized": "A" * 2049,
+
+def assert_rejected(name, candidate, reason):
+    result = run("decode", candidate)
+    assert result.returncode == 1, f"accepted {name}"
+    assert f"review policy rejected: {reason}" in result.stderr, f"{name} rejected without naming {reason!r}: {result.stderr!r}"
+
+
+for name, (raw, reason) in mutations.items():
+    assert_rejected(name, base64.urlsafe_b64encode(raw.encode()).decode().rstrip("="), reason)
+
+for name, (candidate, reason) in {
+    "invalid alphabet": (envelope + "+", "policy envelope has invalid alphabet or padding"),
+    "explicit padding": (envelope + "=", "policy envelope has invalid alphabet or padding"),
+    "oversized": ("A" * 2049, "policy envelope is empty or oversized"),
 }.items():
-    assert run("decode", candidate).returncode != 0, f"accepted {name}"
+    assert_rejected(name, candidate, reason)
 
 assert not Path("/tmp/not-executed").exists(), "shell metacharacters executed"
 print("PASS: canonical policy envelope rejects all boundary mutations")

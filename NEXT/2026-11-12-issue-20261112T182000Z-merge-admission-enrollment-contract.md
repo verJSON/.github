@@ -1,0 +1,41 @@
+---
+date: 2026-11-12
+id: 20261112T182000Z
+refs: 2031
+impact: minor
+title: Bind merge-admission to the AI review App in the ruleset conformance policy
+---
+
+The organization ruleset conformance policy now binds the `merge-admission` required
+context to the AI review App (4528902) while every other context stays bound to GitHub
+Actions (15368), and it carries the reviewed bypass contract for the not-yet-created
+`merge-admission-required` ruleset: OrganizationAdmin, 4693283, 4583107, and Renovate
+2740, all `always`, never 4528902.
+
+`scripts/org-ruleset-conformance.py` fails when `merge-admission` is unbound or bound to
+any other App, refuses a policy that binds it to the declared producer 15368, and refuses
+a policy whose `merge-admission-required` contract is missing or lists the producer App
+(ARB-2031-2026-11-12 C6 and C10 (i); ADR 0260 Decision 2).
+
+The same audit now issues the two C10 receipts. Before the ruleset exists it fails unless
+the organization variable `AI_REVIEW_APP_ID` names the bound App and prints a
+`pre-creation` receipt that reports the ruleset as absent; once the ruleset exists, even
+disabled, it also requires the ruleset to require `merge-admission` bound to that App and
+prints a `full` receipt naming the ruleset id and enforcement. Any ruleset under another
+name, a case variant included, that requires `merge-admission` withholds both receipts,
+so neither can report the ruleset absent while another enforces the context. The
+pre-creation receipt gates creation; the full receipt gates activation only, because it
+checks no enrollment scope, so an enrollment edit also needs the C8 scope check, which is
+not implemented yet. The variable's value is compared and never printed.
+
+`scripts/assert-mergeable-head.merge-admission.test.sh` and
+`scripts/ci-gate/merge-admission.test.sh` (merge-gate) now each fail when
+`MERGE_ADMISSION_APP_ID` in the assertion or the producer differs from the policy's
+`merge-admission` binding, so the three cannot drift apart (C10 (i)(a)).
+
+ADR 0260 gains a dated amendment recording the owner's user-attested C1 acceptance (with
+the owner's class ceilings, 5 minutes trigger-bounded and 20 minutes sweep-bounded, and
+the #1964 lapse), C8's enrollment-property scope for Decision 2, C6's visible Renovate
+carve-out in Decision 6, C10 as adopted, C11's ordering edge, and the bundle items still
+to do: the outage alert, REST and hosted-minute budgets, caller generator, runbook, C9
+canary principal, and the C8 enrollment-scope audit check.

@@ -48,6 +48,11 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def require_reason(error: AssertionError, reason: str) -> None:
+    """A mutation must be rejected by the guard it targets, not by any guard."""
+    require(reason in str(error), f"mutation rejected for another reason: {error}")
+
+
 def compact_expression(expression: str) -> str:
     expression = expression.strip()
     if expression.startswith("${{") and expression.endswith("}}"):
@@ -736,8 +741,8 @@ def main() -> int:
             mutation["run-name"] = invalid
         try:
             validate_run_name(mutation)
-        except AssertionError:
-            pass
+        except AssertionError as error:
+            require_reason(error, "review run name must bind authorization check and exact arm receipt")
         else:
             raise AssertionError(f"invalid review run name was accepted: {invalid!r}")
     gate_steps = review["jobs"]["gate"]["steps"]
@@ -754,20 +759,22 @@ def main() -> int:
     }
     try:
         validate_model_admission(mutated_steps)
-    except AssertionError:
-        pass
+    except AssertionError as error:
+        require_reason(error, "model bot admission must never contain a wildcard")
     else:
         raise AssertionError("wildcard bot mutation escaped model admission contract")
 
-    for invalid_uses in (f"{MODEL_ACTION_NAME}@v1",
-                         f"{MODEL_ACTION_NAME}@{'a' * 40}"):
+    for invalid_uses, reason in (
+            (f"{MODEL_ACTION_NAME}@v1", "every Claude review action must use a full lowercase 40-hex SHA"),
+            (f"{MODEL_ACTION_NAME}@{'a' * 40}", "every Claude review pass must share the audited immutable action pin")):
         mutated_pin_steps = [dict(step) for step in gate_steps]
         mutated_pin_steps[first_model] = {
             **mutated_pin_steps[first_model], "uses": invalid_uses,
         }
         try:
             validate_model_admission(mutated_pin_steps)
-        except AssertionError:
+        except AssertionError as error:
+            require_reason(error, reason)
             continue
         raise AssertionError(f"mutable or divergent Claude action pin escaped: {invalid_uses}")
 
@@ -781,8 +788,8 @@ def main() -> int:
     }
     try:
         validate_model_admission(normalized_alias_steps)
-    except AssertionError:
-        pass
+    except AssertionError as error:
+        require_reason(error, "the model pass must retain exact source bot logins without normalized aliases")
     else:
         raise AssertionError("normalized aliases escaped the source-login bot contract")
 
@@ -797,12 +804,15 @@ def main() -> int:
     reordered_steps = [dict(step) for step in gate_steps]
     validation_step = reordered_steps.pop(validation_index)
     reordered_steps.insert(first_model + 1, validation_step)
-    for mutation, message in (
-            (missing_verifier_steps, "missing receipt verifier"),
-            (reordered_steps, "post-model receipt validation")):
+    for mutation, message, reason in (
+            (missing_verifier_steps, "missing receipt verifier",
+             "trusted admission must verify the receipt, then require its exact pending App check"),
+            (reordered_steps, "post-model receipt validation",
+             "receipt and pending-check validation must precede the model pass")):
         try:
             validate_model_admission(mutation)
-        except AssertionError:
+        except AssertionError as error:
+            require_reason(error, reason)
             continue
         raise AssertionError(f"{message} mutation escaped model admission contract")
 
@@ -855,6 +865,9 @@ def main() -> int:
             )
             require(result.returncode != 0,
                     f"malformed canonical revision escaped: {invalid}")
+            require("::error::canonical workflow revision must be an immutable lowercase 40-hex commit SHA"
+                    in result.stdout + result.stderr,
+                    f"malformed canonical revision {invalid} was rejected for another reason: {result.stderr}")
 
     policy_checkout = next(step for step in preflight["steps"]
                            if step.get("name") == "Check out immutable policy decoder")
@@ -910,6 +923,9 @@ def main() -> int:
                     require(result.returncode != 0 and
                             not output.read_text(encoding="utf-8").strip(),
                             f"{job_name} exposed an empty or malformed canonical revision")
+                    require("::error::validated canonical workflow revision is unavailable or malformed"
+                            in result.stdout + result.stderr,
+                            f"{job_name} rejected {trusted_ref!r} for another reason: {result.stderr}")
 
     require("pull_request_target" not in review.get(True, {}),
             "model workflow must not run in pull_request_target context")
@@ -948,22 +964,25 @@ def main() -> int:
     token["with"]["app-id"] = token["with"].pop("client-id")
     try:
         validate_authorization_app_token_inputs(mutated, job_name)
-    except AssertionError:
-        pass
+    except AssertionError as error:
+        require_reason(error, "complete-authorization must mint with the dedicated App client ID")
     else:
         raise AssertionError(f"{job_name} legacy app-id mutation escaped token-input contract")
 
     valid_pin = f"{APP_TOKEN_ACTION}@{'a' * 40}"
+    official_pin = "trusted authorization sites must use the official App-token action at a full lowercase 40-hex SHA"
     invalid_pin_sets = (
-        [valid_pin.replace(APP_TOKEN_ACTION, "attacker/create-github-app-token"), valid_pin],
-        [f"{APP_TOKEN_ACTION}@v3", f"{APP_TOKEN_ACTION}@v3"],
-        [f"{APP_TOKEN_ACTION}@{'a' * 12}", f"{APP_TOKEN_ACTION}@{'a' * 12}"],
-        [valid_pin, f"{APP_TOKEN_ACTION}@{'b' * 40}"],
+        ([valid_pin.replace(APP_TOKEN_ACTION, "attacker/create-github-app-token"), valid_pin], official_pin),
+        ([f"{APP_TOKEN_ACTION}@v3", f"{APP_TOKEN_ACTION}@v3"], official_pin),
+        ([f"{APP_TOKEN_ACTION}@{'a' * 12}", f"{APP_TOKEN_ACTION}@{'a' * 12}"], official_pin),
+        ([valid_pin, f"{APP_TOKEN_ACTION}@{'b' * 40}"],
+         "trusted authorization sites must use the same immutable App-token action pin"),
     )
-    for invalid_pins in invalid_pin_sets:
+    for invalid_pins, reason in invalid_pin_sets:
         try:
             validate_authorization_app_token_pins(invalid_pins)
-        except AssertionError:
+        except AssertionError as error:
+            require_reason(error, reason)
             continue
         raise AssertionError(f"mutation escaped App-token pin contract: {invalid_pins}")
     require(review["jobs"]["complete-authorization"]["permissions"].get("checks") == "write",
@@ -1221,7 +1240,7 @@ def main() -> int:
         {"run": "until gh api commits/head/status?per_page=100; do sleep 30; done"})
     mutated_infinite = yaml.safe_load(yaml.safe_dump(review))
     mutated_infinite["jobs"]["gate"]["steps"].append(
-        {"run": "for ((;;)); do gh api commits/head/check-runs; done"})
+        {"run": "for ((;;)); do gh pr checks 7; done"})
     mutated_second_step = yaml.safe_load(yaml.safe_dump(promote))
     mutated_second_step["jobs"]["privileged_merge"]["steps"].append(
         {"run": "gh api commits/head/check-runs"})
@@ -1240,17 +1259,23 @@ def main() -> int:
     mutated_until_false = yaml.safe_load(yaml.safe_dump(review))
     mutated_until_false["jobs"]["gate"]["steps"].append(
         {"run": "until\nfalse\ndo\ngh pr checks 7\ndone"})
-    for workflow, job_name in ((mutated_review, "gate"),
-                               (mutated_promote, "privileged_merge"),
-                               (mutated_infinite, "gate"),
-                               (mutated_second_step, "privileged_merge"),
-                               (mutated_multiline, "privileged_merge"),
-                               (mutated_indirect, "privileged_merge"),
-                               (mutated_pr_checks, "gate"),
-                               (mutated_until_false, "gate")):
+    # Each mutation names the guard it must reach: one that adds an endpoint is
+    # rejected by the snapshot count, so a pure poll must avoid the counted text
+    # to exercise the loop detector at all.
+    extra_snapshot = "must contain exactly {} external-CI endpoint snapshot(s) job-wide"
+    unbounded = "contains an unbounded loop with no terminating path"
+    for workflow, job_name, reason in ((mutated_review, "gate", extra_snapshot.format(0)),
+                                       (mutated_promote, "privileged_merge", extra_snapshot.format(1)),
+                                       (mutated_infinite, "gate", unbounded),
+                                       (mutated_second_step, "privileged_merge", extra_snapshot.format(1)),
+                                       (mutated_multiline, "privileged_merge", unbounded),
+                                       (mutated_indirect, "privileged_merge", unbounded),
+                                       (mutated_pr_checks, "gate", unbounded),
+                                       (mutated_until_false, "gate", unbounded)):
         try:
             validate_runner_free_external_ci_wait(workflow, job_name)
-        except AssertionError:
+        except AssertionError as error:
+            require_reason(error, f"{job_name} {reason}")
             continue
         raise AssertionError(f"{job_name} polling-loop mutation escaped the structural contract")
 

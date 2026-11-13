@@ -623,7 +623,7 @@ class ContractFleetReport(unittest.TestCase):
         self.assertNotIn("verjson-current", drift_section)
 
     def test_report_rejects_missing_or_malformed_inventory_tables(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "^inventory must contain contract and header tables$"):
             reporter.parse_inventory("repo\tstatus\n")
 
     def test_failed_inventory_without_tables_still_produces_diagnostics(self):
@@ -669,7 +669,7 @@ class ContractFleetReport(unittest.TestCase):
         self.assertLess(report.count("gh: diagnostic"), reporter.MAX_DIAGNOSTIC_LINES + 1)
 
     def test_complete_inventory_still_rejects_malformed_tables(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "^inventory must contain contract and header tables$"):
             reporter.render_report("", "", "2026-09-22T07:00:00Z", 0)
 
     def test_report_escapes_untrusted_table_cells(self):
@@ -725,6 +725,7 @@ class ReportCallerClientIdValidation(unittest.TestCase):
     # match accented and fullwidth letters. The guard runs under that hostile
     # default and only the step's own `env` may override it.
     AMBIENT_LOCALE = "en_US.UTF-8"
+    REFUSAL = "::error::GitHub App client ID is not accepted by the configured App policy\n"
 
     @classmethod
     def setUpClass(cls):
@@ -763,7 +764,9 @@ class ReportCallerClientIdValidation(unittest.TestCase):
             self.skipTest(f"{self.AMBIENT_LOCALE} is not installed; the env assertion still holds")
         for client_id in ("Iv23li\u00c4bCdEfGh12", "Iv23li\u00e9bCdEfGh12", "Iv23li\uff42bCdEfGh12"):
             with self.subTest(client_id=client_id):
-                self.assertNotEqual(self.run_guard(client_id).returncode, 0)
+                result = self.run_guard(client_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, self.REFUSAL)
 
     def test_the_guard_step_always_runs_under_bash_and_fails_the_job(self):
         self.assertNotIn("if", self.guard)
@@ -815,7 +818,8 @@ class ReportCallerClientIdValidation(unittest.TestCase):
             with self.subTest(client_id=client_id):
                 result = self.run_guard(client_id)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-            self.assertIn("::error::", result.stderr)
+                self.assertIn("::error::", result.stderr)
+                self.assertEqual(result.stderr, self.REFUSAL)
 
 
 if __name__ == "__main__":

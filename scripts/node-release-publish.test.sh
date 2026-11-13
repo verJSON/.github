@@ -262,7 +262,21 @@ run_guard() {
   env VERSION="$1" PREFIX="${4-v}" SCOPE="${3-@verjson}" PACKAGE_DIRS='["."]' \
     GITHUB_REPOSITORY=Verjson/example GH_STUB_STATUS="$2" \
     GITHUB_OUTPUT="$sandbox/output" \
-    PATH="$sandbox/bin:$PATH" bash -eo pipefail "$sandbox/guard.sh" >/dev/null 2>&1
+    PATH="$sandbox/bin:$PATH" bash -eo pipefail "$sandbox/guard.sh" >"$sandbox/guard.log" 2>&1
+}
+
+# Every guard rejection is the step's own exit 1 with its ::error:: line. Any
+# other failure of the step is nonzero too, so the line is what names the guard.
+guard_rejects() { # <::error:: text> <run_guard args>...
+  local reason="$1" rc=0
+  shift
+  run_guard "$@" || rc=$?
+  if [ "$rc" = 1 ] && grep -qxF -- "::error::$reason" "$sandbox/guard.log"; then
+    return 0
+  fi
+  printf '  rc=%s, expected ::error::%s\n' "$rc" "$reason"
+  sed 's/^/  /' "$sandbox/guard.log"
+  return 1
 }
 
 run_guard v1.2.3 0 \
@@ -273,23 +287,32 @@ run_guard python-v1.2.3 0 @verjson python-v \
   && pass "the guard accepts a stream namespace and extracts the package SemVer" \
   || fail "the guard rejected or mis-stamped a valid stream-prefixed tag"
 for version in 1.2.3 v01.2.3 v1.2 vlatest; do
-  run_guard "$version" 0 \
-    && fail "the guard accepted invalid version '$version'" \
-    || pass "the guard rejects invalid version '$version'"
+  guard_rejects "'$version' is not exact SemVer in namespace 'v'." "$version" 0 \
+    && pass "the guard rejects invalid version '$version'" \
+    || fail "the guard accepted invalid version '$version'"
 done
-for pair in 'python-v v1.2.3' 'v python-v1.2.3' 'Python-v Python-v1.2.3' 'python python1.2.3'; do
-  prefix="${pair%% *}"
-  version="${pair#* }"
-  run_guard "$version" 0 @verjson "$prefix" \
-    && fail "the guard accepted namespace '$prefix' for '$version'" \
-    || pass "the guard rejects namespace '$prefix' for '$version'"
-done
-run_guard v1.2.3 2 \
-  && fail "the guard accepted a version before its contract tag exists" \
-  || pass "the guard refuses publication before the contract tag exists"
-run_guard v1.2.3 0 '' \
-  && fail "the guard accepted an empty registry scope" \
-  || pass "the guard rejects an empty registry scope at the reusable boundary"
+# A well-formed namespace that the version does not carry is a SemVer
+# rejection; a malformed namespace is rejected before the version is read.
+while read -r prefix version guard; do
+  case "$guard" in
+    semver) reason="'$version' is not exact SemVer in namespace '$prefix'." ;;
+    namespace) reason="'$prefix' is not a canonical v or stream-v release namespace." ;;
+  esac
+  guard_rejects "$reason" "$version" 0 @verjson "$prefix" \
+    && pass "the guard rejects namespace '$prefix' for '$version'" \
+    || fail "the guard accepted namespace '$prefix' for '$version'"
+done <<'NAMESPACES'
+python-v v1.2.3 semver
+v python-v1.2.3 semver
+Python-v Python-v1.2.3 namespace
+python python1.2.3 namespace
+NAMESPACES
+guard_rejects "Could not verify tag v1.2.3. The changelog snapshot must exist and GitHub's API must be reachable before publication." v1.2.3 2 \
+  && pass "the guard refuses publication before the contract tag exists" \
+  || fail "the guard accepted a version before its contract tag exists"
+guard_rejects 'scope must be a non-empty lowercase npm scope such as @verjson.' v1.2.3 0 '' \
+  && pass "the guard rejects an empty registry scope at the reusable boundary" \
+  || fail "the guard accepted an empty registry scope"
 
 if python3 "$root/scripts/node_release_artifact_manifest.test.py"; then
   pass "the package artifact validator rejects identity, digest, and archive-path tampering"

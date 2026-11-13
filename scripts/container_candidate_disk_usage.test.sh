@@ -5,6 +5,21 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 script="$root/scripts/container_candidate_disk_usage.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# Requires <command...> to exit 1 and name <reason>, with its output in a file
+# of its own, so a crash or another refusal no longer counts.
+refuses() { # <label> <reason> <command...>
+  local label="$1" reason="$2" status=0
+  shift 2
+  "$@" >"$tmp/refusal.out" 2>"$tmp/refusal.err" || status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "$label" >&2; exit 1
+  fi
+  if [ "$status" -ne 1 ] || ! grep -qF -- "$reason" "$tmp/refusal.out" "$tmp/refusal.err"; then
+    echo "$label refused (exit $status, expected 1) without the reason: $reason" >&2
+    sed 's/^/diag - /' "$tmp/refusal.out" "$tmp/refusal.err" >&2
+    exit 1
+  fi
+}
 mkdir "$tmp/bin" "$tmp/runner-temp" "$tmp/workspace"
 cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
@@ -101,20 +116,18 @@ if grep -Fxq 'image rm registry/test:changed' "$DOCKER_CALLS"; then
   exit 1
 fi
 
-if RUNNER_ENVIRONMENT=github-hosted FAIL_IMAGE_REMOVE=true CLEANUP_UNUSED_DOCKER_IMAGES=true "$script" cleanup; then
-  echo "cleanup succeeded after Docker rejected image removal" >&2
-  exit 1
-fi
+RUNNER_ENVIRONMENT=github-hosted FAIL_IMAGE_REMOVE=true CLEANUP_UNUSED_DOCKER_IMAGES=true \
+  refuses "cleanup succeeded after Docker rejected image removal" \
+  "::error::failed to remove unused preloaded image reference: registry/test:one" "$script" cleanup
 if grep -Eq 'prune|system rm' "$DOCKER_CALLS"; then
   echo "cleanup used a global Docker removal command" >&2
   exit 1
 fi
 
 calls_before_self_hosted="$(wc -l < "$DOCKER_CALLS")"
-if RUNNER_ENVIRONMENT=self-hosted CLEANUP_UNUSED_DOCKER_IMAGES=true "$script" cleanup; then
-  echo "cleanup unexpectedly ran on a self-hosted runner" >&2
-  exit 1
-fi
+RUNNER_ENVIRONMENT=self-hosted CLEANUP_UNUSED_DOCKER_IMAGES=true \
+  refuses "cleanup unexpectedly ran on a self-hosted runner" \
+  '::error::cleanupUnusedDockerImages is supported only on isolated GitHub-hosted runners' "$script" cleanup
 [ "$(wc -l < "$DOCKER_CALLS")" -eq "$calls_before_self_hosted" ]
 grep -q 'before-buildx-setup' "$RUNNER_TEMP/container-candidate-disk-usage.log"
 grep -q 'after-cleanup' "$RUNNER_TEMP/container-candidate-disk-usage.log"
@@ -201,7 +214,6 @@ done
 printf '%s\n' "$margin" > "$DF_AVAIL_VALUES"
 DU_OUTPUT=0 "$script" assert-space "$context" > /dev/null
 printf '%s\n' "$((margin - 1))" > "$DF_AVAIL_VALUES"
-if DU_OUTPUT=0 "$script" assert-space "$context" > /dev/null 2>&1; then
-  echo "assert-space accepted an empty context with less than the margin free" >&2
-  exit 1
-fi
+DU_OUTPUT=0 refuses "assert-space accepted an empty context with less than the margin free" \
+  "::error::insufficient free disk for the image build: required $margin bytes, available $((margin - 1)) bytes" \
+  "$script" assert-space "$context"
