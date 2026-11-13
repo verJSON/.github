@@ -4,28 +4,36 @@
 - **Status:** Proposed
 - **Issue:** [verJSON/.github#1945](https://github.com/verJSON/.github/issues/1945)
 - **Category:** merge-gate admission and protected-branch authority (sensitive class)
-- **Related:** [ADR 0120](../0120-bind-terminal-merge-to-repository-app-token/README.md), [ADR 0223](../0223-draft-pull-requests-defer-heavy-ci/README.md), [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md), [ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)
+- **Related:** [ADR 0120](../0120-bind-terminal-merge-to-repository-app-token/README.md), [ADR 0223](../0223-draft-pull-requests-defer-heavy-ci/README.md), [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md), [ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md), [ADR 0260](../0260-native-merge-admission-through-a-producer-posted-check/README.md), [ADR 0261](../0261-generated-container-candidate-callers-defer-drafts/README.md)
 
 ## Context
 
-The generated container-candidate caller validates draft pull requests. Deferring
-its matrix would save resources, but the candidate checks are not required in
-every adopter. GitHub may treat a skipped required check as successful, while
-ADR 0229 permits skipped advisory checks. A ready or retarget event can precede
-creation of the next run. Therefore a draft guard alone cannot prove that a
-candidate build ran on the merge candidate.
+ADR 0261 and #1944 shipped draft deferral in the generated container-candidate
+caller. Its candidate contexts remain advisory in the surveyed adopters, and
+the bare skipped caller job must not become a required check. Marking a pull
+request ready triggers validation, but it can precede the next run's creation.
+A base retarget does not trigger the generated caller at all; old-base results
+can remain until another event starts validation. A draft guard alone cannot
+prove that a candidate build ran on the merge candidate.
 
-The current terminal helper invokes `gh pr merge --admin` after authorization.
-That privileged path is not evidence that ordinary GitHub merges enforce the
-same candidate checks. GitHub reports merge queues available for public
-organization repositories and private repositories on Enterprise Cloud; each
-adopter's eligibility and actual rules must be verified before enrollment.
+#1956 disabled the former `gh pr merge --admin` terminal helper pending
+non-bypass admission. Accepted ADR 0260 defines a producer-posted native
+`merge-admission` check, but its ruleset rollout is incomplete and its check
+does not require an exact merge-group candidate build. ADR 0260 also retains
+named bypass actors and an accepted stale-SUCCESS window. This proposal would
+add a stricter candidate-tree gate for eligible adopters; it does not amend
+ADR 0260 or authorize existing bypass actors to use that gate. Architecture
+review must decide whether the queue path supplements or supersedes ADR 0260,
+and which policy transition removes bypass authority before enrollment.
+GitHub reports merge queues available for public organization repositories
+and private repositories on Enterprise Cloud; each adopter's eligibility and
+actual rules must be verified before enrollment.
 
 ## Proposed contract
 
 This is a proposal, not authority to change a live ruleset or a claim that any
-queue is operational. The desired result is one platform-enforced route for
-ordinary and autonomous merges; no agent uses an administrative bypass.
+queue is operational. The desired result is a platform-enforced exact-candidate
+route for ordinary and autonomous merges; no agent uses an administrative bypass.
 
 1. A reviewed, organization-owned required workflow runs on `merge_group` and
    emits one stable, required candidate aggregate from GitHub Actions. The
@@ -57,7 +65,7 @@ ordinary and autonomous merges; no agent uses an administrative bypass.
    checks, independent review, hold/draft restrictions, human or code-owner
    approvals when required, and exact-head authorization. Any automation
    credential that can bypass the queue is not an autonomous merge authority.
-6. Replace the privileged terminal merge with a non-bypass queue enrollment
+6. Introduce a non-bypass queue enrollment for eligible adopters
    bound to the expected head and authorized base. Enrollment is pending, not
    a merged result. A separate observer confirms the terminal merged state and
    actual head before cleanup or issue closure. Re-read policy and approvals at
@@ -65,11 +73,11 @@ ordinary and autonomous merges; no agent uses an administrative bypass.
    approval changes. A timeout, malformed response, unavailable evidence,
    cancellation, failed check, or uncertain queue state remains non-success.
 
-The existing direct-admin decision remains in force in the implementation until
-this proposal is implemented and reviewed; this document does not change it.
-The authorized agent path must still honor the session's no-bypass merge guard.
-If accepted, a successor decision must identify exactly which portions of
-ADR 0120 and its terminal-merge extensions it supersedes.
+The autonomous terminal helper remains disabled until a reviewed non-bypass
+replacement is deployed; this proposal does not enable it or change live
+rules. The authorized agent path must still honor the session's no-bypass
+merge guard. If accepted, a successor decision must identify exactly which
+portions of ADR 0120, ADR 0260, and their extensions it supersedes.
 
 ## Agent identity and unresolved approval authority
 
@@ -294,10 +302,11 @@ organization webhooks; that inventory was not independently verified.
   Do not deploy to production or alter billing, runners, or credentials as a test.
 - Stage the trusted workflow and observe it before selecting the pilot in a
   reviewed ruleset. Verify ordinary GitHub merges and the autonomous path both
-  fail closed; only then defer draft candidate builds for that adopter. Expand
-  one eligible adopter at a time using generated contract artifacts.
+  fail closed before treating deferred builds as protected candidate evidence.
+  Expand one eligible adopter at a time using generated contract artifacts.
 
 If validation fails, hold merges; do not remove required checks or enable a
 bypass as a rollback. Restore a previously reviewed equally strict policy only
-through the authorized ruleset process. Defer #1944's draft deferral until the
-selected adopter has this evidence.
+through the authorized ruleset process. ADR 0261 already shipped #1944's draft
+deferral; do not present a deferred candidate build as admitted until the
+selected adopter has the required queue and candidate evidence.

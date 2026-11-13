@@ -828,7 +828,10 @@ jobs:
           import re
           import sys
 
-          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          try:
+              release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          except (json.JSONDecodeError, UnicodeDecodeError) as error:
+              raise SystemExit(f"GitHub Release inspection did not return valid JSON: {error}")
           if not isinstance(release, dict) or "assets" not in release or not isinstance(release["assets"], list):
               raise SystemExit("GitHub Release inspection did not return an explicit assets list")
           expected_names = {line.split("\t")[1] for line in pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()}

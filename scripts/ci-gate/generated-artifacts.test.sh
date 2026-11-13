@@ -504,7 +504,8 @@ head_sha="$(fixture_commit "$ws" 'consume a fragment outside a release')"
 out="$(run_validate "$ws" RUN_CHANGELOG=true CONTRACT_REF="$immutable_sha" \
   BASE_SHA="$base_sha" HEAD_SHA="$head_sha")"
 rc=$?
-[ "$rc" -ne 0 ] \
+[ "$rc" -eq 1 ] \
+  && grep -qxF 'changelog: ordinary pull requests cannot consume NEXT fragments: NEXT/2026-08-05-issue-404-example.md' <<<"$out" \
   && pass "a pull request that consumes a NEXT/ fragment fails the policy check" \
   || fail "a consumed fragment passed the policy check (rc=$rc): $out"
 
@@ -544,7 +545,8 @@ printf 'no front matter here\n' >"$ws/legacy-next/2026-08-05-issue-404-broken.md
 out="$(run_validate "$ws" RUN_CHANGELOG=true LEGACY_DIR=legacy-next \
   CONTRACT_REF="$immutable_sha")"
 rc=$?
-[ "$rc" -ne 0 ] \
+[ "$rc" -eq 1 ] \
+  && grep -qE '^changelog: .*/legacy-next/2026-08-05-issue-404-broken\.md: legacy fragment needs metadata or exactly one issue reference$' <<<"$out" \
   && pass "legacy_dir reaches the contract engine, so its fragments are validated too" \
   || fail "legacy_dir was dropped — fragments there are never checked: $out"
 

@@ -4,6 +4,7 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 generator="$repo_root/scripts/gen-gate-rearm-caller.sh"
+guard_helper="$repo_root/scripts/local-arm-guard.sh"
 canonical="$repo_root/.github/workflows/gate-rearm.yml"
 actions_ci="$repo_root/scripts/actions-ci-groups.tsv"
 tmp="$(mktemp -d)"
@@ -42,12 +43,17 @@ assert doc["on"]["pull_request_target"] == {
     "types": ["opened", "reopened", "synchronize"],
 }
 assert doc["permissions"] == {"contents": "read"}
-assert set(doc["jobs"]) == {"rearm"}
+assert set(doc["jobs"]) == {"guard", "rearm"}
 job = doc["jobs"]["rearm"]
 # ADR 0166 fixes this role environment to `ai-review-app` for both trigger
 # paths. The reusable input is required by the workflow-call contract; the
 # generated-caller contract test pins these callers to the fixed role name.
+# F-1R (ADR 0255 amendment 2026-11-06): the arm is skipped only when the guard
+# explicitly yields `false`, so a skipped arm never enters the reusable workflow's
+# concurrency group, and a failed or timed-out guard job keeps the arm.
 assert job == {
+    "needs": "guard",
+    "if": "${{ !cancelled() && needs.guard.outputs.local_arm != 'false' }}",
     "permissions": {
         "contents": "read",
         "actions": "write",
@@ -65,11 +71,60 @@ PY
     && pass "generated caller records an exact reproducible command" \
     || fail "generated caller lacks exact regeneration provenance"
   grep -qE '^    secrets: inherit$' "$caller" || fail "caller lacks inherited environment context"
-  if grep -qE 'actions/checkout|github\.event\.pull_request\.(head|body|title)|^[[:space:]]+run:' "$caller"; then
+  if grep -qE 'actions/checkout|github\.event\.pull_request\.(head|body|title)' "$caller" \
+     || [ "$(grep -cE '^[[:space:]]+run:' "$caller")" -ne 1 ]; then
     fail "generated pull_request_target caller can execute or expose PR-controlled content"
   else
-    pass "generated caller delegates without checkout, shell, or PR prose"
+    pass "generated caller delegates without checkout or PR prose, running only the guard"
   fi
+
+  # F-1R (ARB-G1-2026-11-06, ADR 0255 amendment 2026-11-06). The guard is a
+  # read-only liveness decision, never admission evidence: it holds no write
+  # grant and no concurrency at any level (a group there could displace the
+  # pending required run itself), and it runs the checked-in helper's exact
+  # bytes, which the generator embeds rather than resolving at generation time.
+  python3 - "$caller" "$guard_helper" <<'PY' \
+    && pass "generated caller runs the checked-in local arm guard, read-only and outside every concurrency group" \
+    || fail "generated caller's guard job, its helper bytes, or its concurrency freedom drifted"
+import sys
+import yaml
+
+path, helper = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    doc = yaml.load(stream, Loader=yaml.BaseLoader)
+with open(helper, encoding="utf-8") as stream:
+    helper_text = stream.read()
+
+assert "concurrency" not in doc, "the caller declares workflow-level concurrency"
+assert not any("concurrency" in job for job in doc["jobs"].values()), "a caller job declares concurrency"
+guard = dict(doc["jobs"]["guard"])
+steps = guard.pop("steps")
+assert guard == {
+    # The untrusted lane with a hosted tail (ADR 0147), never a literal label: a
+    # generated caller holds nothing Renovate updates, or it drifts from its generator.
+    "runs-on": "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}",
+    "timeout-minutes": "5",
+    "permissions": {"contents": "read"},
+    "outputs": {
+        "local_arm": "${{ steps.decide.outputs.local_arm == 'false' && 'false' || 'true' }}",
+    },
+}, guard
+assert len(steps) == 1, steps
+step = dict(steps[0])
+assert step.pop("run") == helper_text, "the guard step does not run the checked-in helper's bytes"
+assert step == {
+    "id": "decide",
+    "continue-on-error": "true",
+    "shell": "bash",
+    "env": {
+        "GH_TOKEN": "${{ github.token }}",
+        "EVENT_NAME": "${{ github.event_name }}",
+        "EVENT_ACTION": "${{ github.event.action }}",
+        "REPOSITORY": "${{ github.repository }}",
+        "BASE_REF": "${{ github.event.pull_request.base.ref }}",
+    },
+}, step
+PY
 fi
 
 label_generator="$repo_root/scripts/gen-ai-review-label-rearm-caller.sh"
@@ -135,6 +190,57 @@ else
   fail "canonical event sets overlap or lifecycle re-arm caller contract drifted"
 fi
 
+# In a consumer `./.github/workflows/gate-rearm.yml` is its own generated
+# caller, which since #1665 subscribes only to head transitions. The pinned
+# lifecycle caller delivers the remaining events straight to the immutable
+# canonical arm, independent of that local caller (#1982).
+pinned_lifecycle_caller="$tmp/pinned-ai-review-lifecycle-rearm.yml"
+if [ ! -x "$lifecycle_generator" ]; then
+  fail "AI review lifecycle re-arm caller generator missing or not executable"
+elif ! "$lifecycle_generator" "$contract_sha" >"$pinned_lifecycle_caller" 2>"$tmp/pinned-lifecycle.err"; then
+  fail "lifecycle re-arm caller generator rejected a valid contract SHA: $(cat "$tmp/pinned-lifecycle.err")"
+elif python3 - "$pinned_lifecycle_caller" "$contract_sha" <<'PY'
+import sys
+import yaml
+
+path, sha = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    doc = yaml.load(stream, Loader=yaml.BaseLoader)
+
+assert doc == {
+    "name": "AI review lifecycle re-arm",
+    "on": {
+        "pull_request_target": {
+            "types": ["ready_for_review", "converted_to_draft", "edited", "unlabeled"],
+        },
+    },
+    "permissions": {"actions": "read", "contents": "read"},
+    "jobs": {
+        "rearm": {
+            "permissions": {
+                "actions": "write",
+                "checks": "write",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+            "uses": f"Verjson/.github/.github/workflows/gate-rearm.yml@{sha}",
+            "secrets": "inherit",
+            "with": {"ai_review_environment": "ai-review-app"},
+        },
+    },
+}, doc
+PY
+then
+  pass "pinned lifecycle caller delivers lifecycle events to the immutable canonical arm"
+else
+  fail "pinned lifecycle caller triggers, permissions, or immutable target drifted"
+fi
+grep -qxF "# scripts/gen-ai-review-lifecycle-rearm-caller.sh $contract_sha > .github/workflows/ai-review-lifecycle-rearm.yml" \
+  "$pinned_lifecycle_caller" \
+  && pass "pinned lifecycle caller records an exact reproducible command" \
+  || fail "pinned lifecycle caller lacks exact regeneration provenance"
+
 for invalid_ref in main v1 '' \
   0123456789abcdef0123456789abcdef0123456 \
   '0123456789abcdef0123456789abcdef01234567
@@ -143,6 +249,18 @@ jobs: {}'; do
     && fail "generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
     || pass "generator rejects unsafe ref '${invalid_ref:-<empty>}'"
 done
+for invalid_ref in main v1 '' \
+  0123456789abcdef0123456789abcdef0123456 \
+  0123456789ABCDEF0123456789ABCDEF01234567 \
+  '0123456789abcdef0123456789abcdef01234567
+jobs: {}'; do
+  "$lifecycle_generator" "$invalid_ref" >"$tmp/rejected.yml" 2>/dev/null \
+    && fail "lifecycle generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
+    || pass "lifecycle generator rejects unsafe ref '${invalid_ref:-<empty>}'"
+done
+"$lifecycle_generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
+  && fail "lifecycle generator ignored an extra argument" \
+  || pass "lifecycle generator rejects extra arguments"
 "$generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
   && fail "generator ignored an extra argument" \
   || pass "generator rejects extra arguments"

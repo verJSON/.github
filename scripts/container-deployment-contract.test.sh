@@ -1,9 +1,34 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+# `set -e` ends the run on a failed bare assertion without saying which one, so
+# name it. `-E` carries the trap into functions; a subshell keeps its own
+# errexit, and its failure is reported where the parent sees it.
+report_failed_assertion() {
+  local status=$?
+  if [ "$BASH_SUBSHELL" -eq 0 ]; then
+    printf 'FAIL - %s line %s: %s (exit %s)\n' "${0##*/}" "$1" "$2" "$status" >&2
+    exit "$status"
+  fi
+}
+trap 'report_failed_assertion "$LINENO" "$BASH_COMMAND"' ERR
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# `!` exempts a command from `set -e`, so a bare `! grep` can never fail the
+# run; and a grep that cannot read its input exits 2, which a negation would
+# take for absence.
+assert_absent() {
+  local search_status=0
+  grep "$@" || search_status=$?
+  [ "$search_status" -eq 1 ] && return 0
+  if [ "$search_status" -eq 0 ]; then
+    printf 'FAIL - %s: found what must be absent: grep %s\n' "${0##*/}" "$*" >&2
+  else
+    printf 'FAIL - %s: could not search (grep exit %s): grep %s\n' "${0##*/}" "$search_status" "$*" >&2
+  fi
+  exit 1
+}
 contract="$tmp/contract"
 consumer="$tmp/consumer"
 mkdir -p \
@@ -125,8 +150,23 @@ cp "$tmp/transport.clean" "$consumer/scripts/container_deployment_transport.py"
 cp "$consumer/.github/workflows/container-deployment.yml" "$tmp/caller.clean"
 sed -i "s/container-deployment.yml@$ref/container-deployment.yml@main/" \
   "$consumer/.github/workflows/container-deployment.yml"
-if (cd "$consumer" && bash scripts/container-deployment-contract.test.sh >/dev/null 2>&1); then
+if cmp -s "$tmp/caller.clean" "$consumer/.github/workflows/container-deployment.yml"; then
+  echo "the mutable-ref caller mutation did not apply, so its verdict proves nothing" >&2
+  exit 1
+fi
+# Unpinned, the caller's digest is what refuses it; the re-pinned case below
+# reaches the pinned-text assertion behind it.
+mutable_ref_report="$tmp/caller-mutable-ref.log"
+mutable_ref_status=0
+(cd "$consumer" && bash scripts/container-deployment-contract.test.sh >/dev/null 2>"$mutable_ref_report") || mutable_ref_status=$?
+if [ "$mutable_ref_status" -eq 0 ]; then
   echo "generated contract accepted a mutable reusable-workflow ref" >&2
+  exit 1
+fi
+if [ "$mutable_ref_status" -ne 1 ] || ! grep -qF -- \
+  'container-deployment contract FAILED: .github/workflows/container-deployment.yml drifted from contract' "$mutable_ref_report"; then
+  echo "generated contract refused a mutable reusable-workflow ref (exit $mutable_ref_status, expected 1) without naming the caller's digest" >&2
+  sed 's/^/diag - /' "$mutable_ref_report" >&2
   exit 1
 fi
 mv "$tmp/caller.clean" "$consumer/.github/workflows/container-deployment.yml"
@@ -168,7 +208,9 @@ for single_sourced_condition in \
   '(.evidenceCommand | length == 2)' \
   '(.probeCommand | length == 2)' \
   '(.fleets | type == "object" and length > 0)'; do
-  occurrences="$(grep -oF -- "$single_sourced_condition" "$generated_contract_test" | wc -l)"
+  # A condition stated nowhere makes grep exit 1, which under pipefail ended the
+  # run here, silently, instead of in the diagnostic below.
+  occurrences="$( { grep -oF -- "$single_sourced_condition" "$generated_contract_test" || true; } | wc -l)"
   test "$occurrences" = 1 || {
     echo "deployment-config condition is stated $occurrences times, expected once: $single_sourced_condition" >&2
     exit 1
@@ -272,6 +314,10 @@ assert_generated_contract_rejects_caller() {
   cp "$consumer/.github/workflows/container-deployment.yml" "$tmp/caller.clean"
   cp "$consumer/scripts/container-deployment-contract.test.sh" "$tmp/contract-test.clean"
   sed -i "$mutation" "$consumer/.github/workflows/container-deployment.yml"
+  if cmp -s "$tmp/caller.clean" "$consumer/.github/workflows/container-deployment.yml"; then
+    echo "caller mutation for $label did not apply, so its verdict proves nothing" >&2
+    exit 1
+  fi
   caller_digest="$(sha256sum "$consumer/.github/workflows/container-deployment.yml" | cut -d' ' -f1)"
   sed -i -E "s|^(assert_digest \.github/workflows/container-deployment\.yml ).*|\1$caller_digest|" \
     "$consumer/scripts/container-deployment-contract.test.sh"
@@ -335,34 +381,46 @@ grep -Fq "if: \${{ ${expected_public_call_condition} && (inputs.dry-run) }}" "$w
 grep -Fq "if: \${{ ${expected_public_call_condition} && (!inputs.dry-run) }}" "$workflow"
 grep -q 'cancel-in-progress: false' "$workflow"
 grep -q 'container_deployment_preflight.py' "$workflow"
+# Each refusal names its clause, so a drift refused by another clause, or by a
+# failed read, cannot pass for the one a case asserts.
 assert_cli_cloud_lock_matches_manifest() {
   local manifest="$1" lock="$2" cli_cloud_version
-  cli_cloud_version="$(jq -er '.dependencies["@verjson/cli-cloud"]' "$manifest")" || return 1
-  [[ "$cli_cloud_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  cli_cloud_version="$(jq -er '.dependencies["@verjson/cli-cloud"]' "$manifest")" \
+    || { echo "manifest names no @verjson/cli-cloud dependency"; return 1; }
+  [[ "$cli_cloud_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || { echo "manifest @verjson/cli-cloud is not an exact version: $cli_cloud_version"; return 1; }
   test "$(jq -er '.packages[""].dependencies["@verjson/cli-cloud"]' "$lock")" = \
-    "$cli_cloud_version" || return 1
+    "$cli_cloud_version" || { echo "lock root pin differs from manifest $cli_cloud_version"; return 1; }
   test "$(jq -er '.packages["node_modules/@verjson/cli-cloud"].version' "$lock")" = \
-    "$cli_cloud_version" || return 1
+    "$cli_cloud_version" || { echo "lock package version differs from manifest $cli_cloud_version"; return 1; }
 }
 
 cli_manifest="$root/contracts/container-deployment-cli/package.json"
 cli_lock="$root/contracts/container-deployment-cli/package-lock.json"
-assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$cli_lock"
+assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$cli_lock" >"$tmp/cli-cloud-lock.out" \
+  || { cat "$tmp/cli-cloud-lock.out" >&2; exit 1; }
 
 for mutation in root-pin package-version; do
   mutated_lock="$tmp/cli-cloud-$mutation-lock.json"
   case "$mutation" in
     root-pin)
       jq '.packages[""].dependencies["@verjson/cli-cloud"] = "9.9.9"' \
-        "$cli_lock" > "$mutated_lock" ;;
+        "$cli_lock" > "$mutated_lock"
+      expected_drift='lock root pin differs from manifest' ;;
     package-version)
       jq '.packages["node_modules/@verjson/cli-cloud"].version = "9.9.9"' \
-        "$cli_lock" > "$mutated_lock" ;;
+        "$cli_lock" > "$mutated_lock"
+      expected_drift='lock package version differs from manifest' ;;
   esac
-  if assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$mutated_lock"; then
+  if assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$mutated_lock" >"$tmp/cli-cloud-lock.out"; then
     echo "container deployment contract accepted cli-cloud $mutation drift" >&2
     exit 1
   fi
+  grep -qF -- "$expected_drift" "$tmp/cli-cloud-lock.out" || {
+    echo "container deployment contract refused cli-cloud $mutation drift for another reason" >&2
+    sed 's/^/diag - /' "$tmp/cli-cloud-lock.out" >&2
+    exit 1
+  }
 done
 python3 "$root/scripts/validate-container-deployment-cli-lock.py" \
   "$root/contracts/container-deployment-cli/package-lock.json"
@@ -393,10 +451,34 @@ for name, (field, value) in mutations.items():
         json.dumps(candidate), encoding="utf-8"
     )
 PY
-for hostile_lock in "$tmp"/lock-*.json; do
-  if python3 "$root/scripts/validate-container-deployment-cli-lock.py" \
-      "$hostile_lock" >/dev/null 2>&1; then
+# An unmatched glob hands the validator its literal pattern, and rejecting a
+# missing file would pass as rejecting every hostile lock.
+hostile_locks=("$tmp"/lock-*.json)
+built_locks=0
+for hostile_lock in "${hostile_locks[@]}"; do
+  [ -s "$hostile_lock" ] && built_locks=$((built_locks + 1))
+done
+if [ "$built_locks" -ne 6 ]; then
+  echo "built $built_locks hostile deployment CLI locks, expected 6, so their rejection proves nothing" >&2
+  exit 1
+fi
+# The validator refuses through argparse, which exits 2; the reason after its
+# prefix is the validator's own.
+for hostile_lock in "${hostile_locks[@]}"; do
+  case "${hostile_lock##*/}" in
+    lock-missing-integrity.json|lock-wrong-integrity.json) expected_refusal='lacks exact sha512 integrity' ;;
+    *) expected_refusal='uses a non-canonical registry URL' ;;
+  esac
+  lock_status=0
+  python3 "$root/scripts/validate-container-deployment-cli-lock.py" \
+    "$hostile_lock" >/dev/null 2>"$tmp/hostile-lock.err" || lock_status=$?
+  if [ "$lock_status" -eq 0 ]; then
     echo "deployment CLI lock validator accepted $(basename "$hostile_lock")" >&2
+    exit 1
+  fi
+  if [ "$lock_status" -ne 2 ] || ! grep -qF -- "$expected_refusal" "$tmp/hostile-lock.err"; then
+    echo "deployment CLI lock validator refused $(basename "$hostile_lock") (exit $lock_status, expected 2) without: $expected_refusal" >&2
+    sed 's/^/diag - /' "$tmp/hostile-lock.err" >&2
     exit 1
   fi
 done
@@ -413,12 +495,12 @@ for authority_variable in \
   RUNNER_DEPLOY_CODE_REVIEW_APP_ID RUNNER_DEPLOY_CODE_REVIEW_CHECK RUNNER_DEPLOY_CODE_REVIEW_WORKFLOW \
   RUNNER_DEPLOY_SECURITY_REVIEW_APP_ID RUNNER_DEPLOY_SECURITY_REVIEW_CHECK RUNNER_DEPLOY_SECURITY_REVIEW_WORKFLOW \
   RUNNER_DEPLOY_AI_REVIEW_APP_ID RUNNER_DEPLOY_AI_REVIEW_CHECK RUNNER_DEPLOY_AI_REVIEW_WORKFLOW; do
-  ! grep -q "$authority_variable" "$workflow"
+  assert_absent -q "$authority_variable" "$workflow"
 done
 grep -q 'actions/artifacts/{artifact' "$workflow"
 grep -q 'review-receipt.json' "$workflow"
-! grep -qF '.github/workflows/adversarial-code-review.yml' "$workflow"
-! grep -qF '.github/workflows/adversarial-security-review.yml' "$workflow"
+assert_absent -qF '.github/workflows/adversarial-code-review.yml' "$workflow"
+assert_absent -qF '.github/workflows/adversarial-security-review.yml' "$workflow"
 grep -qF '"sha256:" + hashlib.sha256(archive).hexdigest()' "$workflow"
 grep -qF 'pulls/{pull[' "$workflow"
 # The literal shell variable must never become a path argument.
@@ -431,7 +513,7 @@ grep -q 'verjson-cloud' "$root/scripts/container_deployment_controller.py"
 grep -q '"--only"' "$root/scripts/container_deployment_controller.py"
 grep -q 'def _validate_runner_admission' "$root/scripts/container_deployment_controller.py"
 grep -q 'control=True' "$root/scripts/container_deployment_controller.py"
-! grep -q 'SSH_AUTH_SOCK' "$root/scripts/container_deployment_controller.py"
+assert_absent -q 'SSH_AUTH_SOCK' "$root/scripts/container_deployment_controller.py"
 grep -q 'def complete_workflow_runs' "$root/scripts/container_deployment_transport.py"
 grep -q 'MAX_RUN_RECORDS' "$root/scripts/container_deployment_transport.py"
 if grep -vF 'actions/create-github-app-token@' "$workflow" \

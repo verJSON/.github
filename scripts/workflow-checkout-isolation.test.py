@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 from pathlib import Path
+import re
 import sys
 
 import yaml
@@ -93,6 +94,91 @@ def validate_sparse_checkouts(documents: dict[Path, dict]) -> None:
                         )
 
 
+def step_strings(value: object):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from step_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from step_strings(item)
+
+
+def sparse_patterns(checkout_with: dict, location: str) -> list[str]:
+    listed = checkout_with.get("sparse-checkout")
+    require(isinstance(listed, str), f"{location} sparse-checkout must be a literal list")
+    patterns = [line.strip() for line in listed.splitlines() if line.strip()]
+    require(patterns, f"{location} sparse-checkout lists nothing")
+    for pattern in patterns:
+        require(
+            not re.search(r"[*?\[\]!]", pattern),
+            f"{location} sparse-checkout pattern {pattern!r} is not a literal path this check can resolve",
+        )
+    return patterns
+
+
+def validate_sparse_trust_references(documents: dict[Path, dict]) -> int:
+    """A file a job reads from a fixed-path sparse checkout must be in that checkout.
+
+    A fixed path (no expression) marks a trusted-revision tree that later steps execute
+    from, such as `.gate-trust`. A file missing from its sparse list is simply absent at
+    run time, so the step fails on every run while every stubbed suite stays green.
+    Returns how many references were checked, so a caller can prove the check is not
+    vacuous.
+    """
+    def fixed_sparse_roots(job: object, location: str) -> dict[str, list[str] | None]:
+        roots: dict[str, list[str] | None] = {}
+        for step in checkout_steps(job):
+            checkout_with = step.get("with")
+            root = checkout_with.get("path") if isinstance(checkout_with, dict) else None
+            if not isinstance(root, str) or "${{" in root:
+                continue
+            require(root not in roots, f"{location} checks out {root} more than once")
+            # A full checkout of the root holds every file; None marks it unrestricted.
+            roots[root] = (
+                sparse_patterns(checkout_with, location) if "sparse-checkout" in checkout_with else None
+            )
+        return roots
+
+    trust_roots = {
+        root
+        for path, document in documents.items()
+        for job_name, job in document.get("jobs", {}).items()
+        for root, patterns in fixed_sparse_roots(job, f"{path.name}: jobs.{job_name}").items()
+        if patterns is not None
+    }
+    checked = 0
+    for path, document in documents.items():
+        for job_name, job in document.get("jobs", {}).items():
+            if not isinstance(job, dict) or not isinstance(job.get("steps"), list):
+                continue
+            location = f"{path.name}: jobs.{job_name}"
+            checked_out = fixed_sparse_roots(job, location)
+            for step in job["steps"]:
+                if not isinstance(step, dict) or "uses" in step and step["uses"].startswith("actions/checkout@"):
+                    continue
+                for text in step_strings({key: step.get(key) for key in ("run", "env", "with")}):
+                    for root in trust_roots:
+                        for match in re.finditer(rf"(?<![\w.-]){re.escape(root)}/([\w./-]+)", text):
+                            reference = match.group(1).rstrip(".")
+                            checked += 1
+                            require(
+                                root in checked_out,
+                                f"{location} reads {root}/{reference} without checking {root} out",
+                            )
+                            patterns = checked_out[root]
+                            require(
+                                patterns is None
+                                or any(
+                                    reference == pattern or reference.startswith(pattern.rstrip("/") + "/")
+                                    for pattern in patterns
+                                ),
+                                f"{location} reads {root}/{reference}, which its sparse checkout does not include",
+                            )
+    return checked
+
+
 def validate_scheduled_checkouts(documents: dict[Path, dict]) -> None:
     scheduled_count = 0
     for path, document in documents.items():
@@ -161,11 +247,28 @@ def main() -> int:
     try:
         validate_sparse_checkouts(documents)
         validate_scheduled_checkouts(documents)
+        trust_references = validate_sparse_trust_references(
+            {WORKFLOWS / "ai-privileged-merge.yml": documents[WORKFLOWS / "ai-privileged-merge.yml"]}
+        )
+        require(trust_references >= 4, "ai-privileged-merge.yml trust references were not examined")
+        validate_sparse_trust_references(documents)
     except ContractError as error:
         print(f"FAIL - repository checkout isolation: {error}")
         return 1
 
     failures = 0
+    trust_mutation = deepcopy(documents)
+    privileged_merge = trust_mutation[WORKFLOWS / "ai-privileged-merge.yml"]
+    trust_checkout = checkout_steps(privileged_merge["jobs"]["privileged_merge"])[0]["with"]
+    trust_checkout["sparse-checkout"] = trust_checkout["sparse-checkout"].replace(
+        "scripts/ci-gate/independent-review-receipt.sh\n", ""
+    )
+    failures += expect_invalid(
+        "a trust file read from outside its sparse checkout is rejected",
+        validate_sparse_trust_references,
+        trust_mutation,
+    )
+
     sparse_mutation = deepcopy(documents)
     post_merge = sparse_mutation[WORKFLOWS / "ai-post-merge.yml"]
     del checkout_steps(post_merge["jobs"]["reconcile"])[0]["with"]["path"]

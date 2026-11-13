@@ -4616,4 +4616,112 @@ if "pins/source.yml" in bound and "pins/source.yml" not in unbound:
 else:
     fail(f"the frozen show's pin source binding: with {sorted(bound)}, without {sorted(unbound)}")
 
+
+# A bash `=~` regex operand is one word: its `|` and parentheses group the
+# pattern, so they are neither a pipeline nor a subshell. The release
+# caller's retention guard is one.
+def trace_steps(run: str, shell: str | None = "bash", files: dict[str, str] | None = None
+                ) -> tuple[dict[str, str], set[str]]:
+    with tempfile.TemporaryDirectory() as root:
+        subprocess.run(["git", "init", "-q", root], check=True)
+        for name, body in (files or {}).items():
+            with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+                handle.write(body)
+            subprocess.run(["git", "-C", root, "add", name], check=True)
+        unresolved: set[str] = set()
+        step = {"run": run, **({"shell": shell} if shell else {})}
+        bound = CHECKER.tree_programs({"steps": [step]}, root, unresolved=unresolved)
+    return bound, unresolved
+
+
+RETENTION_GUARD = (
+    'if [[ ! "$CI_PACKAGE_RETENTION_KEEP" =~ ^(all|[123456789][0123456789]{0,2})$ ]]; then\n  exit 1\nfi\n'
+)
+REGEX_BOUND, REGEX_UNRESOLVED = trace_steps(RETENTION_GUARD, "/bin/bash --noprofile --norc -e -o pipefail {0}")
+if not REGEX_BOUND and not REGEX_UNRESOLVED:
+    ok("the generated retention guard's =~ regex runs no program and refuses nothing")
+else:
+    fail(f"the retention guard's regex was read as commands: bound {sorted(REGEX_BOUND)}, "
+         f"unresolved {sorted(REGEX_UNRESOLVED)}")
+_, BASH_C = trace_steps("bash -c '[[ \"$x\" =~ (a|\"$UNSET_TOOL\") ]]'\n", None)
+if not BASH_C:
+    ok("a bash -c program's =~ regex is read as one operand")
+else:
+    fail(f"a bash -c program's =~ regex was read as commands: unresolved {sorted(BASH_C)}")
+
+
+def expect_traced(label: str, run: str, shell: str | None = "bash", files: dict[str, str] | None = None) -> None:
+    _, unresolved = trace_steps(run, shell, files)
+    if any("runs '$UNSET_TOOL' (run directly)" in reason for reason in unresolved):
+        ok(f"{label} is still traced")
+    else:
+        fail(f"{label} was not traced: unresolved {sorted(unresolved)}")
+
+
+# Only the operand folds. A `[[` that is not a real conditional keeps every
+# separator after it, and a pipeline after `]]` is still a pipeline.
+for label, run in (
+    ('a double-quoted "[["', '"[[" x || "$UNSET_TOOL" --go ]]\n'),
+    ("a single-quoted '[['", "'[[' x || \"$UNSET_TOOL\" --go ]]\n"),
+    ("an escaped \\[[", '\\[[ x || "$UNSET_TOOL" --go ]]\n'),
+    ('a quoted "[[" before a =~', '"[[" x =~ a || "$UNSET_TOOL" --go ]]\n'),
+    ("a [[ case pattern", 'case $v in a) true ;; [[) X ;; b) "$UNSET_TOOL" ;; esac; [[ a ]]\n'),
+    ("a [[ inside sh -c", "sh -c '[[ x || \"$UNSET_TOOL\" ]]'\n"),
+    ('a quoted "[[" inside bash -c', "bash -c '\"[[\" x || \"$UNSET_TOOL\" ]]'\n"),
+    ("a pipeline after ]]", '[[ "$x" =~ ^(a|b)$ ]] && echo hi | "$UNSET_TOOL"\n'),
+):
+    expect_traced(label, run)
+# Quoting is read from the raw text: a quoted or escaped =~ is no operator.
+for label, operator in (("a double-quoted", '"=~"'), ("a single-quoted", "'=~'"), ("an escaped", "\\=~")):
+    expect_traced(f"{label} =~ before a parenthesized word", f'[[ x {operator} (a|"$UNSET_TOOL") ]]\n')
+# Folding is bash's rule: another shell, or a step shell this job does not
+# name, reads the parentheses as before.
+expect_traced("a =~ regex inside sh -c", "sh -c '[[ x =~ (a|\"$UNSET_TOOL\") ]]'\n")
+expect_traced("a =~ regex inside zsh -c", "zsh -c '[[ x =~ (a|\"$UNSET_TOOL\") ]]'\n")
+expect_traced("a =~ regex in a step with no explicit shell", '[[ x =~ (a|"$UNSET_TOOL") ]]\n', None)
+# The operand's substitutions still run commands.
+expect_traced("a command substitution in a =~ operand", '[[ x =~ ^($("$UNSET_TOOL"))$ ]]\n')
+expect_traced("a process substitution in a =~ operand", '[[ x =~ (<("$UNSET_TOOL")) ]]\n')
+# Bash does not count a parenthesis inside a parameter expansion or `$[ ]`,
+# so an operand holding one is not folded: its group could close anywhere.
+for label, run in (
+    ("${x/(/} opening a group ${y/)/} closes", '[[ q =~ ${x/(/}(q) ]] && "$UNSET_TOOL" --go; : ${y/)/}\n'),
+    ("${x:+(} opening a group ${y:+)} closes", '[[ q =~ ${x:+(}(q) ]] && "$UNSET_TOOL" --go; : ${y:+)}\n'),
+    ("$[0+(1] opening a group $[1)] closes", '[[ q =~ $[0+(1](q) ]] && "$UNSET_TOOL" --go; : $[1)]\n'),
+):
+    expect_traced(f"a command after a =~ operand whose {label}", run)
+# A function may be named `=~`; its parenthesized body is a command.
+for label, run in (
+    ("function =~ ()( … )", 'function =~ ()("$UNSET_TOOL" --go); =~\n'),
+    ("function =~ ( … )", 'function =~ ("$UNSET_TOOL" --go); =~\n'),
+    ("=~ ()( … ) after a separator", 'true; =~ ()("$UNSET_TOOL" --go); =~\n'),
+    # After any word that leaves `=~` in command position.
+    ("=~ ()( … ) after then", 'if true; then =~ ()("$UNSET_TOOL"); =~; fi\n'),
+    ("=~ ()( … ) after {", '{ =~ ()("$UNSET_TOOL"); =~; }\n'),
+    ("=~ ()( … ) after do", 'for i in 1; do =~ ()("$UNSET_TOOL"); =~; done\n'),
+    ("=~ ()( … ) after !", '! =~ ()("$UNSET_TOOL"); =~\n'),
+    ("=~ ()( … ) after if", 'if =~ ()("$UNSET_TOOL"); then :; fi; =~\n'),
+    ("=~ () { … } after then", 'if true; then =~ () { "$UNSET_TOOL"; }; =~; fi\n'),
+    ("=~ ( ) ( … ) after then", 'if true; then =~ ( ) ("$UNSET_TOOL"); =~; fi\n'),
+    ("=~ ()( … ) after else", 'if false; then :; else =~ ()("$UNSET_TOOL"); =~; fi\n'),
+    ("=~ ()( … ) after elif", 'if false; then :; elif =~ ()("$UNSET_TOOL"); then :; fi; =~\n'),
+    ("=~ ()( … ) after while", 'while =~ ()("$UNSET_TOOL"); do break; done; =~\n'),
+    ("=~ ()( … ) after until", 'until =~ ()("$UNSET_TOOL"); do :; done\n'),
+    ("=~ ()( … ) after time", 'time =~ ()("$UNSET_TOOL"); =~\n'),
+    ("=~ ()( … ) after time -p", 'time -p =~ ()("$UNSET_TOOL"); =~\n'),
+    ("=~ ( )( … ) after time -p", 'time -p =~ ( )("$UNSET_TOOL"); =~\n'),
+):
+    expect_traced(f"the body of {label}", run)
+# The fold follows the interpreter that runs a script, not its shebang alone.
+BASH_SCRIPT = {"x.sh": '#!/bin/bash\n[[ x =~ (a|"$UNSET_TOOL") ]]\n'}
+_, SHEBANG_RUN = trace_steps("./x.sh\n", None, BASH_SCRIPT)
+if not SHEBANG_RUN:
+    ok("a bash-shebang script run directly folds its =~ regex")
+else:
+    fail(f"a bash-shebang script run directly did not fold its =~ regex: unresolved {sorted(SHEBANG_RUN)}")
+expect_traced("a =~ regex in a bash-shebang script run by sh", "sh x.sh\n", None, BASH_SCRIPT)
+expect_traced("a =~ regex in a bash-shebang script run directly and by sh", "./x.sh\nsh x.sh\n", None, BASH_SCRIPT)
+expect_traced("a =~ regex in a bash-shebang script sh reads from standard input", "sh < x.sh\n", None, BASH_SCRIPT)
+expect_traced("a =~ regex in a bash-shebang script an sh program sources", "sh -c '. ./x.sh'\n", None, BASH_SCRIPT)
+
 sys.exit(1 if failures else 0)

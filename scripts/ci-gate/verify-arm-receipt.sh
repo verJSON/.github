@@ -50,7 +50,7 @@ jq -e --argjson run_id "$ARM_RUN_ID" --argjson attempt "$ARM_RUN_ATTEMPT" --arg 
   (.path == ".github/workflows/gate-rearm.yml" or .path == ".github/workflows/ai-review-label-rearm.yml" or .path == ".github/workflows/ai-review-lifecycle-rearm.yml") and
   (.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and
   (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase)
-' <<<"$arm_run" >/dev/null || { echo "::error::arm run provenance mismatch"; exit 1; }
+' <<<"$arm_run" >/dev/null || { echo "::error::arm run provenance mismatch: run ID, attempt, event, workflow path, or repository"; exit 1; }
 arm_run_path="$(jq -r '.path' <<<"$arm_run")"
 required_workflow_url="https://api.github.com/repos/$TARGET_REPO/actions/required_workflows/$arm_workflow_id"
 if [ "$arm_run_path" = .github/workflows/gate-rearm.yml ] && [ "$(jq -r '.workflow_url // ""' <<<"$arm_run")" = "$required_workflow_url" ]; then
@@ -77,7 +77,7 @@ if [ "$arm_run_path" = .github/workflows/gate-rearm.yml ] && [ "$(jq -r '.workfl
          .source_type == "Organization" and (.source | ascii_downcase) == "verjson" and
          .repository_id == 1269388380 and .ref == "refs/heads/main"))
   ' "$tmp/arm-rules-pages.json" >/dev/null || {
-    echo "::error::arm run provenance mismatch"; exit 1;
+    echo "::error::arm run provenance mismatch: required-workflow ruleset source"; exit 1;
   }
 else
   case "$arm_run_path" in
@@ -89,7 +89,7 @@ else
   workflow_api arm-workflow "$tmp/arm-workflow-id" \
     "repos/$TARGET_REPO/actions/workflows/$local_workflow" --jq '.id // ""' || exit 1
   [ "$(<"$tmp/arm-workflow-id")" = "$arm_workflow_id" ] || {
-    echo "::error::arm run provenance mismatch"; exit 1;
+    echo "::error::arm run provenance mismatch: workflow ID"; exit 1;
   }
   if [ "$arm_run_path" != .github/workflows/gate-rearm.yml ]; then
     [ "$ARM_RUN_ATTEMPT" = 1 ] || { echo "::error::local caller delivery replay rejected"; exit 1; }
@@ -148,7 +148,9 @@ elif [ "$receipt_schema" = 2 ]; then
     *) echo "::error::schema-2 receipt requires an exact protected local caller"; exit 1 ;;
   esac
   receipt_workflow_sha="$(jq -r '.workflow_sha // ""' "$tmp/receipt.json")"
-  [[ "$receipt_workflow_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+  [[ "$receipt_workflow_sha" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "::error::arm receipt workflow SHA is not a 40-hex commit SHA"; exit 1;
+  }
   workflow_api caller-at-protected-ref "$tmp/caller-protected-blob" \
     "repos/$TARGET_REPO/contents/.github/workflows/$local_caller?ref=$branch_ref" --jq '.sha // ""' || exit 1
   workflow_api caller-at-receipt-sha "$tmp/caller-receipt-blob" \

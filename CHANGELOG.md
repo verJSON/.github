@@ -1,3 +1,1141 @@
+# v5.0.0
+
+## Merge admission sets aside its own producer's check and binds an expected head
+
+`scripts/assert-mergeable-head.sh` now sets aside, in Gates A and C, every
+`merge-admission` check run produced by the AI review App (id 4528902) that is still in
+progress or concluded success or stale (GitHub's conclusion for a check left in progress
+14 days), and the `merge-admission` required context only where the ruleset binds it to
+that App. A same-named check from any other App, GitHub Actions included, any other
+completed conclusion from the AI review App, or a same-named commit status stays a
+failure. An optional third argument names the head the caller answers for; a pull
+request whose head moved exits 1 (ADR 0260, #1990, #2031).
+
+_Date: 2026-11-12; issue #2031_
+
+## Document the suspended main-protection finding in the arm rollout audit
+
+`suspension_finding` in `scripts/ai-review-required-workflow-audit.py` now
+carries a docstring, matching `suspended_image` beside it: it names the standing
+finding reported while main-protection is suspended under the owner hold (#1933)
+and why that finding leads the report. Documentation only; behavior is unchanged
+(#2005).
+
+_Date: 2026-11-12; issue #2005_
+
+## Floor the lifecycle re-arm caller at the arm that verifies its receipts
+
+The capability-floor audit now reports a lifecycle re-arm caller
+(`scripts/gen-ai-review-lifecycle-rearm-caller.sh`) as stale when it pins
+Verjson/.github before `010fa39d`. That commit, first released in v4.0.0, made
+the arm source-bind lifecycle deliveries. Daily observation now reads
+verjson-authn's pinned lifecycle caller. The observe job's sparse checkout
+includes the generator, without which the audit would reject the new floor
+(#2000).
+
+_Date: 2026-11-12; issue #2000_
+
+## Mark the Playwright EAI_AGAIN troubleshooting route as not live-verified
+
+`docs/node-workflows.md` now states that the `EAI_AGAIN` troubleshooting route
+(skip a browser package's install script and provision the browser in an earlier
+script-plan entry) has not been verified in a live run, and that it is
+experimental until a run exercises it (#1903).
+
+_Date: 2026-11-12; issue #1903_
+
+## Deliver the AI review App key to the merge-admission producer and bound its runs
+
+The merge-admission producer now receives the AI review App key. Its caller inherits
+the caller's secrets, and its main-only key policy receives the one named key, as the AI
+review gate does. Since #2055 merged, every run that found a pull request to evaluate
+failed key validation, so the producer never posted a `merge-admission` check (#2031,
+ADR 0260 amendment 2026-11-12).
+
+_Date: 2026-11-12; id:20261112T140000Z; refs #2031_
+
+## Set aside a family run displaced before a guard-yielded local re-arm run
+
+`assert-mergeable-head.sh` no longer refuses Gate C (exit `5`) on a cancelled
+`ai-review-arm-<PR>` family run when the only newer family run is a local
+`gate re-arm` run whose F-1R guard yielded: a first-attempt run that concluded
+success and whose own suite is exactly the guard's `SUCCESS` and the calling job's
+`SKIPPED`. That run
+never entered the concurrency group, so the newest family run that did is consulted
+instead, and it must still report only `SUCCESS` (#1905, ARB-G1-2026-11-06 C1
+precondition 5). The ADR 0226 amendment is adopted by ARB decision
+ARB-2059-2026-11-12, which also required the first-attempt condition and a map-test
+check that a yielding caller holds no group at workflow level or on its calling job.
+
+_Date: 2026-11-12; id:20261112T130444Z; refs #1905_
+
+## Stage locked Prisma schema engines for offline CI
+
+The reusable Node CI workflow verifies and stages a locked Prisma schema engine before offline candidate scripts run, then removes the run-owned executable after the script plan.
+
+_Date: 2026-11-10; issue #2052_
+
+## Document re-arm recovery and accept provider-bound required workflow runs
+
+`docs/arm-recovery-runbook.md` now says never to run `gh run rerun` on the
+repository-local re-arm callers (`gate-rearm.yml`, `ai-review-label-rearm.yml`,
+`ai-review-lifecycle-rearm.yml`), not only on the organization-injected required
+run. A rerun of the label or lifecycle caller concludes `failure`, because its arm
+job refuses a replay, and Gate C never sets a failed run aside. A rerun of
+`gate-rearm.yml` can displace a pending required run. When close-and-reopen
+succeeds but Gate C still refuses on cancelled re-arm jobs, the runbook gives the
+recovery that worked on #2022: push a new head after the quiet-family check. That
+push counts as an attempt and needs a fresh Gate R review receipt (#1905).
+
+_Date: 2026-11-10; issue #1905_
+
+## Reconcile the manual release proposal with current contracts
+
+Reconcile the draft fragment-derived release proposal with current canonical
+workflows and regenerate the ADR index. Preserve specific invalid-version rejection
+under the C locale while allowing the proposed empty-version derivation, and
+refresh the recorded Actions availability without claiming live release authority.
+
+_Date: 2026-11-09; issue #1941_
+
+## Replace shared_checkout_fetch's raw git fetch pass-through with a typed branch fetch
+
+`scripts/shared_checkout_fetch.py` no longer passes caller arguments straight to `git fetch`. An argument such as `--upload-pack=<command>` would have run that command. Its only caller, the hub changelog gate's base-branch fallback (`scripts/ci-gate/hub-changelog-validate.sh`), now uses a typed `fetch-branch <repo> <branch>` operation. That operation accepts only a valid branch name, which also excludes globs such as `*`, and builds its single-branch refspec itself under the shared lock. Tests prove the program rejects the old operation before git runs and that a pattern is refused (#2020). The object-name pattern is now documented as accepting a full 40-digit SHA-1 or 64-digit SHA-256 name and refusing abbreviations (#2019).
+
+_Date: 2026-11-06; issue #2020_
+
+## Test the ruleset audit's verdict when drift and an unreadable paused state coexist
+
+`scripts/org_ruleset_conformance_test.py` now covers an organization where one ruleset has drifted and another's paused state cannot be read. The audit must still report the drift, report the unreadable state, and exit 2 (verdict unknown), never 1 or 0. Existing tests covered each condition alone, so a regression that hid the drift or let its exit 1 win would have passed. Three such injected regressions each fail the new test (#2017).
+
+_Date: 2026-11-06; issue #2017_
+
+## Pin the rejection reason in the installer digest and secretless-transfer negative tests
+
+Eight negative tests now assert why they were rejected, not only that they were:
+- the actionlint and ShellCheck digest-mismatch cases in `scripts/actionlint-install.test.sh`, which run under `LC_ALL=C` so `sha256sum`'s `FAILED` line is stable;
+- six cases in `scripts/ci-gate/node-ci-secretless-transfer.test.sh`: the run, future-attempt, lock, digest and auxiliary-repository identity mismatches, and the corrupt payload.
+
+_Date: 2026-11-06; issue #1994_
+
+## Guard the generated local gate re-arm caller so it yields to the organization arm (F-1R, #1905)
+
+The caller that `scripts/gen-gate-rearm-caller.sh` generates now runs a read-only `guard` job before its `rearm` job, and `rearm` runs only when the guard keeps the local arm. On a `pull_request_target` opened, reopened, or synchronize event the guard reads the base ref's effective rules and yields only when a well-typed response carries a `workflows` rule naming `.github/workflows/gate-rearm.yml` from the organization `.github` repository (id 1269388380). Then the organization's required arm arms the head, and a skipped local `rearm` never enters the `ai-review-arm-<PR>` group, so it can no longer displace the pending required run. A read error, a response it cannot read, ambiguity, or absence keeps the local arm, which is the behavior before this change; the label and lifecycle `workflow_call` path is unchanged. The guard is never admission evidence: Gate W (ADR 0255) remains the sole fail-closed check of the required run. Adopters receive the guard only when their caller is regenerated, which waits on the live canaries ARB-G1-2026-11-06 requires (#1905).
+
+_Date: 2026-11-06; id:20261106T175040Z_
+
+## Make runner watchdog deadlines timezone-independent
+
+Evaluate runner acquisition timestamps in UTC so watchdog deadlines remain
+consistent across runner timezones: jq 1.6 applied the process zone's
+daylight-saving offset, delaying the stall bound by up to an hour. Recorded as a
+dated amendment to ADR 0230.
+
+_Date: 2026-10-29; issue #1958_
+
+## Isolate review test Git fixtures from workstation hooks
+
+Keep disposable review test repositories from inheriting global or system Git
+configuration. Part of #1957.
+
+_Date: 2026-10-29; issue #1957_
+
+## Generate portable CODEOWNERS ownership
+
+Allow a canonical adopter to select its organization and team while preserving exact generated ownership checks and the existing verJSON default.
+
+_Date: 2026-10-28; issue #1953_
+
+## Reject container candidates from a different release source
+
+Require new container promotion plans to use a candidate built from the release dispatch source commit. Historical retries whose recorded sources differ also stop before promotion; investigate them under the separate recovery contract.
+
+_Date: 2026-10-28; issue #1949_
+
+## Guard atomic release pushes against branch ref changes
+
+Require a direct-child release commit and compare the default branch against the dispatch commit during the atomic branch-and-tag push. Document the unobservable ABA boundary and the proposed identity-backed release-manager authority.
+
+_Date: 2026-10-28; issue #1942_
+
+## Require an explicit event to dispatch releases
+
+Keep scheduled release proposals advisory and reject scheduled release dispatches, so the dispatch path requires a deliberate workflow dispatch event.
+
+_Date: 2026-10-28; issue #1940_
+
+## Derive manually dispatched release versions from fragments
+
+Allow an explicitly initiated release to derive the next version from the selected fragment impacts while retaining the verified release plan and existing publication boundaries. A blank-version dispatch must state the exact default-branch commit it authorizes in `expected_head`; the run fails before checkout if the branch has moved, so the derived version can be previewed offline with the pinned `release-plan` before dispatch.
+
+_Date: 2026-10-28; issue #1939_
+
+## Update the deployment review publisher token action
+
+Update the canonical deployment review producer's repository-scoped GitHub App token action to v3.3.0. The existing runner isolation backlog remains pending and continues to bind each publisher job to its exact contents.
+
+_Date: 2026-10-28; issue #1812_
+
+## Index active CI admission and release work
+
+Record the active admission, draft candidate, release selection, and source binding issues in the project guidance index, and prune the closed #1696 entry.
+
+_Date: 2026-10-28; id:20261028T235500Z_
+
+## Unify build-qualified release occupancy classification
+
+Use one classification for explicit release validation and release-plan explanations, and document the impact of release policy changes.
+
+_Date: 2026-10-28; id:20261028T210000Z_
+
+## Recover explicitly from occupied build-qualified release versions
+
+Allow an explicitly selected next patch when a build-qualified snapshot occupies the impact-derived stable precedence, while preserving duplicate and arbitrary-jump checks.
+
+_Date: 2026-10-28; id:20261028T203000Z_
+
+## Reject ambiguous qualified release baselines
+
+Fail closed on ambiguous automatic release baselines, preserve validated explicit prerelease progression, and reject build metadata before npm stamping. Document the distinction between scheduled proposals and manual dispatch.
+
+_Date: 2026-10-28; id:20261028T201000Z_
+
+## Correct absent-check compatibility input description
+
+Clarify that the retained absent-check input has no effect and does not bypass the privileged merge workflow's required check evaluation.
+
+_Date: 2026-10-28; id:20261028T195000Z_
+
+## Align release readiness documentation with derived versions
+
+Describe fragment-derived versions alongside explicit dispatch in the release readiness criteria.
+
+_Date: 2026-10-28; id:20261028T182200Z_
+
+## Document fragment-derived manual release versions
+
+Update reusable workflow release instructions to describe optional version derivation and explicit bootstrap versions.
+
+_Date: 2026-10-28; id:20261028T181500Z_
+
+# v4.5.0
+
+## Reap orphaned sandbox processes while the candidate runs
+
+The trusted script-plan supervisor, which runs as Bubblewrap PID 1, now reaps adopted orphans continuously while the candidate runs instead of only at cleanup, so a candidate that kills a process tree and waits for its process group to disappear no longer times out on zombies left behind by PID 1. This fixes `ci / build-test` for v4.4.0 adopters such as Verjson/verjson-ai, whose consumer cleanup checks failed on every pull request.
+
+_Date: 2026-11-06; issue #2043_
+
+## Propose backup and disaster recovery for the Netcup Git/CI stack
+
+Proposes ADR 0256, the backup and disaster recovery plan for the self-hosted Netcup
+GitLab, Nexus and MinIO stack, and adds a runbook for backing up and restoring it. The
+plan follows the 2026-10-19 outage in #2032, when the stack had no backup.
+
+_Date: 2026-11-05; issue #2032_
+
+## Refuse autonomous merges without the exact-head independent-review receipt
+
+`scripts/assert-mergeable-head.sh` has a new Gate R (ADR 0257, #2031). On a
+promotion-enabled repository, meaning one whose base ref carries the organization's
+required `gate-rearm.yml` workflows rule, the assertion now exits `6` unless the head
+carries a valid ADR 0202 independent-review receipt for that exact head. An autonomous
+`--admin` or `--auto` merge there therefore needs the receipt, as the terminal merge App
+already did.
+
+_Date: 2026-11-05; issue #2031_
+
+## Every actions-ci group writes runtime records, and two tests no longer depend on the host
+
+The `docs` and `locale-collation` actions-ci groups now write and upload runtime records,
+like the matrix groups do. So every pull-request run uploads at least the `docs` records,
+including runs for drafts. The release-caller allowlist sweep runs as its own row with a
+90-second budget, so its cost is recorded on its own. The watchdog and release-node
+credential-boundary tests now give the same verdict whatever the host's time zone or npm
+version.
+
+_Date: 2026-11-05; issue #1999_
+
+## The static-fallback artifact caller declares every preflight output it reads
+
+Generated build-artifact callers on the static per-lane fallback now pass actionlint: their `artifact-preflight` job declares the six sharing-selection outputs (`build-artifact-producer-plan`, `-consumer-plans`, `-profile`, `-export-paths`, `-runner-image`, `-package-manager-version`) that participant, producer, and aggregate jobs read, and writes its outputs through one redirect (ShellCheck SC2129).
+
+_Date: 2026-11-05; issue #1989_
+
+## Propose migrating the repository estate to GitLab CE behind a verified one-way mirror
+
+Proposes ADR 0258, which moves the verJSON repository estate onto the self-hosted GitLab
+CE in waves while GitHub stays authoritative. It adds a wave 0 rehearsal plan for three
+low-risk repositories. Nothing has been executed, and no Git authority switch is
+decided.
+
+_Date: 2026-11-05; issue #1264_
+
+## Replace the Netcup stack's concrete endpoints with placeholders
+
+The public Nuremberg service reference (`docs/infrastructure/netcup-nuremberg.md`) no longer publishes the stack's concrete hostnames or the GitLab SSH port. It uses placeholders and points to the private operational record in `verJSON/verjson-cli` (`docs/operations/netcup-nuremberg.md`), which the stack's renderer lives beside.
+
+_Date: 2026-11-05; id:648ee4e0_
+
+## The changelog caller contract's negative tests name the guard that must reject them
+
+The negative tests in `scripts/ci-gate/changelog-caller-contract.test.sh` now assert
+why they were rejected, together with the exit status the script defines. Before this,
+any nonzero exit passed, so a guard could stop working while an earlier, unrelated check
+kept its test green.
+
+_Date: 2026-11-05; id:20261105T002034Z; refs #1994_
+
+## Run the container coexistence suite once per CI group run
+
+`container-contract-coexistence.test.sh` regenerates all three container contracts. It ran from both `container-candidate-contract.test.sh` and `container-release-contract.test.sh`, which share the `changelog-release-2` CI group, so each run of that group ran it twice. It now runs once, from the release suite, which saves about 0.5 seconds per run of the group. No assertion is removed or weakened.
+
+_Date: 2026-11-04; id:20261104T225628Z; refs #1997_
+
+## Reach the two deferred guards in the generated container contracts
+
+The two guards deferred from #1995 are now reached: the credential guard in the contract test that `gen-container-candidate.sh` generates, and the reconciliation-allowlist guard in the one that `gen-container-release.sh` generates. Both sit behind the caller's whole-file digest pin, so no fixture reached them before, and deleting either left every test green. Their fixtures now re-pin that digest to the mutated caller, as regenerating at a contract that emitted that caller would, and assert each guard's own message. New environment and registry-namespace cases reach the credential guard's other two alternatives.
+
+_Date: 2026-11-04; id:20261104T225627Z; refs #1995_
+
+## Container contract negative tests name the assertion that must reject them
+
+The container candidate, release, and deployment contract suites, the candidate disk-usage suite, and the release-promotion and pnpm dependency tests now check why each negative case is rejected. They check the generated contract test's own failure line, the workflow's `::error::` line, or the exact exception type and message. Before this, any nonzero exit or any exception passed, so a guard could stop working while an earlier, unrelated check kept its test green.
+
+_Date: 2026-11-04; id:20261104T223330Z; refs #1994_
+
+# v4.4.0
+
+## Zero-provider recovery admits every live review run status and names each failed predicate
+
+`scripts/ci-gate/verify-zero-provider-recovery.sh` now treats a review run whose
+status is `waiting`, `pending` or `requested` as the current live run, alongside
+`queued` and `in_progress`. These are the non-terminal run statuses GitHub documents
+in the REST *List workflow runs for a repository* `status` parameter. Before this
+change, a run held while a job waited on environment protection was refused before
+any provider ran. `completed` is still refused as terminal, and any status outside
+that set is still refused as unrecognized. The identity predicates are unchanged.
+
+_Date: 2026-11-04; issue #2012_
+
+## Serialize every fetch into the shared actions-ci checkout so concurrent rows cannot abort each other
+
+Every actions-ci row that deepens or fetches the group's shared shallow checkout
+now goes through `scripts/shared_checkout_fetch.py`. The helper holds an exclusive
+lock on the repository's git directory for the whole fetch. Before this, the
+`platform` shard failed intermittently with `fatal: shallow file has changed since
+we read it` when `hub-changelog-validate.sh` deepened the checkout while another
+row fetched into it, which turned `shell-tests` red with no code cause.
+
+_Date: 2026-11-04; issue #2003_
+
+## Postgres sandbox acceptance dials Docker endpoints instead of timing the CLI
+
+The hosted Postgres sandbox acceptance no longer runs `docker info` inside the
+Bubblewrap sandbox to prove the candidate cannot reach a Docker daemon. It dials each
+endpoint a daemon could be reached through: the system and rootless sockets,
+`DOCKER_HOST`, and every configured Docker context. It also walks the sandbox's own
+mounts and fails on any socket other than the Postgres socket, whatever its name. Which
+mounts it walks is derived from the same Bubblewrap argument list the sandbox is built
+from: `/proc` and every read-only bind of a host distribution tree (`/usr`, `/bin`,
+`/lib`, `/lib64`, and the node root, which is `/usr/local` on hosted images) are skipped,
+and a trusted host-side check covers exactly those bind sources instead. It resolves each
+listening socket path in the host's `/proc/net/unix`, including symlinks, `..` and a
+merged `/usr`, and fails on one under those sources or on a relative one. It cannot see
+listeners in other network namespaces or sockets renamed after `bind()`. The walk stops
+after 100,000 entries and fails closed, and an option the mount parser does not know, or
+a mount made over a skipped tree, fails the check rather than being guessed. The check fails while
+any endpoint answers, and also when one times out, reports a busy or other
+non-definitive error, or cannot be parsed or dialed. Only an immediate refusal from the
+kernel counts as unreachable.
+
+_Date: 2026-11-04; issue #1999_
+
+## Build expensive test fixtures once instead of per case
+
+Three actions-ci test rows stop rebuilding a fixture that every case shares, with no assertion removed or weakened.
+
+_Date: 2026-11-04; issue #1997_
+
+## Unbuildable test fixtures and ignored exit codes fail loudly instead of passing
+
+Eleven shell test suites now check that each fixture, mutant, extraction and
+generator output was actually built before trusting a verdict on it. A failed
+build now fails with a message that names it. It can no longer count as a pass,
+count as the expected rejection, or end the run silently under `set -e`.
+
+_Date: 2026-11-04; issue #1996_
+
+## Reach guards that no test fixture reached
+
+Tests now reach 22 fail-closed guards in the merge-gate, platform, and changelog-release suites that no fixture reached before, and each test checks that guard's own error. Before this change, deleting any of these guards left every test green: an earlier check rejected the fixture first, or no test exercised the guard at all. The one exception is the App-approval guard, whose wrong-identity and stale-approval cases already caught its deletion; only its missing-approval case was hollow. Each new or corrected fixture passes every earlier check, so deleting its guard now fails its test.
+
+_Date: 2026-11-04; issue #1995_
+
+## Merge-gate negative tests name the guard that must reject them
+
+Every negative test in the `merge-gate` CI group now asserts the reason it was
+rejected for: an `::error::` line, an exception message, an extraction kind, or the
+contract line that raised. Before this, a test passed on any nonzero exit, so a
+guard could stop working while an earlier, unrelated check kept the test green.
+This change covers each guard a test exists for and leaves the guards themselves
+unchanged in what they accept.
+
+_Date: 2026-11-04; issue #1994_
+
+## Author release commits under the verjson.com domain
+
+The reusable changelog release now commits and tags as
+`release@verjson.com`, and the release App canary as
+`release-canary@verjson.com`, instead of the `verjson.dev` addresses the
+organization does not use. `changelog-release-permissions.test.sh` pins the
+release identity. A caller keeps the old identity until it repins to a
+contract commit that carries this change, which includes this repository's
+own `release.yml`.
+
+_Date: 2026-11-04; id:6e48ff8485_
+
+## Repin this repository's release caller at the verjson.com release identity
+
+This repository's own `release.yml` is regenerated at contract
+`3619ce18de265db603b12e7a97df7c36c41d1cac`, so its next release commits and
+tags as `release@verjson.com`. The repin also brings the caller's `verify`
+job under the adopters' current shape: a reserved-path refusal before each
+contract checkout, private registry packages acquired through the pinned
+`npm-private-acquisition.sh` before a credential-free `npm ci`, and the
+`CI_PACKAGE_RETENTION_KEEP` value validated before release verification.
+The caller's two exemptions are retired because it now meets their rules:
+`fixed-path-checkout-refusal.test.py` no longer exempts its
+`.changelog-contract` checkout, and `settable-value-guards.test.py` no
+longer exempts it from the locale rule, since its digest guards now
+enumerate their characters. That test's reviewed inventory grows by the new
+retention guard, to 516.
+
+_Date: 2026-11-04; id:59d1521963_
+
+## Changelog-release Bash negative tests name the guard that must reject them
+
+The negative tests in the Bash files of the `changelog-release-1` through
+`changelog-release-4` CI groups, other than the container contract files, now assert
+why they were rejected: the `::error::` line, the engine's `changelog:` line, the
+generator's message, or the shape checker's report, together with the exit status the
+script defines. Before this, any nonzero exit passed, so a guard could stop working
+while an earlier, unrelated check kept the test green. The release caller's shape
+checker had five such cases: with the named check removed, another report still
+rejected the mutation. Two of those mutations also rewrote the publish job's token,
+and are now bounded to the verify job. Each case now asserts the report of the
+invariant it names. No case had reached the check that the publish job's
+private-dependency read token is not `GITHUB_TOKEN`; a new case does.
+
+_Date: 2026-11-04; id:20261104T221652Z; refs #1994_
+
+## Changelog-release Python negative tests name the guard that must reject them
+
+The negative tests in the Python files of the `changelog-release-1` through
+`changelog-release-4` CI groups now assert why they were rejected. They check the
+exact exception message, the exact exception the test injected, or the CLI's exit
+status and stderr line. Before this, any exception of the right type or any
+nonzero exit passed. A guard could stop working while an earlier, unrelated check
+kept the test green.
+
+_Date: 2026-11-04; id:20261104T213833Z; refs #1994_
+
+## Platform Bash negative tests name the guard that must reject them
+
+The negative tests in the `platform` CI group's Bash files now assert why they
+were rejected: the `UNDETERMINED:` or `::error::` line, the validator's
+`sys.exit` reason, or the generator's message, together with the exit status the
+script defines. Before this, any nonzero exit passed, so a guard could stop working
+while an earlier, unrelated check kept the test green. One such case was live: the
+test that PR-supplied scopes cannot expand the trusted package policy was rejected by
+the earlier approved-package scope check, never by the policy comparison. Its
+fixture now reaches the policy guard, and a new case covers that guard's other half,
+package approvals the policy does not list.
+
+_Date: 2026-11-04; id:20261104T210441Z; refs #1994_
+
+## Platform Python negative tests name the guard that must reject them
+
+The negative tests in the `platform` CI group's Python files now assert why they
+were rejected: the exception message or the exact exception the test injected,
+the `::error::` line, the argparse error, or the `jq -e` verdict. Where a guard
+rejects silently and lives in a generated or required workflow, the test reads the
+guard that stopped the script from its `bash -x` trace instead. The bare
+`AcquisitionError` of the compatibility-sandbox acquirer carries no message. Where a
+second guard would also reject a case, its test names the guard condition whose
+`raise` fired. Before this, any nonzero exit or
+any exception of the right type passed, so a guard could stop working while an
+earlier, unrelated check kept the test green.
+
+_Date: 2026-11-04; id:20261104T194358Z; refs #1994_
+
+## Gate W refusals state the runbook's recovery for each reason
+
+`scripts/assert-mergeable-head.sh` now ends every Gate W refusal with the recovery
+`docs/arm-recovery-runbook.md` gives for each reason it names, instead of advising a
+re-arm for all of them. `cancelled` and `stale` point at the close-and-reopen
+recoveries, `absent` checks enrollment and the base-ref rule first, `not successful`
+fixes the cause first, and `unbound`, `ambiguous`, `undated`, `changed`, an unreadable
+rule, and duplicate paths say not to re-arm, because their evidence cannot be
+attributed. The exit code (3) and the `Gate W:` prefix are unchanged.
+
+_Date: 2026-11-04; id:20261104T035233Z; refs #1905, #2008_
+
+## Remove self-inflicted serial work from actions-ci test rows
+
+Actions-ci test rows no longer repeat work they already did: the runner-admission reconcile suite runs the reconciler once per case instead of twice, the zero-provider recovery suite records its retry backoff instead of sleeping through it, and the review-caller bootstrap suite runs its independent checks concurrently.
+
+_Date: 2026-11-03; issue #1998_
+
+## Report the main-protection suspension as a reviewed state
+
+The daily authorization-arm audit recognizes `main-protection` (18098028) disabled under the owner hold in #1933 as a third reviewed state, `suspended`, instead of stopping at its first check. It reports the suspension as one constant finding and then runs every later check exactly as it does for `split`, so the #1810 consumer-drift finding and any new regression reach the report again.
+
+_Date: 2026-11-03; issue #1992_
+
+## Fail closed on Actions-paused drift
+
+The scheduled organization ruleset conformance run now fails when ADR 0252's Actions-paused exclusion drifts from live state: a `paused` repository with Actions enabled, a default branch governed by the baseline ruleset 26466984 when it should not be (or not governed, or missing one of its rule types, when it should), or a paused-only relaxation ruleset left at the wrong enforcement. Unreadable or unexpected API state fails too.
+
+_Date: 2026-11-03; issue #1987_
+
+## Record the Actions-paused required-check exclusion
+
+ADR 0252 records the owner's decision to exempt repositories with GitHub Actions paused from rulesets whose checks can only run under Actions.
+- An explicit `verjson-actions-state` custom property records membership.
+- The three required-check rulesets and `core-checks-node-floor` (24056850) exclude `paused` repositories.
+- Twelve single-repository rulesets drop to `evaluate`.
+- The stand-in ruleset `actions-paused-baseline-protection` (26466984) keeps pull requests required and blocks force-pushes and deletion.
+- Each repository's protection is restored when its Actions is re-enabled.
+
+_Date: 2026-11-03; issue #1985_
+
+## Generated Node CI callers defer every lane on draft pull requests
+
+`scripts/gen-node-ci-caller.py` now skips every generated job, the
+`test-levels` aggregate included, while a pull request is a draft, and triggers
+on `pull_request` types `opened`, `synchronize`, `reopened`, and
+`ready_for_review`, so marking the pull request ready runs the whole plan on its
+head. A draft holds no runner (#1984, part of #1869). The caller's
+concurrency now cancels a running run only on a new commit (`synchronize`); a
+same-head `opened`, `reopened`, or `ready_for_review` run waits instead of
+cancelling a ready run into a red required check.
+
+_Date: 2026-11-03; issue #1984_
+
+## Generate a SHA-pinned AI review lifecycle re-arm caller
+
+`scripts/gen-ai-review-lifecycle-rearm-caller.sh` now takes a 40-character contract SHA, as its label re-arm sibling does, and emits a consumer caller pinned to `Verjson/.github/.github/workflows/gate-rearm.yml@<sha>`. The caller delivers `ready_for_review`, `converted_to_draft`, `edited` and `unlabeled`, so a consumer that regenerates its callers at current `main` keeps re-arm on ready, draft, title and hold-label transitions. `--local` still renders this repository's own caller unchanged. See [Verjson/.github#1982](https://github.com/Verjson/.github/issues/1982).
+- The authorization audit's rollout contract (`config/ai-review-required-workflow-rollout.json`) now lists `.github/workflows/ai-review-lifecycle-rearm.yml` in the completeness set, so an armed adopter without it is reported with an incomplete generated adopter caller set rather than silently losing lifecycle re-arm. It is not an admission caller: the arm still runs without it, and canonical merge re-checks draft and hold state.
+
+_Date: 2026-11-03; issue #1982_
+
+## Refuse a merge whose required workflow did not succeed on the exact head (Gate W)
+
+`scripts/assert-mergeable-head.sh` adds Gate W. It exits 3 unless every required workflow that a ruleset `workflows` rule names for the base ref has a successful run on the exact head, created after that ruleset last changed. Before this, the gate printed `true` while GitHub refused the merge, which is the #1905 shape seen on verjson-identity-contracts#121 when the local `gate re-arm` caller displaced the cancelled required run (ADR 0255).
+
+_Date: 2026-11-03; issue #1905_
+
+## Stop scheduled audits from reddening when a recorded finding improves
+
+`scripts/audit-finding-state.py` now accepts a recorded item set (`finding_class` plus the full sorted `items`) on an expectation entry. When the observed set for that class is a strict subset, the run is a `match` with a `::notice` and a step-summary entry to re-record. When it is empty, the run reads as no finding and asks for the expectation to be removed. Any new item, other class, expired entry, or missing evidence still drifts, and malformed or contradictory evidence is undetermined (ADR 0189, 2026-10-21 amendment). Structured items reject every C0 control character and DEL.
+
+_Date: 2026-11-03; issue #1810_
+
+## Re-record the authorization-arm caller drift at its live value
+
+Maintenance: the scheduled `arm-audit` job adjudicates the #1810 consumer-drift finding
+again. The main-protection suspension image (#2002, ADR 0254) lets the audit reach this
+check once more, and the finding grew from 20 to 35 missing generated adopter callers across
+23 armed repositories. The recorded 20-item entry was therefore stale beside a new
+finding. `config/audit-expected-findings.json` now records the live text, fingerprint
+`367c4bb7…`, and its full sorted item set (`items=sha256:bd945149…`).
+
+_Date: 2026-11-03; id:20261103T223515Z; refs #1810, #1992_
+
+## Declare the measured budget for the secretless hosted-lane contract
+
+`node-ci-secretless-hosted-lane.test.py` declares `@budget=150` in the actions-ci manifest. Its CI runtimes of 45–67 s (one more run timed out at 60 s) sat at or above the 60 s default pull-request budget, so it timed out on unrelated pull requests. Per ADR 0225, the budget is twice its slowest measurement (67 s), rounded up to 30 s.
+
+_Date: 2026-11-02; issue #1980_
+
+## Emitted contract suite reports guard diagnostics instead of aborting silently
+
+The generated `changelog-contract.test.sh` no longer aborts under `pipefail` when a guard's `grep` capture matches nothing. Eight captures (the release-verification ordering lines and the private build matrix selectors and indices) now fall through to their existing guards. An adopter missing package-metadata preparation, for example, now sees the #550 diagnostic instead of a red check with no reason. Rejection outcomes are unchanged. A static check keeps any new capture from reintroducing the silent abort.
+
+_Date: 2026-11-02; issue #1975_
+
+## Caller-contract rejections assert their reason inside each case's job
+
+`expect_rejection` in the changelog caller contract now requires `--reason`, the diagnostic the emitted suite must print, and checks it inside the case's own background job. Before, the main thread waited on 118 cases one at a time to grep each log, and 64 cases (CODEOWNERS, release trigger, snapshot, PR gate) passed on any nonzero exit. Optional `--pass` and `--fail` keep each existing label unchanged. Nineteen waits whose result was never read are removed, and six full-suite runs move from the main thread into the bounded job pool. With every expected reason deliberately altered, all 192 reason checks fail across the four shards; unaltered, all pass. ADR 0225 now names the shard helper's pin as the authoritative case count.
+
+_Date: 2026-11-02; issue #1974_
+
+## Dispatch actions-ci rows exclusive-first and longest-budget-first
+
+The actions-ci group runner starts `@exclusive` rows first, then rows with a declared `@budget` (longest first), then the remaining rows in manifest order. Declared budgets now rank dispatch on every event, but they still cap rows only under the pull-request group budget. Replaying `main` run 40642682859 through the dispatcher, the `platform` cell drops from 446 s to 367 s and `merge-gate` drops from 105 s to 86 s.
+
+_Date: 2026-11-02; issue #1971_
+
+## Run namespace-bound launcher tests in the hosted compatibility job
+
+Run the real pidfd-launcher and mount-destination namespace tests only in the
+provisioned hosted compatibility job (VERJSON_TEST_REAL_BWRAP=1); elsewhere
+they skip. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T195331Z; refs #1966_
+
+## Reap an unreleased trusted launcher through its pinned pidfd
+
+When gate authentication fails after the launcher pidfd is pinned, reap the
+launcher through that pidfd (killing it through the same pidfd if it ignores
+its closed gate) instead of a numeric-PID wait. Report cleanup of an
+interruption before identity verification as unverified, never retry a failed
+status-pipe close on a reusable descriptor number, and name the Linux 6.9
+`PIDFD_SIGNAL_PROCESS_GROUP` requirement when an older kernel rejects group
+signaling. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T191402Z; refs #1966_
+
+## Disclose the shared workspace writer assumption
+
+Warn secretless CI users that competing host writers can redirect shared
+workspace mounts and include the assumption in the job summary. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T160716Z; refs #1966_
+
+## Exercise sandbox mount destination substitution
+
+Exercise replacement of a verified mount destination before the experimental
+supervisor launches the sandbox. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T040813Z; refs #1966_
+
+## Pin verified mount directories through owned traversal
+
+Traverse verified experimental mount directories through owned, nofollow
+component descriptors and reject identity changes. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T040358Z; refs #1966_
+
+## Pin experimental sandbox mount inheritance
+
+Acquire experimental mount descriptors into native-owned slots and preserve
+verified source identities through atomic launcher inheritance. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T035639Z; refs #1966_
+
+## Retain experimental supervisor lifecycle ownership
+
+Keep the experimental supervisor pipes, pidfd, and reap result in native-owned
+slots, retaining the owner when process-group cleanup is unverified. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T034815Z; refs #1966_
+
+## Own the experimental supervisor status pipe
+
+Keep the experimental supervisor status pipe in native-owned slots through
+allocation and cleanup. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T034326Z; refs #1966_
+
+## Own experimental namespace borrows through their use
+
+Require a caller-owned, liveness-checked descriptor lease for experimental
+sandbox namespace borrows. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T034105Z; refs #1966_
+
+## Preserve ownership of inner supervisor descriptors
+
+Keep experimental inner supervisor acquisition and namespace publication in
+native-owned descriptor slots, and preserve cancellation evidence through
+revocation failures. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T033640Z; refs #1966_
+
+## Authenticate the inner supervisor before control
+
+Require a fresh identity proof before publishing the sandbox namespace or
+signaling the inner supervisor, and retain cancellation uncertainty. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T032809Z; refs #1966_
+
+## Add atomic pidfd launcher boundary
+
+Add an isolated native launcher boundary that creates a child and pidfd
+atomically, with a guarded exec and support for pidfd-based cleanup. Part of #1966.
+
+_Date: 2026-11-02; id:20261102T025122Z; refs #1966_
+
+## Close supervisor descriptors when cleanup verification fails
+
+Attempt to close supervisor-owned streams and descriptors even when process
+cleanup cannot be verified. Preserve failure provenance and withhold the plan
+receipt when cancellation evidence is unavailable. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T061120Z; refs #1966_
+
+## Add an experimental harness launch wrapper
+
+Add an unwired pipe-gated wrapper that closes its gate descriptor before
+executing a caller-selected command. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T060713Z; refs #1966_
+
+## Observe a supervisor child pidfd handoff
+
+Add an experimental one-shot supervisor-to-controller pidfd handoff reader
+with bounded validation and descriptor cleanup. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T060043Z; refs #1966_
+
+## Probe an inherited writer under the sandbox supervisor
+
+Exercise rejection of an inherited socket writer while the recorded connector
+remains live in the opt-in supervisor fixture. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T055400Z; refs #1966_
+
+## Probe sender chunks through the sandbox supervisor
+
+Extend the opt-in supervisor fixture to observe a cooperating sender's chunk
+with pinned connector evidence. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T055137Z; refs #1966_
+
+## Probe pinned sender chunks across a PID namespace
+
+Add an opt-in direct Bubblewrap test for sender-chunk evidence across an
+isolated PID namespace. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T054932Z; refs #1966_
+
+## Add experimental pinned sender chunk evidence
+
+Add an unwired, deadline-bound observation of one Unix socket chunk against
+a live pinned sender, with failure and descriptor-cleanup coverage. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T054629Z; refs #1966_
+
+## Record local lane sender credential observations
+
+Record bounded local observations and unresolved trust constraints for lane
+sender credentials. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T054424Z; refs #1966_
+
+## Record isolated connector canary evidence
+
+Record the bounded hosted connector probe and assert that its supervisor
+namespace differs from the host in future runs.
+Part of #1966.
+
+_Date: 2026-10-31; id:20261031T035204Z; refs #1966_
+
+## Resolve connector tests under isolated Python
+
+Make the compatibility test modules import their checked-out helpers when
+Python isolated mode omits the script directory. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T035007Z; refs #1966_
+
+## Pin provisional compatibility connector evidence
+
+Add an unwired connector identity observation with fail-closed pidfd and
+namespace checks. It does not authenticate a harness or authorize admission.
+Part of #1966.
+
+_Date: 2026-10-31; id:20261031T034723Z; refs #1966_
+
+## Record peer identity descriptor-passing limitation
+
+Record a local socketpair probe and its limits for future compatibility lane
+peer authentication. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T034310Z; refs #1966_
+
+## Expose provisional supervised namespace identity
+
+Add an unwired, revocable supervisor namespace notice for future isolated
+compatibility lanes. The notice does not authenticate peers or authorize
+admission. Part of #1966.
+
+_Date: 2026-10-31; id:20261031T033947Z; refs #1966_
+
+## Record compatibility controller options and canary evidence
+
+Record existing required-workflow and independent-App controller options and
+the limited public reusable-call identity probe for compatibility isolation.
+
+_Date: 2026-10-31; id:20261031T010400Z; refs #1966_
+
+## Propose compatibility lane trust boundaries
+
+Document a proposed protected lane plan, trusted assertions, per-lane isolation,
+network profile and adoption evidence for compatibility CI. The existing CI
+contract remains effective until a replacement is reviewed and adopted.
+
+_Date: 2026-10-31; id:20261031T005133Z; refs #1966_
+
+## Track compatibility lane isolation
+
+Track the shared compatibility-lane isolation work and its consumer dependency.
+
+_Date: 2026-10-30; issue #1966_
+
+## Add an opt-in supervised execution deadline
+
+Add a fail-closed deadline to the existing Bubblewrap supervisor for future
+trusted compatibility harness work. Part of #1966.
+
+_Date: 2026-10-30; id:f804c2; refs #1966_
+
+## Compare experimental compatibility lane evidence
+
+Add an unwired comparator for complete, candidate-bound compatibility lane
+records. Part of #1966.
+
+_Date: 2026-10-30; id:7be439; refs #1966_
+
+## Add an experimental compatibility lane relay
+
+Add a bounded one-shot request and response relay for future isolated
+compatibility lanes. Part of #1966.
+
+_Date: 2026-10-30; id:5b32c7; refs #1966_
+
+## Bound caller workflow blob verification
+
+Caller workflow verification rejects blobs larger than 1 MiB and hashes accepted blobs from a temporary file in fixed-size chunks, with a bounded subprocess timeout and fail-closed output checks.
+
+_Date: 2026-10-28; issue #1930_
+
+## Clarify normalized script-plan validation errors
+
+Normalized nested script-plan validation now distinguishes a non-integer manifest index, an out-of-range index, and a manifest path that does not match its index.
+
+_Date: 2026-10-28; issue #1924_
+
+## Explain ArtifactSet PAX prevalidation
+
+Document why ArtifactSet archives validate PAX records before the standard `tarfile` parser applies their metadata.
+
+_Date: 2026-10-28; issue #1918_
+
+## Use Node 26 in deployment workflows
+
+The candidate publish, deployment, and Renovate compatibility workflows now use Node 26; the deployment contract assertion and two runner-isolation receipts match the updated workflow contents.
+
+_Date: 2026-10-28; id:20261028T043832Z_
+
+## Reject persistent untrusted selector
+
+The runner-admission reconciler now reports an untrusted selector that resolves
+to the persistent general lane as known drift before runner-group inspection.
+The scheduled workflow can record the drift through its existing issue path.
+Hosted routing and explicitly classified untrusted-group routing remain valid.
+This check detects selector drift; it does not attest physical runner
+ephemerality or enforce workflow routing.
+
+_Date: 2026-10-27; issue #1831_
+
+## Include generated label re-arm callers in capability-floor observation
+
+Capability-floor discovery now tracks the generated AI review label re-arm callers in verjson-cli-cloud and AiB, so their pinned `gate-rearm.yml` revisions are included in the audit. The first required run exposed that ruleset 20722935 still pinned the pre-dispatch-split gate revision; its SHA was rotated to current main without changing enforcement or scope.
+
+_Date: 2026-10-27; issue #1814_
+
+## Record admin merge 1928
+
+ADR 0210 records the standing-authority admin merge of #1928, including its
+fetched clean base, pre-merge assertion, check conclusions, and adversarial
+review evidence. No check was weakened.
+
+_Date: 2026-10-27; id:c057010e98c1; refs #1869_
+
+## Split public runner-isolation probes for CI
+
+Actions CI runs the public runner-isolation probes in two bounded shards while
+the test keeps its full-run entrypoint. The partition contract checks the
+runner's actual selection and requires every check-bearing statement exactly
+once. The release verifier's pending digest is refreshed against the scanner.
+
+_Date: 2026-10-27; id:b17f30e92a4c_
+
+## Enforce public reusable-workflow runner isolation
+
+The runner-isolation checker now models public pull-request calls to reusable
+workflows with symbolic caller variables, inputs, and identity, and follows
+nested local calls. It rejects remote callees and any reachable runner
+selector it cannot prove uses a GitHub-hosted ephemeral runner. Per-entrypoint
+and workflow-scan budgets fail closed on exhaustion, and the stricter scenario
+cannot be waived through generic relay review rows.
+
+_Date: 2026-10-27; id:9db5a71c; refs #1831_
+
+## Route Node CI through installation runner profiles
+
+Node CI eligibility and build jobs now use the installation runner-profile catalog, with the protected workflow generated from the same source.
+
+_Date: 2026-10-27; id:9ab3cd614f07; refs #1869_
+
+## Harden public reusable workflow caller guards
+
+Public reusable workflows now reject all five PR-related events from public
+repositories before privileged work can succeed by skipping. The isolation
+scanner evaluates those same events through nested local calls, public `verjson-ci`
+uses a hosted runner unconditionally, and post-merge reconciliation accepts only
+the exact canonical legacy/current dispatcher paths during migration. Bootstrap
+validation recognizes a finite set of historical generated callers only for the
+protected base; proposed callers must use the current generator. See #1831.
+
+_Date: 2026-10-27; id:8b3f209a34d1_
+
+## Fail closed on public reusable-workflow calls
+
+Canonical CI routes public pull-request execution to GitHub-hosted runners and fails rejected reusable-workflow calls explicitly, including when repository visibility is unavailable.
+
+_Date: 2026-10-27; id:5f5b26e812a1_
+
+## Reject public calls to release and container publishing workflows
+
+Part of #1831. The reusable Node release and container candidate publishing
+workflows now fail a hosted, permissionless guard for public pull-request
+events. Every existing job depends on that guard and checks its result,
+including jobs whose normal conditions use `always()`. The guard contract
+covers all five public pull-request event types.
+
+_Date: 2026-10-27; id:3b7ca4f6d2e1_
+
+## Require agent-authored changelog context for dependency updates
+
+The canonical changelog contract no longer generates release fragments from
+Renovate metadata. Agents must exercise dependency upgrades and describe their
+behavior in `NEXT/`; the existing required changelog validation remains in
+force. The generated adopter contract uses a bounded, source-wide workflow scan
+that rejects case-insensitive raw, folded, aliased, and supported escaped
+mentions of the retired path, including comments and run bodies. This guard
+normalizes escaped CRLF, CR, LF, NEL, line separator, and paragraph separator
+continuations, and stops at the workflow-count limit before inspecting another
+candidate. It intentionally overmatches inert mentions. ADR 0243 supersedes
+the automated writer decision in ADR 0104.
+
+_Date: 2026-10-27; id:20261027T215630Z; refs #1869_
+
+## Preserve zero-provider recovery through the dispatch wrapper
+
+`verify-zero-provider-recovery.sh` recognizes the exact `review / ` job-name prefix returned by the canonical dispatch wrapper and keeps direct job names for adopter workflows. Contract tests cover both paths. Part of #1831.
+
+_Date: 2026-10-27; id:20261027T120747Z_
+
+## Keep public workflow input validation locale-stable
+
+The public `verjson-ci` adapter now checks OCI image references with explicit
+ASCII character sets while preserving its byte-verified pinned source fixture.
+The generated AI review caller accepts only lowercase ASCII hexadecimal
+contract pins. Regression tests exercise both boundaries under `en_US.UTF-8`.
+The capability-floor observation's pending relay digest is rebound to the
+updated generator bytes in its sparse checkout; the row's scope and justification
+remain unchanged.
+
+_Date: 2026-10-27; id:20261027T101500Z; refs #1831_
+
+## Inline gate-rearm app-key validation
+
+`gate-rearm.yml` validates its main-only environment policy and AI-review App key in separate inline jobs. The validator bodies are tested against `app-key-environment.yml`; key validation remains environment-bound and runs without a checkout. Public and unresolved pull-request callers select GitHub-hosted runners before lane variables, and watchdog admission follows that placement even when a stale untrusted-lane variable names a persistent runner. Rejected `verjson-ci` profiles fail on a fixed hosted runner before any work starts. ADR 0242 records the #1831 security decision and supersedes the pinned nested-call choice in ADR 0171.
+
+_Date: 2026-10-27; id:20261027T091057Z_
+
+## Route public reusable calls through hosted runners and caller concurrency
+
+`pull_request` and `pull_request_target` are now both part of the strict public reusable-workflow isolation scan. Public callers are routed to GitHub-hosted runners before caller-selected lanes, and denied reusable workflows must fail through an explicit sentinel with job-level guards. The AI review worker remains on its stable reusable path without concurrency; a generated local dispatch caller owns run cancellation.
+
+_Date: 2026-10-27; id:20261027T075640Z; refs #1831_
+
+## Make the public verjson-ci adapter locally auditable
+
+Part #1831. The canonical GitHub adapter now runs its `public-v1` profile locally from a hash-verified snapshot of the pinned `verjson-ci` workflow. Public pull requests use an explicit GitHub-hosted runner; public repositories fail explicitly when they request a protected profile. The protected candidate profile remains delegated only for the private canonical repository's main-branch dispatch and retains the source callee's Verjson-only feature flag; unsupported candidate requests fail instead of leaving the required check skipped. Scenario values pass through the environment before shell use, and the arbitrary result-copy path is not exposed. The local artifact uploader follows the canonical pinned action version while the immutable source snapshot remains byte-verified at its recorded commit.
+
+_Date: 2026-10-27; id:20261027T073154Z; refs #1831_
+
+## Bind ArtifactSet authorization to caller workflow bytes
+
+ArtifactSet preflight and producer or consumer authorization now require the approved caller workflow path and SHA-256 digest, read from the workflow ref and immutable workflow revision. Preflight selects independent lane plans when the caller path or bytes mismatch; producer and consumer reauthorization fails closed with that reason.
+
+_Date: 2026-10-27; id:20261027T024820Z; refs #1869_
+
+## Harden same-run build artifact verification and selection
+
+Part of #1869. Harden the canonical same-run ArtifactSet parser against GNU sparse members, sparse or size-overriding PAX records, malformed framing, hidden padding records, and excessive extension chains. Caller selection now uses exact JSON booleans, the always-run aggregate rejects missing or malformed evidence, and consumer TestReceipts require both verified artifacts and successful candidate-plan execution. The checked-in policy remains version 1 with no repositories; this change does not enroll an adopter or claim an outside-Verjson canary or runner-minute savings.
+
+_Date: 2026-10-26; id:d1a1869c2026; refs #1869_
+
+## Record live Playwright cold-cache evidence and its network limit
+
+`docs/node-workflows.md` records that an external adopter's `e2e-full / build-test` passed after a Playwright browser-cache miss and downloaded browsers from the CDN. It states that one successful run does not guarantee CDN availability, so transient DNS failures can still fail a cold browser install.
+
+_Date: 2026-10-26; id:20261026T223000Z_
+
+## Unify normalized CI script-plan validation
+
+Part of #1869. Add one pure normalized-entry validator used by both canonical Node CI executors. Both executors load it and the existing parser from the immutable workflow SHA into runner temporary storage. The composite action pin and its byte-hash check stay unchanged; filesystem containment, package-script checks, authorization, runner admission, sandbox setup, and receipts remain in the trusted executors. Regenerate the protected workflow and its runner-isolation digests. Add golden and executor-path coverage for valid and malformed shapes, nested binding and order, strict service booleans, and level-wrapper rejection. Backfill ADR 0210 with #1921 merge metadata; the retained PR record does not prove its pre-merge assertion result.
+
+_Date: 2026-10-26; id:20261026T203849Z; refs #1869_
+
+## Add isolated PostgreSQL schema validation profile
+
+Part #1817. Add opt-in `postgres-schema-validation-17.11` profile three fixed databases and socket-only URLs schema snapshot generation, migration replay, and reference comparison. Trusted setup uses pinned PostgreSQL 17.11 server and client bundle, seeds only fixed auth/storage prelude in migration database, grants `CONNECT` to non-administrative candidate role on each database, and grants `TEMP` only migration replay. Hosted acceptance exercises Drizzle generation, migration replay, normalized schema comparison, database isolation, and AppArmor boundary. Profile runs still have no network egress or Docker access.
+
+_Date: 2026-10-26; id:20261026T155037Z; refs #1817_
+
+## Add a constrained PostgreSQL 17.11 sandbox profile
+
+Part #1869. Add an explicit, default-off amd64 PostgreSQL 17.11 profile pinned to the reviewed manifest digest. Trusted setup provisions an isolated per-run database with no network or published ports, stages only the same-image `psql` and `pg_dump` clients, and exposes them with the Unix socket through read-only Bubblewrap mounts. The candidate role can use `app_test` and create objects in `public`, but cannot administer the server. The profile rejects legacy service requests before starting any service. When selected, it rejects `producer`/`consumer` ArtifactSet roles and direct or protected-baseline-resolved `secretless-compatibility-ranges` requests before credentialed dependency acquisition. Ordinary `level` runs remain allowed; profile runs retain `--unshare-net` and fail closed on runtime boundary changes. The hosted acceptance fixture pushes a small Drizzle schema to one fresh database, applies routines and the matching migration to a second, then compares normalized dumps. The external canary's `postgres:17.6` reference is adopter drift, not a reason to downgrade the canonical profile. Local execution does not establish hosted AppArmor acceptance.
+
+_Date: 2026-10-26; id:20261026T031853Z; refs #1869_
+
+## Record ADR 0210 evidence for the #1925 admin merge
+
+ADR 0210 gains the verified merge head, merge commit, base, check rollup, review decision, and successful `assert-mergeable-head.sh` result for #1925. It records the ARB reviewers used and the unavailable Agent tool reviewers without implying that the skipped reviews occurred.
+
+_Date: 2026-10-26; id:1925b17e_
+
+## Validate configured GitHub App client IDs before every token mint
+
+Canonical workflows now use one generated preflight guard bound to the exact client ID passed to each GitHub App token mint, and both Python configuration validators share the same policy. The policy and its limits are recorded in [ADR 0241](../docs/decisions/0241-configured-github-app-client-id-preflight-policy/README.md).
+
+_Date: 2026-10-25; issue #1800_
+
+## Record level-local script failures trusted entry receipts
+
+Part of #1869. Typed Node CI levels carry strict, level-local failFast through generated callers, authorization, and both executors; omission defaults to true. Ordinary credentialed execution rejects false before candidate-controlled commands. Under false, an ordinary candidate nonzero exit is recorded, later entries run diagnostics, and the level remains failed. Under true, later entries receive not-run-fail-fast receipts. Candidate signals, ambiguous 128–255 exits, startup or confinement failures, cancellation, cleanup failures, and missing or malformed supervisor evidence stop the plan.
+
+_Date: 2026-10-25; id:20261025T115506Z; refs #1869_
+
+## Record the #1911 admin merge in ADR 0210
+
+ADR 0210 records the verified merge head and commit, required assertion result, check rollup, review board result, and admin method for #1911.
+
+_Date: 2026-10-25; id:20261025T060449Z_
+
+## Implement constrained same-run build artifact sharing
+
+Adds an opt-in typed `buildArtifact` contract to canonical Node CI callers. Trusted preflight validates policy, participant plans, checkout identity, and compatible build profiles before selecting sharing. A trusted producer exports a bounded same-run ArtifactSet; credentialless consumers run the remaining checks in isolation and emit receipts bound to the ArtifactSet ID and digest. Fallback lanes retain their original plans and aggregate by job result without artifact receipts.
+
+_Date: 2026-10-24; id:20261024T180720Z; refs #1869_
+
+## Record the #1910 admin merge in ADR 0210
+
+ADR 0210 records the verified #1910 merge head and commit, required assertion output, terminal check rollup, review board, and operator-confirmed admin method.
+
+_Date: 2026-10-24; id:20261024T141140Z_
+
+## Bound build-once artifacts to same-run credentialless CI
+
+ADR 0238 records the owner-selected build-once direction and the ARB's conditional controls: same-run artifact identity, trusted host-side export and receipts, isolated credentialless consumers, confidentiality gates, and no promotion reuse. Unsafe or network-dependent plans retain per-lane builds. The #1692 deployment candidate chain remains separate.
+
+_Date: 2026-10-24; id:20261024T141139Z; refs #1869_
+
+## Record the #1909 admin merge in ADR 0210
+
+ADR 0210 records the verified merge head, merge commit, required assertion result, check rollup, review board result, and operator-confirmed admin method for #1909.
+
+_Date: 2026-10-24; id:20261024T134641Z_
+
+## Adopt the shared Node CI script-plan parser
+
+Canonical secretless Node CI callers now use the shared parser action pinned to its immutable merged commit for plan normalization and service-grant decisions. The workflow executes the normalized plan while validating its root or nested manifest, and the protected twin and conformance fixture are regenerated from the canonical source.
+
+_Date: 2026-10-24; id:20261024T134640Z; refs #1869_
+
+## Preserve Node CI script-plan input compatibility
+
+The shared parser trims root-plan and nested-manifest JSON inputs as the prior workflow did and no longer applies byte limits that the inline parser did not have. Existing entry-count, credential-name, boolean, and path validation remains in place.
+
+_Date: 2026-10-24; id:20261024T131155Z; refs #1869_
+
+## Record admin bypasses for #1901, #1904, and #1908
+
+ADR 0210 now records the operator-confirmed admin merge method for #1901 and #1904 alongside their GitHub-visible metadata, and adds an evidence-bounded record for #1908. The entries do not infer `assert-mergeable-head.sh` results from GitHub metadata.
+
+_Date: 2026-10-24; id:20261024T115316Z_
+
+## Add shared Node CI script-plan parser
+
+Introduces a bounded parser and composite action for canonical Node CI script plans, with deterministic normalization and golden coverage. Workflow adoption follows in a separate part of #1869.
+
+_Date: 2026-10-24; id:20261024T110355Z_
+
+## Document the nested-only install-script limit for adopters
+
+`docs/node-workflows.md` and ADR 0086 now state that a script-bearing package present only nested under another package's `node_modules/` is outside the offline rebuild accounting, stays unbuilt without a warning, and must be made a top-level dependency if a consumer needs its native build. They also note that the pnpm rebuild does not ignore a repository `pnpmfile`.
+
+_Date: 2026-10-23; issue #1891_
+
+## Keep a numeric-hyphen ADR title intact in the generated index
+
+`scripts/gen-adr-index.sh` now strips only the directory's own ADR number and one
+supported separator from the heading, so `# 0001 — 24-hour notice` is indexed as
+`24-hour notice` instead of `hour notice`. The canonical ADR-index test gains
+fixtures for both separators and for a mismatched leading number (#1889).
+
+_Date: 2026-10-23; issue #1889_
+
+## Clarify that ADR 0238 items 5 and 6 are distinct from the cost-list changes that landed
+
+ADR 0238 now states that its deferred items 5 (build-once artifacts) and 6 (sandbox system packages) are not changes 5 and 6 of #1869's cost list, which landed as #1871 and #1870, so both decisions remain open. Part of #1875.
+
+_Date: 2026-10-23; issue #1875_
+
+## Fail closed on falsy secretless runner lanes
+
+Secretless node-ci builds now use CI_LANE_UNTRUSTED only after successful eligibility; a second secretless-only ubuntu-24.04 branch keeps failed, skipped, missing, or falsy results from falling through to the caller runner. The prerequisite diagnostic reports both eligibility and acquisition results and directs callers to inspect those jobs before retrying.
+
+_Date: 2026-10-23; issue #1869_
+
+## Assert the credentialed baseline reaches the dependency .npmrc attack path
+
+`scripts/node-release-credential-isolation.test.py` now asserts, in its unprotected baseline, that no project, user, global or exported-registry setting names the attacker registry and that the credentialed request is the git dependency's own `bait` resolution, so the baseline provably exercises the dependency `.npmrc` path rather than passing through a higher-precedence npm config (#1845).
+
+_Date: 2026-10-23; issue #1845_
+
+## Explain a failed secretless transfer restore and document the rerun and pin causes
+
+The secretless `build-test` job keeps `fail-on-cache-miss: true` on the run-bound dependency transfer and now prints a static diagnostic naming the two known causes (a pin from before #1251 whose cache path included `run_attempt`, which made every failed-job rerun miss, and an evicted or expired entry) and the remedy. `docs/node-workflows.md` gains a troubleshooting section that also covers the Playwright download failure in the offline rebuild, and ADR 0095 records the decision not to cold-start without credentials. Regenerated `node-ci-protected.yml` in the same change.
+
+_Date: 2026-10-23; issue #1830_
+
+## Fail fast on pull requests, cheap gates first, cancel job not adopted
+
+`pulumi-ci.yml` stack previews and `actions-ci.yml` shell-test groups now stop sibling matrix cells after a failure on `pull_request` only; trunk, schedule, dispatch and merge-group runs keep the full inventory. On a pull request the heavy shell-test and compatibility jobs wait for the `docs-contracts` and `runner-isolation` gates to succeed. ADR 0238 records why the issue's cancel-on-failure job is not adopted, and `scripts/ci_runner_minutes.py` gives a before/after runner-minute estimate method.
+
+_Date: 2026-10-23; issue #1817_
+
+## Record that the canonical CODEOWNERS stays default-only while sensitive-path review is suspended
+
+ADR 0210 gains a 2026-10-23 amendment deciding #1816's open question on merit: the generated `.github/CODEOWNERS` keeps the single rule `* @verJSON/devs`, no sensitive-path admin route is added, and no generator, digest or adopter changes. It records the option set, why a fleet-wide route would re-enable the suspended admin review, the accepted residual risk, and the rollout order. It also ledgers the unrecorded admin merges of #1894 and #1895. Part of #1816.
+
+_Date: 2026-10-23; issue #1816_
+
+## Record verified merge details for #1901 and #1904
+
+ADR 0210's ledger now records the GitHub-verified merge commits, changed paths, and check rollups for #1901 and #1904. GitHub PR metadata does not expose whether either merge used `--admin` or retain the local assertion output, so the entries preserve that evidence boundary.
+
+_Date: 2026-10-23; id:20261023T150005Z_
+
+## Record the admin merge of #1902 in the ADR 0210 ledger
+
+ADR 0210's bypass ledger gains item 15 for the admin merge of #1902, with the review it received.
+
+_Date: 2026-10-23; id:20261023T060000Z_
+
+## Record the admin merges of #1896 through #1899 in the ADR 0210 ledger
+
+ADR 0210's bypass ledger gains item 13 for the admin merges of #1896, #1897, #1898 and #1899, with the review each received and the two incidental fixes #1897 needed.
+
+_Date: 2026-10-23; id:20261023T042000Z_
+
 # v4.3.0
 
 ## Record the #1893 admin merge in the ADR 0210 bypass ledger

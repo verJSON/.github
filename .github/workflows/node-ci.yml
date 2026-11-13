@@ -422,6 +422,13 @@ on:
         required: false
         type: string
         default: ''
+      playwright-sandbox-profile:
+        description: >-
+          Explicit opt-in fixed Playwright system-library profile for secretless script plans.
+          Empty (the default) leaves host libraries unchanged; only reviewed profile IDs are accepted.
+        required: false
+        type: string
+        default: ''
       db-image:
         description: >-
           Optional database image (e.g. pgvector/pgvector:pg16) to run as a
@@ -1977,6 +1984,13 @@ jobs:
           submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}
           token: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && github.token || secrets.submodules-token || github.token }}
           persist-credentials: ${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) }}
+      - name: Disclose shared workspace isolation assumption
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        shell: bash
+        run: |
+          warning='This job assumes no other host process can modify the checkout while sandboxed scripts run. A concurrent or leftover host writer can redirect mounts, including verified artifact mounts. Use an isolated runner and prevent competing workspace writers for the whole job.'
+          printf '::warning title=Shared workspace isolation::%s\n' "$warning"
+          printf '### Shared workspace isolation assumption\n\n%s\n' "$warning" >> "$GITHUB_STEP_SUMMARY"
       - name: Validate Postgres sandbox profile request
         if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
         env:
@@ -2001,6 +2015,24 @@ jobs:
             --artifact-role "$POSTGRES_ARTIFACT_ROLE" \
             --compatibility-ranges "$POSTGRES_COMPATIBILITY_RANGES" \
             --secretless-mode "$POSTGRES_SECRETLESS_MODE"
+      - name: Validate Playwright system-library profile request
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+          VERJSON_CI_SECRETLESS_MODE: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          mkdir -p "$RUNNER_TEMP/config"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_playwright_system_libraries.py" -o "$RUNNER_TEMP/ci_playwright_system_libraries.py"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-playwright-system-libraries.json" -o "$RUNNER_TEMP/config/ci-playwright-system-libraries.json"
+          python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" validate \
+            --profile "$PLAYWRIGHT_PROFILE" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-os "$RUNNER_OS"
       - name: Prepare job-scoped changelog tool cache
         if: needs.eligibility.outputs.should-run != 'false'
         run: |
@@ -2071,6 +2103,7 @@ jobs:
           BUILD_ARTIFACT_RUNTIME_INPUT_SCHEMA_DIR: ${{ toJSON(inputs.schema-dir) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_RUNNER: ${{ toJSON(inputs.runner) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_POSTGRES_SANDBOX_PROFILE: ${{ toJSON(inputs.postgres-sandbox-profile) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_PLAYWRIGHT_SANDBOX_PROFILE: ${{ toJSON(inputs.playwright-sandbox-profile) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_IMAGE: ${{ toJSON(inputs.db-image) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_PORT: ${{ toJSON(inputs.db-port) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_HEALTH_CMD: ${{ toJSON(inputs.db-health-cmd) }}
@@ -6001,6 +6034,37 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I "$RUNNER_TEMP/ci-postgres-sandbox-hosted-acceptance.test.py"
+      - name: Download trusted Prisma schema engine stager
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          PRISMA_ENGINE_STAGER: ${{ runner.temp }}/prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}.py
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location --max-filesize 1000000 \
+            "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/prisma_schema_engine.py" \
+            -o "$PRISMA_ENGINE_STAGER"
+      - name: Stage pinned Prisma schema engine
+        id: stage-prisma-schema-engine
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PRISMA_ENGINE_STAGER: ${{ runner.temp }}/prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}.py
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          python3 -I "$PRISMA_ENGINE_STAGER" stage \
+            --workspace "$GITHUB_WORKSPACE" \
+            --runner-temp "$RUNNER_TEMP" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH"
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
@@ -6009,6 +6073,31 @@ jobs:
           mode: normalize
           script-plan: ${{ steps.select-build-artifact-plan.outputs.plan || (steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan) }}
           nested-manifests: ${{ inputs.secretless-nested-manifests }}
+      - name: Provision Playwright system-library profile
+        id: provision-playwright-profile
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          PLAYWRIGHT_STATE_FILE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/nonexistent \
+            DEBIAN_FRONTEND=noninteractive \
+            LC_ALL=C \
+            APT_CONFIG=/dev/null \
+            VERJSON_CI_SECRETLESS_MODE=true \
+            /usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" provision \
+              --profile "$PLAYWRIGHT_PROFILE" \
+              --state-file "$PLAYWRIGHT_STATE_FILE" \
+              --runner-environment "$RUNNER_ENVIRONMENT" \
+              --runner-os "$RUNNER_OS"
+          receipt_identity="$(stat -c '%d:%i' -- "$PLAYWRIGHT_STATE_FILE")"
+          [[ "$receipt_identity" =~ ^[0123456789]+:[0123456789]+$ ]]
+          echo "receipt_identity=$receipt_identity" >> "$GITHUB_OUTPUT"
       - name: Run exact credentialless consumer script plan
         id: run-script-plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
@@ -6036,6 +6125,11 @@ jobs:
           VERJSON_CI_LEGACY_DB_IMAGE: ${{ inputs.db-image }}
           VERJSON_CI_LEGACY_CACHE_IMAGE: ${{ inputs.cache-image }}
           VERJSON_CI_POSTGRES_SECRETLESS_MODE: 'true'
+          VERJSON_CI_PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          VERJSON_CI_PLAYWRIGHT_STATE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
+          VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE: 'true'
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
           RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}
           RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-${{ github.run_id }}-${{ github.run_attempt }}
           SCRIPT_PLAN_DEFAULT_PLAN: ${{ steps.node-ci-script-plan.outputs.default-plan }}
@@ -6043,6 +6137,8 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
+          PRISMA_SCHEMA_ENGINE_AVAILABLE: ${{ steps.stage-prisma-schema-engine.outputs.available }}
+          PRISMA_SCHEMA_ENGINE_HOST_PATH: ${{ runner.temp }}/verjson-prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}/schema-engine
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
@@ -6073,6 +6169,24 @@ jobs:
           env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
           entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
           runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+          prisma_engine_available_value = os.environ.get("PRISMA_SCHEMA_ENGINE_AVAILABLE", "")
+          if prisma_engine_available_value not in {"true", "false"}:
+              sys.exit("trusted Prisma schema engine availability output is invalid")
+          prisma_engine_available = prisma_engine_available_value == "true"
+          prisma_engine_host_path = os.environ.get("PRISMA_SCHEMA_ENGINE_HOST_PATH", "")
+          prisma_engine_target = Path("/run/verjson-prisma/schema-engine")
+          if prisma_engine_available:
+              expected_prisma_engine = (
+                  runner_temp
+                  / f"verjson-prisma-schema-engine-{os.environ.get('RUN_ID', '')}-{os.environ.get('RUN_ATTEMPT', '')}"
+                  / "schema-engine"
+              )
+              if (
+                  Path(prisma_engine_host_path) != expected_prisma_engine
+                  or Path(prisma_engine_host_path).is_symlink()
+                  or not Path(prisma_engine_host_path).is_file()
+              ):
+                  sys.exit("trusted Prisma schema engine is not at its run-scoped staging path")
           if str(runner_temp) not in sys.path:
               sys.path.insert(0, str(runner_temp))
           import normalized_entries as normalized_script_plan
@@ -6098,6 +6212,17 @@ jobs:
                   secretless_mode=os.environ.get("VERJSON_CI_POSTGRES_SECRETLESS_MODE") == "true",
               )
               postgres_state_file = Path(os.environ["VERJSON_CI_POSTGRES_SANDBOX_STATE"])
+
+          playwright_profile_name = os.environ.get("VERJSON_CI_PLAYWRIGHT_PROFILE", "")
+          playwright_profile_module = None
+          playwright_state_file = None
+          if playwright_profile_name:
+              import ci_playwright_system_libraries as playwright_profile_module
+
+              if os.environ.get("VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE") != "true":
+                  sys.exit("Playwright system-library profile requires a secretless script plan")
+              playwright_profile_module.resolve_profile(playwright_profile_name)
+              playwright_state_file = Path(os.environ["VERJSON_CI_PLAYWRIGHT_STATE"])
 
           host_signals = ci_build_artifacts.HostSignalQueue()
           signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
@@ -6243,6 +6368,8 @@ jobs:
           blocked_service_env = {
               "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
               "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+              "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
               "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
               "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
               "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
@@ -6547,6 +6674,8 @@ jobs:
               Path("/dev/shm/home/.cache/node/corepack"),
               Path("/dev/shm/npm-cache"), Path("/dev/shm/playwright-browsers"),
           }
+          if prisma_engine_available:
+              sandbox_directories.add(prisma_engine_target.parent)
           if node_toolchain_destination is not None:
               sandbox_directories.add(Path(node_toolchain_destination))
           namespace_directories = set()
@@ -6740,6 +6869,10 @@ jobs:
                   "VERJSON_CI_POSTGRES_PROFILE", "VERJSON_CI_POSTGRES_SANDBOX_STATE",
                   "VERJSON_CI_LEGACY_DB_IMAGE", "VERJSON_CI_LEGACY_CACHE_IMAGE",
                   "VERJSON_CI_POSTGRES_SECRETLESS_MODE",
+                  "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+                  "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
+                  "PRISMA_SCHEMA_ENGINE_AVAILABLE", "PRISMA_SCHEMA_ENGINE_HOST_PATH",
+                  "PRISMA_SCHEMA_ENGINE_BINARY",
               ):
                   script_env.pop(env_name, None)
               for env_name in service_env_names:
@@ -6779,6 +6912,8 @@ jobs:
                   "npm_config_globalconfig": "/dev/shm/npm-globalconfig",
                   "npm_config_userconfig": "/dev/shm/npm-userconfig",
               })
+              if prisma_engine_available:
+                  script_env["PRISMA_SCHEMA_ENGINE_BINARY"] = str(prisma_engine_target)
               if postgres_profile is not None and requires_services:
                   script_env = postgres_profile_module.candidate_environment(
                       script_env,
@@ -6814,6 +6949,11 @@ jobs:
                   postgres_profile_module.verify_profile_runtime(
                       postgres_state_file,
                       runner_temp=runner_temp,
+                  )
+              if playwright_profile_module is not None:
+                  playwright_profile_module.verify_runtime(
+                      playwright_profile_name,
+                      playwright_state_file,
                   )
               arguments = [
                   str(bubblewrap),
@@ -6862,6 +7002,12 @@ jobs:
               ]
               for source, destination in system_mounts:
                   bind_source(arguments, source, destination)
+              if prisma_engine_available:
+                  bind_source(
+                      arguments,
+                      prisma_engine_host_path,
+                      str(prisma_engine_target),
+                  )
               if node_toolchain_root is not None:
                   bind_source(arguments, node_toolchain_root, node_toolchain_destination)
               bind_source(arguments, workspace, sandbox_workspace, writable=True)
@@ -7054,6 +7200,26 @@ jobs:
           user_config_file.close()
           # END source candidate script execution
           PY
+      - name: Remove staged Prisma schema engine
+        if: always() && needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PRISMA_ENGINE_STAGER: ${{ runner.temp }}/prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}.py
+          PRISMA_ENGINE_STAGE_DIR: ${{ runner.temp }}/verjson-prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "$PRISMA_ENGINE_STAGER"' EXIT
+          if [[ -e "$PRISMA_ENGINE_STAGE_DIR" || -L "$PRISMA_ENGINE_STAGE_DIR" ]]; then
+            if [[ ! -f "$PRISMA_ENGINE_STAGER" || -L "$PRISMA_ENGINE_STAGER" ]]; then
+              echo '::error::Prisma engine stage exists but its trusted cleanup helper is missing' >&2
+              exit 1
+            fi
+            python3 -I "$PRISMA_ENGINE_STAGER" cleanup \
+              --runner-temp "$RUNNER_TEMP" \
+              --run-id "$RUN_ID" \
+              --run-attempt "$RUN_ATTEMPT"
+          fi
       - name: Export build outputs after producer process is reaped
         id: export-build-artifact
         if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.run-script-plan.outcome == 'success'
@@ -7178,6 +7344,8 @@ jobs:
           blocked_service_env = {
               "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
               "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+              "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
               "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
               "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
               "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
@@ -8725,6 +8893,29 @@ jobs:
             fi
           done
           exit "$cleanup_status"
+      - name: Remove Playwright system-library receipt
+        if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != ''
+        env:
+          PLAYWRIGHT_STATE_FILE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
+          PLAYWRIGHT_STATE_IDENTITY: ${{ steps.provision-playwright-profile.outputs.receipt_identity }}
+        run: |
+          set -euo pipefail
+          if [[ -e "$PLAYWRIGHT_STATE_FILE" || -L "$PLAYWRIGHT_STATE_FILE" ]]; then
+            [[ -f "$RUNNER_TEMP/ci_playwright_system_libraries.py" ]]
+            [[ "$PLAYWRIGHT_STATE_IDENTITY" =~ ^[0123456789]+:[0123456789]+$ ]] || {
+              echo "::error::Playwright receipt identity is unavailable; refusing cleanup" >&2
+              exit 1
+            }
+            sudo /usr/bin/env -i \
+              PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+              HOME=/nonexistent \
+              DEBIAN_FRONTEND=noninteractive \
+              LC_ALL=C \
+              APT_CONFIG=/dev/null \
+              /usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" cleanup \
+                --state-file "$PLAYWRIGHT_STATE_FILE" \
+                --expected-identity "$PLAYWRIGHT_STATE_IDENTITY"
+          fi
       - name: Stop cache service
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.cache-image != ''
         env:

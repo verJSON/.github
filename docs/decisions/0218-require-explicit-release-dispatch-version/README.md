@@ -1,7 +1,7 @@
 # 0218 — Require an explicit version for release dispatch
 
 - **Date:** 2026-10-06
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0244](../0244-manually-dispatched-fragment-derived-release/README.md)
 - **Issue:** [#1688](https://github.com/verJSON/.github/issues/1688)
 - **Category:** release automation GitHub write authority (sensitive class)
 - **Supersedes:** [ADR 0183](../0183-release-plan-resolves-optional-version/README.md)

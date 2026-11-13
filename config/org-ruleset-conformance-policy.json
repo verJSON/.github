@@ -6,6 +6,12 @@
     "bypass_mode": "always"
   },
   "required_check_producer_app_id": 15368,
+  "merge_admission_binding": {
+    "context": "merge-admission",
+    "integration_id": 4528902,
+    "app_id_variable": "AI_REVIEW_APP_ID",
+    "ruleset_name": "merge-admission-required"
+  },
   "bypassless_required_workflows": [
     {
       "name": "authn-type-surface-required-workflow",
@@ -85,6 +91,16 @@
     {
       "ruleset_id": 18098028,
       "name": "main-protection",
+      "bypass_actors": [
+        {"actor_type": "OrganizationAdmin", "actor_id": null, "bypass_mode": "always"},
+        {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"},
+        {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+        {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"}
+      ]
+    },
+    {
+      "ruleset_id": null,
+      "name": "merge-admission-required",
       "bypass_actors": [
         {"actor_type": "OrganizationAdmin", "actor_id": null, "bypass_mode": "always"},
         {"actor_type": "Integration", "actor_id": 2740, "bypass_mode": "always"},

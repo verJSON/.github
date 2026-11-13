@@ -369,6 +369,14 @@ valid version. Enter a version only when bootstrapping a namespace or when an
 explicit version is required; it is checked by the same impact and namespace
 rules before any snapshot or publication occurs.
 
+A blank version must also state, in `expected_head`, the exact default-branch
+commit the dispatch authorizes. The derived version is a deterministic function
+of that commit, the stated `prefix`, `component`, and `fragments`, and the
+immutable release history, so run the pinned `release-plan` against that commit
+to preview it before dispatching. The run fails before checkout when
+`expected_head` is missing or the default branch has moved from it.
+`selector_digest` is optional for a blank version and verified when supplied.
+
 The verify job's summary is the review surface: it records the previous
 release, resolved version, highest selected impact and rationale, component,
 selection digest, exact source commit, selected fragment names, and assembled
@@ -473,6 +481,18 @@ contract test rejects it. An adopter that later gains something to publish
 regenerates as `release-node` or `release-artifact` rather than editing this
 file.
 
+A `release-snapshot` repository need not have a root `package.json`. Without
+one, it verifies through an executable `scripts/release-verify.sh`, and `verify`
+fails before the snapshot if that hook is missing. Dependency installation and
+version stamping run only when `package.json` exists. The configured Node
+version (`--node-version`) is installed either way, so a hook written in Node
+runs on the pinned runtime rather than whatever the runner provides (#1906).
+The generated contract test statically models the caller's `verify` PATH and
+environment on a package-less tree. It does not execute caller-provided shell
+or environment values; changed actions, conditions, scripts, or verification
+environment fail closed before modeling. The actual runtime capture step still
+uses `/usr/bin/python3` on the release runner.
+
 Reaching for `release-node` with a `"private": true` package is now refused
 before anything irreversible happens. node-release.yml only ever runs as
 `publish`, so a failure there lands on top of a tag and an immutable
@@ -485,8 +505,7 @@ caller, so the failure at least states its cause.
 
 ### Release proposals are generated and explicitly autonomous
 
-`scripts/gen-changelog-caller.sh release-propose` emits a daily and
-operator-triggered caller. Adoption requires an explicit autonomy choice; there
+`scripts/gen-changelog-caller.sh release-propose` emits a caller with explicit operator dispatch. Proposal-only mode also runs daily; dispatch mode does not run on a schedule. Adoption requires an explicit autonomy choice; there
 is no default that can silently gain write authority. Here, `PIN` must be an
 immutable contract commit containing #799; a previously advertised pin does not
 gain a new generator mode retroactively:
