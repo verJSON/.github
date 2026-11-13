@@ -77,6 +77,8 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#2066](https://github.com/Verjson/.github/issues/2066) — Protected type-surface baseline recovery is needed after retention removes the declared release; open, verified 2026-11-13 with `gh issue view` and Verjson/authz#207.
+
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
 
 - [#1944](https://github.com/verJSON/.github/issues/1944) — Generated container-candidate callers still run full multi-architecture candidate validation on draft pull requests; canonical draft/ready scheduling is unimplemented. GitHub's native relationships record #1944 as blocking #1945, among others (it has no `blocked by` edge). Verified open 2026-11-12 via live `gh issue view` and a GraphQL relationship query.
