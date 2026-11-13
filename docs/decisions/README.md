@@ -27,7 +27,7 @@ Reverse-chronological index of org-level decisions.
 | [0250](0250-offline-snapshot-receipt-inspection/README.md) | 2026-10-29 | Propose offline snapshot receipt inspection |
 | [0249](0249-temporary-autonomous-merge-hold/README.md) | 2026-10-29 | Temporarily hold autonomous terminal merges |
 | [0247](0247-portable-codeowners/README.md) | 2026-10-28 | Portable generated CODEOWNERS |
-| [0246](0246-bind-container-release-to-source/README.md) | 2026-10-28 | Propose source-bound container release admission |
+| [0246](0246-bind-container-release-to-source/README.md) | 2026-10-28 | Ecosystem source-bound container release proposal (relocated) |
 | [0244](0244-manually-dispatched-fragment-derived-release/README.md) | 2026-10-28 | Derive manually dispatched release versions from fragments |
 | [0243](0243-agent-authored-changelog-context/README.md) | 2026-10-27 | Dependency updates require agent-authored changelog context |
 | [0242](0242-inline-required-workflow-app-key-validation/README.md) | 2026-10-27 | Inline app-key validation in the required gate workflow |

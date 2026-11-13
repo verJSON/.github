@@ -87,7 +87,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
 
-- [#1949](https://github.com/verJSON/.github/issues/1949) — Container promotion is not yet bound to the authorized release source. The interim guard from #1952 (merged as eadc23b5, ADR 0078 amendment 2026-11-12) rejects candidates whose source commit differs from the release source, and the source-bound release ADR proposal (draft #1950) is open. Natively blocked by #1945. Verified open 2026-11-12 via live `gh issue view`.
+- [#1949](https://github.com/verJSON/.github/issues/1949) — Container promotion is not yet bound to the authorized release source. The interim guard from #1952 (merged as eadc23b5, ADR 0078 amendment 2026-11-12) rejects candidates whose source commit differs from the release source. Draft [ecosystem ADR 0015](https://github.com/VerJSON/verjson-docs/pull/35) carries the proposed governing decision; #1950 retains its pointer. Natively blocked by #1945. Verified open 2026-11-13 via live `gh issue view` and the native dependency API.
 
 - [#1763](https://github.com/verJSON/.github/issues/1763) — The authorization arm could wait indefinitely on a lost runner assignment; #1772 (ADR 0230) adds a hosted-only acquisition watchdog. Open until org ruleset 20722935 is rotated to `f2914525` and a live cancel receipt exists; `ai-review-merge.yml` still needs the same bound. Verified 2026-10-14 from verjson-payments runs 37352915856 and 38427381694.
 
