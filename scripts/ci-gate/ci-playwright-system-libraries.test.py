@@ -1622,6 +1622,32 @@ raise SystemExit(0)
 class SupplyChainGuardTests(unittest.TestCase):
     """Each guard is exercised directly; the provisioning tests patch them out."""
 
+    def test_conflicting_signed_index_records_name_the_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            lists = Path(temporary_directory)
+            first = lists / "first"
+            second = lists / "second"
+            first.touch()
+            second.touch()
+            stanza = (
+                b"Package: example\nVersion: 1\nArchitecture: amd64\n"
+                b"Size: 10\nSHA256: " + b"a" * 64 + b"\nFilename: pool/example.deb\n"
+            )
+
+            def read_index(argv: list[str], **_kwargs: Any) -> bytes:
+                if "indextargets" in argv:
+                    return f"{first}\n{second}\n".encode()
+                return stanza if argv[-1] == str(first) else stanza.replace(b"a" * 64, b"b" * 64)
+
+            with patch.object(playwright_profile, "_apt_options", return_value=[]), patch.object(
+                playwright_profile, "_apt_environment", return_value={}
+            ), patch.object(playwright_profile, "_run", side_effect=read_index):
+                with self.assertRaisesRegex(
+                    playwright_profile.PlaywrightProfileError,
+                    "trusted apt indexes disagree on package metadata for example:amd64=1",
+                ):
+                    playwright_profile._read_package_indexes({"lists": lists})
+
     def test_signed_index_record_that_differs_from_the_pin_is_refused(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         record = profile["packages"]["xvfb"]

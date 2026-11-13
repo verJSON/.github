@@ -1473,7 +1473,9 @@ def _read_package_indexes(paths: dict[str, Path]) -> dict[tuple[str, str, str], 
             key = (record["package"], record["architecture"], record["version"])
             previous = records.get(key)
             if previous is not None and previous != record:
-                raise PlaywrightProfileError("trusted apt indexes disagree on package metadata")
+                raise PlaywrightProfileError(
+                    f"trusted apt indexes disagree on package metadata for {key[0]}:{key[1]}={key[2]}"
+                )
             records[key] = record
     return records
 
