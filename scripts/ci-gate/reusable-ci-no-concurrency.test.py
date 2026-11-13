@@ -49,7 +49,7 @@ class ReusableCiConcurrencyTest(unittest.TestCase):
         concurrency = yaml.safe_load(snippet)["concurrency"]
         self.assertEqual(
             concurrency["cancel-in-progress"],
-            "${{ github.event_name == 'pull_request' }}",
+            "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
         )
         # Only a pull_request event resolves a shared `pr-` group; every other event
         # falls to a `run-` group keyed on the run id and never displaces another run.

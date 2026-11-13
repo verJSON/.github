@@ -214,6 +214,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         environment = {
             "PATH": f"{bin_dir}:/usr/bin:/bin",
             "LC_ALL": "C.UTF-8",  # the hosted runner locale
+            "PS4": "+ ",
             "REPOSITORY": repository,
             "RUN_ID": "123",
             "CONSUMER_WORKFLOW_SHA256": admitted_sha256,
@@ -223,11 +224,25 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             "LIVE_REPOSITORY": live_repository,
             "CANDIDATE": candidate,
         }
+        # The admission guards reject silently, so the trace names the one that
+        # stopped the script; the EXIT trap's cleanup runs after it.
         result = subprocess.run(
-            ["bash", "-e", "-c", script], env=environment,
+            ["bash", "-e", "-x", "-c", script], env=environment,
             capture_output=True, text=True, check=False,
         )
+        self.admitted_sha256 = admitted_sha256
         return result, output.read_text(encoding="utf-8")
+
+    @staticmethod
+    def traced_commands(result):
+        return [line for line in result.stderr.splitlines()
+                if line.startswith("+ ") and not line.startswith("+ rm -f -- ")]
+
+    def assertRefusedByDigest(self, result, candidate):
+        self.assertEqual(
+            self.traced_commands(result)[-1:],
+            [f"+ '[' {hashlib.sha256(candidate.encode()).hexdigest()} = {self.admitted_sha256} ']'"],
+        )
 
     def test_admission_accepts_the_consumer_in_its_renamed_display_case(self):
         # GitHub reports the renamed organization as `verJSON` in both the run
@@ -262,6 +277,12 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
                     result, output = self.run_admission(repository, live_repository)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(output, "")
+                    # The run-context identity is checked first, the live pull
+                    # request's head repository second.
+                    commands = self.traced_commands(result)
+                    identity_checks = [line for line in commands if line.startswith("+ jq -en --arg observed ")]
+                    self.assertEqual(commands[-1:], identity_checks[-1:])
+                    self.assertEqual(len(identity_checks), 1 if repository == other else 2)
 
     def test_committed_admission_rejects_every_caller_but_the_generated_one(self):
         # The committed step with its own embedded digest, not a stubbed one: the
@@ -289,6 +310,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
                 result, output = self.run_admission(repository, repository, stale)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(output, "")
+                self.assertRefusedByDigest(result, stale)
 
     def test_committed_admission_refuses_an_arbitrary_caller_carrying_a_marker(self):
         # A marker-triggered override of the admitted digest (reviewer bypass N2) would
@@ -308,6 +330,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         result, output = self.run_admission(repository, repository, caller)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output, "")
+        self.assertRefusedByDigest(result, caller)
 
     def test_rollout_legacy_consumer_workflow_digest_accepts_digest_or_null(self):
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from decimal import Decimal
@@ -95,8 +96,13 @@ class DeepSeekReviewTest(unittest.TestCase):
                 review.output_cap_bytes(1, "5.00", invalid)
 
     def test_invalid_or_insufficient_budget_fails_before_request(self):
-        for budget in ("nope", "0", "5.001", "0.01"):
-            with self.subTest(budget=budget), self.assertRaises(ValueError):
+        for budget, reason in (
+            ("nope", "budget must be a decimal dollar amount"),
+            ("0", "budget must be positive with at most two decimal places"),
+            ("5.001", "budget must be positive with at most two decimal places"),
+            ("0.01", "budget cannot cover the complete input and minimum structured output"),
+        ):
+            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.output_cap_bytes(30_000_000, budget, "deepseek-v4-pro")
 
     def test_request_is_tool_free_json_mode_with_role_separation(self):
@@ -195,13 +201,15 @@ class DeepSeekReviewTest(unittest.TestCase):
 
     def test_wrong_model_multiple_choices_length_and_tool_calls_fail_closed(self):
         mutations = []
-        response = self.response(); response["model"] = "deepseek-v4-flash"; mutations.append(response)
-        response = self.response(); response["choices"].append(response["choices"][0]); mutations.append(response)
-        response = self.response(); response["choices"][0]["finish_reason"] = "length"; mutations.append(response)
-        response = self.response(); response["choices"][0]["message"]["tool_calls"] = [{"id": "call"}]; mutations.append(response)
-        for response in mutations:
-            with self.subTest(response=response), self.assertRaises(ValueError):
+        response = self.response(); response["model"] = "deepseek-v4-flash"; mutations.append((response, "response_shape"))
+        response = self.response(); response["choices"].append(response["choices"][0]); mutations.append((response, "response_shape"))
+        response = self.response(); response["choices"][0]["finish_reason"] = "length"; mutations.append((response, "response_shape"))
+        response = self.response(); response["choices"][0]["message"]["tool_calls"] = [{"id": "call"}]
+        mutations.append((response, "tool_call"))
+        for response, kind in mutations:
+            with self.subTest(response=response), self.assertRaises(review.ExtractionFailure) as raised:
                 review.extract(response, "deepseek-v4-pro", 1000, 1000, "5.00")
+            self.assertEqual(raised.exception.kind, kind)
 
     def test_extraction_failure_kinds_distinguish_response_tool_and_verdict_shapes(self):
         wrong_model = self.response()
@@ -256,15 +264,16 @@ class DeepSeekReviewTest(unittest.TestCase):
 
     def test_incomplete_or_malformed_stream_fails_closed(self):
         valid = self.stream()
+        incomplete = "stream ended without a complete response and usage evidence"
         cases = {
-            "missing terminal marker": valid.replace(b"data: [DONE]\n\n", b""),
-            "missing usage": b"".join(valid.splitlines(keepends=True)[:-4]) + b"data: [DONE]\n\n",
-            "wrong model": valid.replace(b"deepseek-v4-pro", b"deepseek-v4-flash", 1),
-            "trailing data": valid + b'data: {"object":"chat.completion.chunk"}\n\n',
-            "invalid UTF-8": valid + b"\xff",
+            "missing terminal marker": (valid.replace(b"data: [DONE]\n\n", b""), incomplete),
+            "missing usage": (b"".join(valid.splitlines(keepends=True)[:-4]) + b"data: [DONE]\n\n", incomplete),
+            "wrong model": (valid.replace(b"deepseek-v4-pro", b"deepseek-v4-flash", 1), "stream chunk is not for the requested model"),
+            "trailing data": (valid + b'data: {"object":"chat.completion.chunk"}\n\n', "stream contains data after its terminal marker"),
+            "invalid UTF-8": (valid + b"\xff", "stream is not valid UTF-8"),
         }
-        for name, stream in cases.items():
-            with self.subTest(name=name), self.assertRaises((ValueError, json.JSONDecodeError)):
+        for name, (stream, reason) in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, re.escape(reason)):
                 review.streamed_response(io.BytesIO(stream), "deepseek-v4-pro")
 
     def test_stream_rejects_tool_calls_and_oversized_output(self):

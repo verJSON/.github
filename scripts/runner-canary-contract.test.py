@@ -206,20 +206,20 @@ class RunnerCanaryContractTests(unittest.TestCase):
         mutations = []
         mutable_service = copy.deepcopy(original)
         mutable_service["jobs"]["canary"]["services"]["postgres"]["image"] = "postgres:17-alpine"
-        mutations.append(mutable_service)
+        mutations.append((mutable_service, "database service image must be digest pinned"))
         widened_target = copy.deepcopy(original)
         widened_target["jobs"]["canary"]["runs-on"] = ["self-hosted", "general"]
-        mutations.append(widened_target)
+        mutations.append((widened_target, "canary must route only through the transaction-unique label"))
         mutable_action = copy.deepcopy(original)
         mutable_action["jobs"]["canary"]["steps"][-1]["uses"] = "actions/upload-artifact@v4"
-        mutations.append(mutable_action)
+        mutations.append((mutable_action, "receipt upload action must be commit pinned"))
         missing_identity = copy.deepcopy(original)
         missing_identity["jobs"]["canary"]["steps"][0]["run"] = missing_identity["jobs"]["canary"]["steps"][0]["run"].replace(
             'test "$RUNNER_NAME" = "$EXPECTED_RUNNER"\n', ""
         )
-        mutations.append(missing_identity)
-        for index, mutation in enumerate(mutations):
-            with self.subTest(mutation=index), self.assertRaises(AssertionError):
+        mutations.append((missing_identity, """canary admission guards missing: ['test "$RUNNER_NAME" = "$EXPECTED_RUNNER"']"""))
+        for index, (mutation, reason) in enumerate(mutations):
+            with self.subTest(mutation=index), self.assertRaisesRegex(AssertionError, "^" + re.escape(reason) + "$"):
                 validate(mutation)
 
     def test_publication_ref_is_semver_and_not_a_branch_or_moving_major(self) -> None:

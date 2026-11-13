@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -20,6 +22,20 @@ SPEC.loader.exec_module(MODULE)
 SHA = "a" * 40
 HEAD = "b" * 40
 PREVIOUS = "c" * 40
+AUTHN_ID = 1302124584
+
+
+def actions_state_pages(state):
+    """The ADR 0252 paused-state reads for verjson-authn, as gh pages."""
+    return {
+        "orgs/Verjson/repos?type=all&per_page=100": [[
+            {"id": AUTHN_ID, "name": "verjson-authn", "default_branch": "main"},
+        ]],
+        "orgs/Verjson/properties/values?per_page=100": [[{
+            "repository_name": "verjson-authn",
+            "properties": [{"property_name": "verjson-actions-state", "value": state}],
+        }]],
+    }
 
 
 class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
@@ -494,19 +510,77 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
         audit.assert_called_once_with(PREVIOUS)
         local.assert_not_called()
         mutate.assert_not_called()
-        for live in (
-            self.live_image(PREVIOUS, enforcement="evaluate"),
-            self.live_image(PREVIOUS, bypass_actors=[]),
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21750617}]),
+            mock.patch.object(MODULE, "gh_json", return_value=self.live_image(PREVIOUS, bypass_actors=[])),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            self.assertRaises(MODULE.ContractError),
         ):
-            with (
-                self.subTest(live=live["enforcement"]),
-                mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21750617}]),
-                mock.patch.object(MODULE, "gh_json", return_value=live),
-                mock.patch.object(MODULE, "audit_live_revision") as audit,
-                self.assertRaises(MODULE.ContractError),
-            ):
+            MODULE.main(["audit"])
+        audit.assert_not_called()
+
+    def audit_at_evaluate(self, *, state="paused", refusal=None, unreadable=None, **changes):
+        live = self.live_image(PREVIOUS, enforcement="evaluate", **changes)
+        pages = actions_state_pages(state)
+
+        def read_pages(path):
+            if path == unreadable:
+                raise RuntimeError(f"GitHub API read failed for {path}")
+            return pages[path]
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21750617}]),
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=read_pages),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            mock.patch.object(MODULE, "gh_json_input") as mutate,
+            contextlib.redirect_stdout(output),
+        ):
+            if refusal is None:
                 MODULE.main(["audit"])
+            else:
+                with self.assertRaisesRegex(MODULE.ContractError, refusal):
+                    MODULE.main(["audit"])
+        mutate.assert_not_called()
+        if refusal is None:
+            audit.assert_called_once_with(PREVIOUS)
+        else:
             audit.assert_not_called()
+        return output.getvalue()
+
+    def test_audit_accepts_the_recorded_relaxation_at_evaluate_while_its_repository_is_paused(self):
+        output = self.audit_at_evaluate()
+
+        self.assertIn(
+            f"verified: organization ruleset 21750617 runs {PREVIOUS}, the reviewed required "
+            "workflow on protected main; enforcement=evaluate while verjson-authn is "
+            "verjson-actions-state=paused (ADR 0252)",
+            output,
+        )
+
+    def test_audit_refuses_the_recorded_relaxation_at_evaluate_once_its_repository_is_enabled(self):
+        self.audit_at_evaluate(
+            state="enabled",
+            refusal=(
+                r"^enforcement is evaluate but verjson-authn is verjson-actions-state=enabled; "
+                r"restore enforcement to active \(ADR 0252\)$"
+            ),
+        )
+
+    def test_audit_cannot_establish_the_relaxation_at_evaluate_when_its_repository_state_is_unreadable(self):
+        # An outage is not drift, so the audit gives no restore advice.
+        self.audit_at_evaluate(
+            unreadable="orgs/Verjson/properties/values?per_page=100",
+            refusal=(
+                r"^cannot establish ADR 0252 paused state: enforcement is evaluate but "
+                r"verjson-actions-state of verjson-authn cannot be read \(GitHub API read failed for "
+                r"orgs/Verjson/properties/values\?per_page=100\)$"
+            ),
+        )
+
+    def test_audit_refuses_the_recorded_relaxation_at_evaluate_with_any_other_drift(self):
+        self.audit_at_evaluate(bypass_actors=[], refusal=r"^live ruleset differs from the reviewed image$")
 
     def test_regenerate_at_requires_the_generated_header_of_its_own_revision(self):
         workflow = MODULE.WORKFLOW.read_bytes()

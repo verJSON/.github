@@ -142,7 +142,13 @@
         "include": ["~DEFAULT_BRANCH", "refs/heads/develop"]
       },
       "repository_property": {
-        "exclude": [],
+        "exclude": [
+          {
+            "name": "verjson-actions-state",
+            "property_values": ["paused"],
+            "source": "custom"
+          }
+        ],
         "include": [
           {
             "name": "verjson-core-checks",
@@ -200,7 +206,13 @@
         "include": ["~DEFAULT_BRANCH", "refs/heads/develop"]
       },
       "repository_property": {
-        "exclude": [],
+        "exclude": [
+          {
+            "name": "verjson-actions-state",
+            "property_values": ["paused"],
+            "source": "custom"
+          }
+        ],
         "include": [
           {
             "name": "verjson-ai-authorization",
@@ -406,7 +418,9 @@
         "conditions": {
           "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]},
           "repository_property": {
-            "exclude": [],
+            "exclude": [
+              {"name": "verjson-actions-state", "property_values": ["paused"], "source": "custom"}
+            ],
             "include": [
               {"name": "verjson-stack", "property_values": ["node"], "source": "custom"},
               {"name": "verjson-core-checks", "property_values": ["enforced"], "source": "custom"}
@@ -452,6 +466,7 @@
       ],
       "completeness": [
         ".github/workflows/ai-review-label-rearm.yml",
+        ".github/workflows/ai-review-lifecycle-rearm.yml",
         ".github/workflows/ai-privileged-merge.yml",
         ".github/workflows/ai-promotion-retry.yml"
       ]

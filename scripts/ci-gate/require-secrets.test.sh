@@ -37,7 +37,7 @@ step() {
 }
 
 contract_errors() {
-  local review="$1" privileged="$2" guard terminal checkout merge_step
+  local review="$1" privileged="$2" guard terminal checkout
   guard="$(job "$privileged" invalid_verjson_route)"
   terminal="$(job "$privileged" privileged_merge)"
   checkout="$(step "$privileged" privileged_merge 'Check out immutable arm verifier')"
@@ -54,18 +54,13 @@ contract_errors() {
     || printf '%s\n' 'invalid-route observability guard receives a terminal credential'
   grep -qF 'permissions: {}' <<<"$guard" \
     || printf '%s\n' 'invalid-route observability guard is not credentialless'
-  merge_step="$(step "$privileged" privileged_merge 'Merge the authorized head')"
-  grep -qF 'GH_TOKEN: ${{ steps.merge-app-token.outputs.token }}' <<<"$merge_step" \
-    || printf '%s\n' 'terminal operation does not receive the merge App token'
-  grep -qF 'bash .gate-trust/scripts/ci-gate/terminal-merge.sh' <<<"$merge_step" \
-    && [ "$(grep -cE '^[[:space:]]+(bash |gh )' <<<"$merge_step")" -eq 1 ] \
-    && [ "$(grep -c 'gh ' "$terminal_helper")" -eq 3 ] \
-    && grep -qF 'repos/$TARGET_REPO/pulls/$PR_NUMBER' "$terminal_helper" \
-    && grep -qF 'branch_path="$(jq -rn --arg branch "$DEFAULT_BRANCH"' "$terminal_helper" \
-    && grep -qF 'repos/$TARGET_REPO/git/ref/heads/$branch_path' "$terminal_helper" \
-    && grep -qF 'gh pr merge "$PR_NUMBER"' "$terminal_helper" \
-    || printf '%s\n' 'merge App token is not confined to exact-target live-base reads and terminal merge'
-
+  ! grep -qE 'merge-app-token|MERGE_APP_PRIVATE_KEY|actions/create-github-app-token|gh pr merge' <<<"$terminal" \
+    || printf '%s\n' 'retired terminal job contains a merge credential or operation'
+  grep -qF 'Hold autonomous terminal merge' <<<"$terminal" \
+    && grep -qF 'bash .gate-trust/scripts/ci-gate/terminal-merge.sh' <<<"$terminal" \
+    && grep -qF 'exit 1' "$terminal_helper" \
+    && ! grep -qF 'gh pr merge' "$terminal_helper" \
+    || printf '%s\n' 'terminal merge hold is missing'
   grep -qF 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' <<<"$checkout" \
     || printf '%s\n' 'immutable verifier checkout is not pinned'
   grep -qF 'repository: Verjson/.github' <<<"$checkout" \
@@ -76,7 +71,7 @@ contract_errors() {
     || printf '%s\n' 'verifier checkout persists credentials'
   grep -qF 'scripts/ci-gate/verify-arm-receipt.sh' <<<"$checkout" \
     || printf '%s\n' 'verifier checkout is not sparse-scoped to the arm verifier'
-  [ "$(grep -cE '^[[:space:]]+(- )?uses:' <<<"$terminal")" -eq 2 ] \
+  [ "$(grep -cE '^[[:space:]]+(- )?uses:' <<<"$terminal")" -eq 1 ] \
     || printf '%s\n' 'terminal merge job action boundary drifted'
   ! grep -qE 'github\.event\.pull_request|github\.head_ref|repository:.*TARGET_REPO|ref:.*EXPECTED_HEAD_SHA' <<<"$terminal" \
     || printf '%s\n' 'terminal merge job can check out PR-controlled material'
@@ -89,9 +84,16 @@ assert_contract() {
 }
 
 assert_mutation_rejected() {
-  local description="$1" errors
+  local description="$1" reason="$2" errors
   errors="$(contract_errors "$tmp/review.yml" "$tmp/privileged.yml")"
-  if [ -n "$errors" ]; then pass "$description"; else fail "$description"; fi
+  if [ -z "$errors" ]; then
+    fail "$description"
+  elif grep -qxF -- "$reason" <<<"$errors"; then
+    pass "$description"
+  else
+    printf '  %s\n' "$errors"
+    fail "$description: rejected without naming: $reason"
+  fi
 }
 
 reset_fixtures() {
@@ -100,35 +102,42 @@ reset_fixtures() {
 }
 
 assert_contract "$review_workflow" "$privileged_workflow" \
-  'current split confines the merge App token to the terminal operation'
+  'retired terminal job has no merge token or mutation'
 
 reset_fixtures
 sed -i '/^permissions:$/i\\  ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}' "$tmp/review.yml"
-assert_mutation_rejected 'mutation: review workflow cannot receive ORG_ADMIN_TOKEN'
+assert_mutation_rejected 'mutation: review workflow cannot receive ORG_ADMIN_TOKEN' \
+  'review workflow receives ORG_ADMIN_TOKEN'
 
 reset_fixtures
 sed -i '/^  privileged_merge:$/a\\    needs: attacker_route\n    runs-on: ${{ needs.attacker_route.outputs.selector }}' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: runner-produced output cannot route the terminal credential'
+assert_mutation_rejected 'mutation: runner-produced output cannot route the terminal credential' \
+  'runner-produced data can select terminal credential placement'
 
 reset_fixtures
 sed -i '/^  invalid_verjson_route:$/a\\    env:\n      GH_TOKEN: ${{ secrets.MERGE_APP_PRIVATE_KEY }}' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: invalid-route observability cannot receive the terminal credential'
+assert_mutation_rejected 'mutation: invalid-route observability cannot receive the terminal credential' \
+  'invalid-route observability guard receives a terminal credential'
 
 reset_fixtures
 sed -i '0,/persist-credentials: false/s//persist-credentials: true/' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: immutable verifier checkout cannot persist credentials'
+assert_mutation_rejected 'mutation: immutable verifier checkout cannot persist credentials' \
+  'verifier checkout persists credentials'
 
 reset_fixtures
 sed -i '0,/repository: Verjson\/.github/s//repository: ${{ github.repository }}/' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: verifier cannot be checked out from the target repository'
+assert_mutation_rejected 'mutation: verifier cannot be checked out from the target repository' \
+  'verifier checkout is not restricted to the canonical repository'
 
 reset_fixtures
 sed -i '0,/ref: ${{ steps.trusted-revision.outputs.sha }}/s//ref: ${{ inputs.expected_head_sha }}/' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: verifier cannot be checked out from the PR head'
+assert_mutation_rejected 'mutation: verifier cannot be checked out from the PR head' \
+  'verifier checkout is not bound to the executing trusted revision'
 
 reset_fixtures
 sed -i '/^      - name: Authorize terminal merge from trusted metadata$/i\\      - uses: attacker/pr-controlled-action@main' "$tmp/privileged.yml"
-assert_mutation_rejected 'mutation: terminal merge job cannot execute an additional action'
+assert_mutation_rejected 'mutation: terminal merge job cannot execute an additional action' \
+  'terminal merge job action boundary drifted'
 
 if [ "$failures" -ne 0 ]; then
   printf '%d test(s) failed.\n' "$failures" >&2

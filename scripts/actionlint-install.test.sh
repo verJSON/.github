@@ -60,7 +60,7 @@ run_case() {
   export DOWNLOAD_CONTENT='fixture archive bytes'
   export ACTIONLOG="$case_dir/actions.log"
   : >"$ACTIONLOG"
-  (cd "$case_dir" && bash "$script") >"$case_dir/out.txt" 2>&1
+  (cd "$case_dir" && LC_ALL=C bash "$script") >"$case_dir/out.txt" 2>&1
   RUN_RC=$?
 }
 
@@ -73,9 +73,10 @@ run_case "$good"; rc="$RUN_RC"
 bad="0${good:1}"
 [ "${good:0:1}" = 0 ] && bad="1${good:1}"
 run_case "$bad"; rc="$RUN_RC"
-{ [ "$rc" -ne 0 ] && ! grep -q TAR "$ACTIONLOG" && ! grep -q EXEC "$ACTIONLOG"; } \
+{ [ "$rc" -ne 0 ] && ! grep -q TAR "$ACTIONLOG" && ! grep -q EXEC "$ACTIONLOG" \
+  && grep -qFx "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz: FAILED" "$(dirname "$ACTIONLOG")/out.txt"; } \
   && pass "checksum mismatch fails before extraction or execution (#83)" \
-  || fail "checksum mismatch was not fail-closed (#83)"
+  || fail "checksum mismatch was not fail-closed at the digest check (#83): $(cat "$(dirname "$ACTIONLOG")/out.txt")"
 
 # ShellCheck is pinned the same way (ADR 0026): the hosted image's 0.9.0 and the
 # pool image's newer build disagree, so the lint verdict must not depend on the
@@ -121,7 +122,7 @@ run_shellcheck_case() {
   ACTIONLOG="$SC_DIR/actions.log"
   : >"$ACTIONLOG"
   : >"$SC_DIR/github_path"
-  (cd "$SC_DIR" && PATH="$tmp/scbin:$PATH" SHELLCHECK_VERSION="$sc_version" SHELLCHECK_SHA256="$checksum" \
+  (cd "$SC_DIR" && LC_ALL=C PATH="$tmp/scbin:$PATH" SHELLCHECK_VERSION="$sc_version" SHELLCHECK_SHA256="$checksum" \
     GITHUB_PATH="$SC_DIR/github_path" ACTIONLOG="$ACTIONLOG" DOWNLOAD_CONTENT='fixture archive bytes' \
     bash "$sc_script") >"$SC_DIR/out.txt" 2>&1
   RUN_RC=$?
@@ -136,9 +137,10 @@ run_shellcheck_case "$good"
 
 run_shellcheck_case "$bad"
 { [ "$RUN_RC" -ne 0 ] && ! grep -q TAR "$ACTIONLOG" && ! grep -q EXEC "$ACTIONLOG" \
-  && [ ! -s "$SC_DIR/github_path" ]; } \
+  && [ ! -s "$SC_DIR/github_path" ] \
+  && grep -qFx "shellcheck-v$sc_version.linux.x86_64.tar.gz: FAILED" "$SC_DIR/out.txt"; } \
   && pass "a ShellCheck digest mismatch fails before extraction, execution, or PATH changes" \
-  || fail "a ShellCheck digest mismatch was not fail-closed"
+  || fail "a ShellCheck digest mismatch was not fail-closed at the digest check: $(cat "$SC_DIR/out.txt")"
 
 if [ "$fails" -eq 0 ]; then
   echo "All tests passed."

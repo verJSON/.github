@@ -3,18 +3,27 @@
 - **Date:** 2026-10-28
 - **Status:** Proposed
 - **Issue:** [verJSON/.github#1949](https://github.com/verJSON/.github/issues/1949)
-- **Related:** [#1948: candidate versions and selected fragments](https://github.com/verJSON/.github/issues/1948), [ADR 0078](../0078-container-release-and-runner-deployment-contract/README.md), [ADR 0216](../0216-keyless-container-provenance-is-verified-per-registry/README.md)
+- **Related:** [#1948: candidate versions and selected fragments](https://github.com/verJSON/.github/issues/1948), [ADR 0078](../0078-container-release-and-runner-deployment-contract/README.md), [ADR 0216](../0216-keyless-container-provenance-is-verified-per-registry/README.md), [ADR 0250](../0250-offline-snapshot-receipt-inspection/README.md)
 - **Category:** release identity and provenance (sensitive class)
 
 ## Context
 
-The current promotion planner authenticates a candidate against its original
-candidate run, but accepts a different release dispatch source commit. The
-release workflow records the dispatch commit separately. A valid signature on
-an old candidate therefore does not establish that its image represents the
-source and fragments at dispatch. The existing changelog selection digest
-binds identities, component, and prefix; by itself it does not bind fragment
-contents, source tree, prior history, candidate bytes, or image digests.
+The promotion planner originally authenticated a candidate against its
+candidate run while accepting a different release source commit. The 2026-11-12
+interim guard in ADR 0078 (#1952) now rejects a candidate whose source commit
+differs from the release source. This closes that specific mismatch in adopters
+that regenerate the full container-release set at a pin containing the guard.
+It does not establish dispatch authorization, fragment selection, or registry
+transaction safety. A valid signature on an old candidate still does not by
+itself establish that its image represents the selected fragments at dispatch.
+The existing changelog selection digest binds identities, component, and
+prefix; by itself it does not bind fragment contents, source tree, prior
+history, candidate bytes, or image digests.
+
+#1961 added an offline snapshot receipt inspector under proposed ADR 0250. It
+checks locally supplied evidence but issues no authenticated receipt or
+publication permission. The signed receipt store, issuance and recovery
+authority proposed below remain unimplemented.
 
 A successful release records a manifest and creates a snapshot commit and tag.
 A later retry may run after `main` advances: the existing workflow loads the

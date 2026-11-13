@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import gzip
 import contextlib
@@ -1856,7 +1857,8 @@ class ArtifactFilesystemTests(unittest.TestCase):
 
     def test_export_rejects_symlinks_and_hardlinks(self) -> None:
         (self.workspace / "dist/link").symlink_to("app.js")
-        with self.assertRaises((artifacts.ArtifactError, OSError)):
+        # The O_NOFOLLOW open refuses the link before any ArtifactSet check sees it.
+        with self.assertRaises((artifacts.ArtifactError, OSError)) as raised:
             artifacts.export_artifact(
                 self.workspace,
                 self.root / "link.tar.gz",
@@ -1864,9 +1866,11 @@ class ArtifactFilesystemTests(unittest.TestCase):
                 identity=self.identity,
                 consumers=1,
             )
+        self.assertNotIsInstance(raised.exception, artifacts.ArtifactError)
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
         (self.workspace / "dist/link").unlink()
         os.link(self.workspace / "dist/app.js", self.workspace / "dist/alias.js")
-        with self.assertRaises(artifacts.ArtifactError):
+        with self.assertRaisesRegex(artifacts.ArtifactError, "^ArtifactSet rejects links and special files$"):
             artifacts.export_artifact(
                 self.workspace,
                 self.root / "hardlink.tar.gz",
@@ -2857,12 +2861,13 @@ class RoleAuthorizationTests(unittest.TestCase):
                 )
                 rejected = subprocess.run(
                     ["bash", "-c", role_guard["run"]],
-                    env={**os.environ, "BUILD_ARTIFACT_ROLE": "unknown"},
+                    env={**os.environ, "LC_ALL": "C", "BUILD_ARTIFACT_ROLE": "unknown"},
                     capture_output=True,
                     text=True,
                     check=False,
                 )
                 self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(rejected.stderr, "::error::unknown internal build-artifact role\n")
                 build_test = workflow["jobs"]["build-test"]
                 acquisition_guard = next(
                     step for step in build_test["steps"]
@@ -2871,12 +2876,17 @@ class RoleAuthorizationTests(unittest.TestCase):
                 self.assertIn("needs.acquire-secretless-dependencies.result", acquisition_guard["if"])
                 guard_run = subprocess.run(
                     ["bash", "-c", acquisition_guard["run"]],
-                    env={**os.environ, "ELIGIBILITY_RESULT": "success", "ACQUISITION_RESULT": "failure"},
+                    env={**os.environ, "LC_ALL": "C", "ELIGIBILITY_RESULT": "success", "ACQUISITION_RESULT": "failure"},
                     capture_output=True,
                     text=True,
                     check=False,
                 )
                 self.assertNotEqual(guard_run.returncode, 0)
+                self.assertEqual(
+                    guard_run.stderr,
+                    "::error::secretless build prerequisites did not succeed "
+                    "(eligibility=success, acquisition=failure); inspect both job results before retrying.\n",
+                )
                 if filename == "node-ci-protected.yml":
                     self.assertNotIn("secretless-pr", acquisition_guard["if"])
                 else:
@@ -2943,6 +2953,51 @@ class RoleAuthorizationTests(unittest.TestCase):
                     candidate_environment.pop(env_name, None)
                 candidate_environment.update({"BUILD_ARTIFACT_ROLE": "consumer"})
                 self.assertEqual(candidate_environment["BUILD_ARTIFACT_ROLE"], "consumer")
+
+
+class PrismaSchemaEngineCandidateMountTests(unittest.TestCase):
+    def test_available_engine_uses_fixed_candidate_path_and_read_only_mount(self) -> None:
+        candidate_environment = {
+            "PRISMA_SCHEMA_ENGINE_BINARY": "/runner/private/schema-engine"
+        }
+        host_path = "/runner/temp/verjson-prisma-schema-engine-123-2/schema-engine"
+
+        mount_arguments, mount_targets = artifacts.prisma_schema_engine_candidate_mount(
+            candidate_environment,
+            True,
+            host_path,
+            Path("/run/verjson-prisma/schema-engine"),
+        )
+
+        self.assertEqual(
+            "/run/verjson-prisma/schema-engine",
+            candidate_environment["PRISMA_SCHEMA_ENGINE_BINARY"],
+        )
+        self.assertEqual(
+            [
+                "--ro-bind",
+                host_path,
+                "/run/verjson-prisma/schema-engine",
+            ],
+            mount_arguments,
+        )
+        self.assertEqual((Path("/run/verjson-prisma"),), mount_targets)
+
+    def test_unavailable_engine_clears_inherited_binary_and_skips_mount(self) -> None:
+        candidate_environment = {
+            "PRISMA_SCHEMA_ENGINE_BINARY": "/runner/private/schema-engine"
+        }
+
+        mount_arguments, mount_targets = artifacts.prisma_schema_engine_candidate_mount(
+            candidate_environment,
+            False,
+            None,
+            Path("/run/verjson-prisma/schema-engine"),
+        )
+
+        self.assertNotIn("PRISMA_SCHEMA_ENGINE_BINARY", candidate_environment)
+        self.assertEqual([], mount_arguments)
+        self.assertEqual((), mount_targets)
 
 
 class ProtectedCandidatePlanValidationTests(unittest.TestCase):
@@ -3024,6 +3079,7 @@ class ProtectedCandidatePlanValidationTests(unittest.TestCase):
                     os.environ,
                     {
                         "RUNNER_TEMP": str(runner_temp),
+                    "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
                         "SCRIPT_PLAN_ENTRIES_FILE": str(entries_path),
                         "SCRIPT_PLAN_DEFAULT_PLAN": "false",
                         "NESTED_MANIFESTS": "",

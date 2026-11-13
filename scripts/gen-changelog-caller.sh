@@ -13,8 +13,8 @@
 #   scripts/gen-changelog-caller.sh adr-index-generator <sha> > scripts/gen-adr-index.sh
 #   scripts/gen-changelog-caller.sh adr-index-test <sha> > scripts/gen-adr-index.test.sh
 #   scripts/gen-changelog-caller.sh renderer <sha> > scripts/render-next.sh
-#   scripts/gen-changelog-caller.sh contract-test <sha> [--scope <scope>] [--node-version <version>] [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... > scripts/changelog-contract.test.sh
-#   scripts/gen-changelog-caller.sh codeowners <sha> > .github/CODEOWNERS
+#   scripts/gen-changelog-caller.sh contract-test <sha> [--codeowners-org <org> --codeowners-team <team>] [--scope <scope>] [--node-version <version>] [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... > scripts/changelog-contract.test.sh
+#   scripts/gen-changelog-caller.sh codeowners <sha> [--codeowners-org <org> --codeowners-team <team>] > .github/CODEOWNERS
 #   scripts/gen-changelog-caller.sh pr-gate <sha> [--untrusted-runner <label>[,<label>...]] > .github/workflows/changelog-contract.yml
 #   scripts/gen-changelog-caller.sh release-node <sha> [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--release-asset <path>]... > .github/workflows/release.yml
 #   scripts/gen-changelog-caller.sh release-artifact <sha> --build-runner <selector>... [--approved-internal-package <@verjson/name>]... [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] > .github/workflows/release.yml
@@ -72,7 +72,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
+  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--codeowners-org <org> --codeowners-team <team>] [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
   echo "required check: changelog / validate" >&2
   exit 2
 }
@@ -100,42 +100,78 @@ release_approved_internal_packages=()
 release_autonomy=""
 pr_gate_untrusted_runner=""
 pr_gate_untrusted_runner_set=false
+codeowners_org=""
+codeowners_team=""
+codeowners_org_set=false
+codeowners_team_set=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --codeowners-org)
+      [ "$#" -ge 2 ] && [ "$codeowners_org_set" = false ] || usage
+      codeowners_org="$2"; codeowners_org_set=true; shift 2 ;;
+    --codeowners-team)
+      [ "$#" -ge 2 ] && [ "$codeowners_team_set" = false ] || usage
+      codeowners_team="$2"; codeowners_team_set=true; shift 2 ;;
     --scope)
-      [ "$#" -ge 2 ] && [ "$release_scope_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_scope_set" = false ] || {
+        echo "$(basename "$0"): --scope was repeated" >&2
+        usage
+      }
       release_scope="$2"
       release_scope_set=true
       shift 2
       ;;
     --node-version)
-      [ "$#" -ge 2 ] && [ "$release_node_version_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_node_version_set" = false ] || {
+        echo "$(basename "$0"): --node-version was repeated" >&2
+        usage
+      }
       release_node_version="$2"
       release_node_version_set=true
       shift 2
       ;;
     --default-prefix)
-      [ "$#" -ge 2 ] && [ "$release_default_prefix_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_default_prefix_set" = false ] || {
+        echo "$(basename "$0"): --default-prefix was repeated" >&2
+        usage
+      }
       release_default_prefix="$2"
       release_default_prefix_set=true
       shift 2
       ;;
     --default-component)
-      [ "$#" -ge 2 ] && [ "$release_default_component_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_default_component_set" = false ] || {
+        echo "$(basename "$0"): --default-component was repeated" >&2
+        usage
+      }
       release_default_component="$2"
       release_default_component_set=true
       shift 2
       ;;
     --package-dir)
-      [ "$#" -ge 2 ] && [ "$release_package_dirs_exact" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_package_dirs_exact" = false ] || {
+        echo "$(basename "$0"): --package-dir cannot follow --only-package-dir" >&2
+        usage
+      }
       release_package_dirs+=("$2")
       release_package_dirs_set=true
       shift 2
       ;;
     --only-package-dir)
-      [ "$#" -ge 2 ] || usage
+      [ "$#" -ge 2 ] || {
+        echo "$(basename "$0"): --only-package-dir requires a repository-relative directory" >&2
+        usage
+      }
       if [ "$release_package_dirs_exact" = false ]; then
-        [ "$release_package_dirs_set" = false ] || usage
+        [ "$release_package_dirs_set" = false ] || {
+          echo "$(basename "$0"): --only-package-dir cannot follow --package-dir" >&2
+          usage
+        }
         release_package_dirs=()
         release_package_dirs_exact=true
       fi
@@ -180,6 +216,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$codeowners_org_set" = true ] || [ "$codeowners_team_set" = true ]; then
+  if { [ "$mode" != codeowners ] && [ "$mode" != contract-test ]; } ||
+     ! [[ "$codeowners_org" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]{0,37}[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])?$ ]] ||
+     ! [[ "$codeowners_team" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]{0,98}[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789])?$ ]]; then
+    echo "$(basename "$0"): --codeowners-org and --codeowners-team require valid GitHub names and are accepted together only for codeowners or contract-test" >&2
+    exit 2
+  fi
+fi
 if { [ "$release_scope_set" = true ] || [ "$release_node_version_set" = true ] \
   || [ "$release_package_dirs_set" = true ]; } \
   && [ "$mode" != release-node ] && [ "$mode" != release-artifact ] \
@@ -367,6 +411,7 @@ selected_package_dirs_json="$selected_package_dirs_json]"
 # index members inside `contract-test`) takes no options and states its own mode.
 generation_command() {
   local command="$mode $ref" release_caller_spec release_asset build_runner quoted_build_runner approved_package
+  [ -z "$codeowners_org" ] || command="$command --codeowners-org $codeowners_org --codeowners-team $codeowners_team"
   [ "$release_scope" = "@verjson" ] \
     || command="$command --scope $release_scope"
   [ "$release_node_version" = "24" ] \
@@ -607,12 +652,15 @@ resolve_adr_index_generator() {
 # reviewed source of truth and scripts/codeowners_test.py refuses drift between
 # the two (ADR 0210).
 codeowners_bytes() {
-  cat <<'CODEOWNERS'
-# Generated by verJSON/.github; do not edit by hand.
-# Regenerate from a reviewed immutable contract checkout:
-# scripts/gen-changelog-caller.sh codeowners <contract-sha> > .github/CODEOWNERS
-* @verJSON/devs
-CODEOWNERS
+  local regenerate='scripts/gen-changelog-caller.sh codeowners <contract-sha>' owner='@verJSON/devs'
+  if [ -n "$codeowners_org" ]; then
+    regenerate="$regenerate --codeowners-org $codeowners_org --codeowners-team $codeowners_team"
+    owner="@$codeowners_org/$codeowners_team"
+  fi
+  printf '%s\n' '# Generated by verJSON/.github; do not edit by hand.' \
+    '# Regenerate from a reviewed immutable contract checkout:' \
+    "# $regenerate > .github/CODEOWNERS" \
+    "* $owner"
 }
 codeowners_digest_at_ref() {
   codeowners_bytes | digest_of
@@ -1035,20 +1083,38 @@ release_download_artifact='actions/download-artifact@9000827ccba6bdab643e8b6fd33
 release_cache_save='actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 release_cache_restore='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 
-release_version_guard_step=$(cat <<'EOF'
-      - name: Require an explicit release version
+release_head_binding_step=$(cat <<'EOF'
+      - name: Bind a proposer dispatch to its exact derived head
         env:
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
           INPUT_VERSION: ${{ inputs.version }}
+          SELECTOR_DIGEST: ${{ inputs.selector_digest }}
         run: |
-          set -euo pipefail
-          python3 -I -X utf8 - <<'PY'
-          import os
-          import sys
-
-          if not os.environ['INPUT_VERSION'].strip():
-              print('::error::version is required for release dispatch', file=sys.stderr)
-              raise SystemExit(1)
-          PY
+          # A blank version is derived from the dispatched tree, so the operator
+          # must state that exact commit (#1939); an explicit version keeps the
+          # proposer receipt both-or-neither.
+          if [ -z "$INPUT_VERSION" ]; then
+            if [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]]; then
+              echo "::error::A blank version derives the release from the dispatched commit, so expected_head must name that exact default-branch commit as a canonical lowercase 40-hex SHA."
+              exit 1
+            fi
+            if [ -n "$SELECTOR_DIGEST" ] && [[ ! "$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}$ ]]; then
+              echo "::error::selector_digest must be empty or a canonical lowercase 64-hex digest."
+              exit 1
+            fi
+          elif [ -z "$EXPECTED_HEAD" ] && [ -z "$SELECTOR_DIGEST" ]; then
+            echo "Explicit-version dispatch has no proposer receipt to bind."
+            exit 0
+          elif [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]] ||
+            [[ ! "$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}$ ]]; then
+            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
+            exit 1
+          fi
+          if [ "$GITHUB_SHA" != "$EXPECTED_HEAD" ]; then
+            echo "::error::The default branch moved from stated head $EXPECTED_HEAD to dispatch head $GITHUB_SHA. Derive the release again at the current head; this run will not verify, snapshot, or publish."
+            exit 1
+          fi
+          echo "Dispatch is bound to head $EXPECTED_HEAD and selector ${SELECTOR_DIGEST:-none}."
 EOF
 )
 
@@ -1212,7 +1278,7 @@ emit_release_node() {
   publish_job="$(release_node_publish_job "$ref" "$release_node_version" "$release_scope" "$package_dirs_json" "$release_assets_json")" || return
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -1267,30 +1333,31 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator explicitly dispatches publication with the version to cut.
-# The canonical release plan validates it against selected fragments on this
-# exact source commit; no push trigger infers a version from commit subjects
-# (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication. A blank version is derived
+# by the canonical release plan from selected fragments on this exact source
+# commit; no push trigger infers a version from commit subjects.
+# An explicit version is validated against the same release plan.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''
@@ -1321,7 +1388,6 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
-${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -1339,23 +1405,7 @@ ${release_version_guard_step}
             exit 1
           fi
           echo "Dispatched from \$DEFAULT_BRANCH; verifying its head."
-      - name: Bind a proposer dispatch to its exact derived head
-        env:
-          EXPECTED_HEAD: \${{ inputs.expected_head }}
-          SELECTOR_DIGEST: \${{ inputs.selector_digest }}
-        run: |
-          if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
-            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
-            exit 1
-          elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head \$EXPECTED_HEAD to dispatch head \$GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head \$EXPECTED_HEAD and selector \$SELECTOR_DIGEST."
-          fi
+${release_head_binding_step}
       - name: Check out the tree that will be released
         uses: ${release_checkout}
         with:
@@ -1532,6 +1582,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -1849,7 +1903,7 @@ EOF
   build_job="$(release_artifact_build_job_for "$private_dependencies" "${build_runners_yaml%$'\n'}")" || return
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -1899,30 +1953,31 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator explicitly dispatches publication with the version to cut.
-# The canonical release plan validates it against selected fragments on this
-# exact source commit; no push trigger infers a version from commit subjects
-# (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication. A blank version is derived
+# by the canonical release plan from selected fragments on this exact source
+# commit; no push trigger infers a version from commit subjects.
+# An explicit version is validated against the same release plan.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''
@@ -1953,7 +2008,6 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
-${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -1971,23 +2025,7 @@ ${release_version_guard_step}
             exit 1
           fi
           echo "Dispatched from \$DEFAULT_BRANCH; verifying its head."
-      - name: Bind a proposer dispatch to its exact derived head
-        env:
-          EXPECTED_HEAD: \${{ inputs.expected_head }}
-          SELECTOR_DIGEST: \${{ inputs.selector_digest }}
-        run: |
-          if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
-            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
-            exit 1
-          elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head \$EXPECTED_HEAD to dispatch head \$GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head \$EXPECTED_HEAD and selector \$SELECTOR_DIGEST."
-          fi
+${release_head_binding_step}
       - name: Check out the tree that will be released
         uses: ${release_checkout}
         with:
@@ -2144,6 +2182,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -2278,7 +2320,7 @@ emit_release_snapshot() {
   publish_job="$(release_snapshot_publish_job)" || return
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -2326,30 +2368,31 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator explicitly dispatches publication with the version to cut.
-# The canonical release plan validates it against selected fragments on this
-# exact source commit; no push trigger infers a version from commit subjects
-# (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication. A blank version is derived
+# by the canonical release plan from selected fragments on this exact source
+# commit; no push trigger infers a version from commit subjects.
+# An explicit version is validated against the same release plan.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''
@@ -2380,7 +2423,6 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
-${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -2398,23 +2440,7 @@ ${release_version_guard_step}
             exit 1
           fi
           echo "Dispatched from \$DEFAULT_BRANCH; verifying its head."
-      - name: Bind a proposer dispatch to its exact derived head
-        env:
-          EXPECTED_HEAD: \${{ inputs.expected_head }}
-          SELECTOR_DIGEST: \${{ inputs.selector_digest }}
-        run: |
-          if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
-            echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
-            exit 1
-          elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head \$EXPECTED_HEAD to dispatch head \$GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head \$EXPECTED_HEAD and selector \$SELECTOR_DIGEST."
-          fi
+${release_head_binding_step}
       - name: Check out the tree that will be released
         uses: ${release_checkout}
         with:
@@ -2521,10 +2547,12 @@ ${release_plan_step}
           fetch-depth: 0
           persist-credentials: false
       # A snapshot-only adopter publishes nothing and need not be a Node project
-      # (#1206): the Node steps run only when a package.json exists, and a
+      # (#1206): its package steps run only when a package.json exists, and a
       # repository without one must verify through its own verify hook below.
+      # Node itself is installed either way, because that hook may run on Node
+      # and package metadata cannot say so (#1906).
       - uses: ${release_setup_node}
-        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
+        if: steps.release-version.outputs.selected == 'true'
         with:
           # Keep the literal inside an expression so Renovate's uses-with
           # extractor leaves it alone while setup-node receives the same value.
@@ -2573,6 +2601,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -2692,25 +2724,25 @@ EOF
 }
 
 emit_release_propose() {
-  local write_permission reusable_workflow generation_command
+  local write_permission reusable_workflow generation_command schedule_trigger
   generation_command="$(generation_command)"
   if [ "$release_autonomy" = propose ]; then
     write_permission="      issues: write"
     reusable_workflow="release-propose.yml"
+    schedule_trigger=$'  schedule:\n    - cron: \'17 9 * * *\'\n'
   else
     write_permission="      actions: write"
     reusable_workflow="release-dispatch.yml"
+    schedule_trigger=''
   fi
   cat <<EOF
 name: Release proposal
 
 # Generated by verJSON/.github scripts/gen-changelog-caller.sh ${generation_command}
-# — do not edit by hand. The autonomy is fixed in source so a scheduled run
-# cannot acquire a different write permission through an event input.
+# — do not edit by hand. The autonomy is fixed in source; dispatch mode
+# requires explicit initiation while proposal-only mode may be scheduled.
 on:
-  schedule:
-    - cron: '17 9 * * *'
-  workflow_dispatch:
+${schedule_trigger}  workflow_dispatch:
     inputs:
       fragments:
         description: Newline-separated NEXT fragment filenames; empty selects the component stream
@@ -2849,7 +2881,10 @@ digest_of_resolved() { # "$@" = the resolver command
 }
 
 emit_contract_test() {
-  local adr_index_sha256="" adr_index_test_sha256="" codeowners_sha256=""
+  local adr_index_sha256="" adr_index_test_sha256="" codeowners_sha256="" codeowners_assignments=""
+  if [ -n "$codeowners_org" ]; then
+    printf -v codeowners_assignments 'EXPECTED_CODEOWNERS_ORG="%s"\nEXPECTED_CODEOWNERS_TEAM="%s"' "$codeowners_org" "$codeowners_team"
+  fi
   codeowners_sha256="$(codeowners_digest_at_ref)" || {
     echo "$(basename "$0"): cannot digest the embedded CODEOWNERS member" >&2
     return 1
@@ -2987,6 +3022,7 @@ CONTRACT_SHA256="${contract_sha256}"
 ADR_INDEX_SHA256="${adr_index_sha256}"
 ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
+${codeowners_assignments}
 EXPECTED_RELEASE_SCOPE="${release_scope}"
 EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
 # Generator parameters and expected per-caller package selections.
@@ -3406,7 +3442,12 @@ echo "ok - every generated member of the adopter set pins $CONTRACT_REF"
 # generated, so it is held to the exact bytes the contract renders at
 # $CONTRACT_REF; a competing CODEOWNERS location would take precedence over the
 # canonical one and is refused as well.
-codeowners_remedy="Generate it with: scripts/gen-changelog-caller.sh codeowners $CONTRACT_REF > .github/CODEOWNERS (regenerate the whole adopter set at one commit)"
+codeowners_org="${EXPECTED_CODEOWNERS_ORG:-verJSON}"
+if [ -n "${GITHUB_REPOSITORY_OWNER:-}" ] &&
+   [ "${codeowners_org,,}" != "${GITHUB_REPOSITORY_OWNER,,}" ]; then
+  fail "CODEOWNERS organization does not match this repository owner"
+fi
+codeowners_remedy="Generate it with: scripts/gen-changelog-caller.sh codeowners $CONTRACT_REF ${EXPECTED_CODEOWNERS_ORG:+--codeowners-org $EXPECTED_CODEOWNERS_ORG --codeowners-team $EXPECTED_CODEOWNERS_TEAM } > .github/CODEOWNERS (regenerate the whole adopter set at one commit)"
 [ -n "$EXPECTED_CODEOWNERS_SHA256" ] \
   || fail "this suite carries no CODEOWNERS pin; regenerate it with scripts/gen-changelog-caller.sh contract-test $CONTRACT_REF"
 [ ! -L "$root/.github" ] && [ ! -L "$root/.github/CODEOWNERS" ] \
@@ -3554,10 +3595,16 @@ if [ -e "$release_propose_workflow" ]; then
     || fail "$release_propose_workflow does not pass the shared pinned contract_ref"
   ! grep -qE '^ +autonomy:' "$release_propose_workflow" \
     || fail "$release_propose_workflow must select autonomy through its reusable workflow path"
-  grep -qE '^  schedule:$' "$release_propose_workflow" \
-    && grep -qE '^  workflow_dispatch:$' "$release_propose_workflow" \
+  grep -qE '^  workflow_dispatch:$' "$release_propose_workflow" \
     && ! grep -qE '^  (push|pull_request|pull_request_target):' "$release_propose_workflow" \
-    || fail "$release_propose_workflow must be schedule/operator triggered, never release-on-merge"
+    || fail "$release_propose_workflow must be operator triggered, never release-on-merge"
+  if [ "$autonomy" = dispatch ]; then
+    ! grep -qE '^  schedule:$' "$release_propose_workflow" \
+      || fail "$release_propose_workflow dispatch cannot be scheduled"
+  else
+    grep -qE '^  schedule:$' "$release_propose_workflow" \
+      || fail "$release_propose_workflow proposal must include its schedule"
+  fi
   proposer_job="$(awk '
     /^  release-propose:[[:space:]]*$/ { capture = 1 }
     capture && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $0 !~ /^  release-propose:/ { exit }
@@ -3589,6 +3636,8 @@ ways that report green:
   * package credentials belong only in the scriptless dependency acquisition
     step. Lifecycle and verification code must run after that step has ended.
   * actions/checkout must not persist Git credentials into repository code.
+  * a package-less tree's Node-based verification hook runs on the
+    configured Node version (#1906).
 
 Anything this parser cannot read confidently is an error, never a pass.
 """
@@ -3597,7 +3646,9 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 
 path = sys.argv[1]
 problems = []
@@ -4049,21 +4100,22 @@ EXPECTED_TRIGGER_BLOCK = (
     (2, "workflow_dispatch:"),
     (4, "inputs:"),
     (6, "version:"),
-    (8, "description: Exact SemVer tag to release"),
-    (8, "required: true"),
+    (8, "description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head"),
+    (8, "required: false"),
     (8, "type: string"),
+    (8, "default: ''"),
     (6, "prefix:"),
     (8, "description: Exact version namespace prefix; independent from component"),
     (8, "required: false"),
     (8, "type: string"),
     (8, f"default: {release_default_prefix_yaml}"),
     (6, "expected_head:"),
-    (8, "description: Optional exact default-branch head derived by release-propose"),
+    (8, "description: Exact default-branch commit this dispatch authorizes; required when version is blank"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
     (6, "selector_digest:"),
-    (8, "description: Optional canonical selection digest derived by release-propose"),
+    (8, "description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
@@ -4707,9 +4759,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "6aedd9fb8cf31648d7172575f99eab93f785f741313880f2a63298b72e8fc9d7",
-    "release-artifact": "cdc96e2dfc87263418d76b5e3332252838c2ec9f71bc2640a2135d59799d011a",
-    "release-snapshot": "d8738716f844b29bb794c5e1a4555859cd6b6906f29036ead4be7dcea700a57b",
+    "release-node": "639d473d29fff274a0ff6e439df02fb6d8e3f76baa0531e77197f40a56aa65a7",
+    "release-artifact": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
+    "release-snapshot": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -5726,7 +5778,6 @@ for index, line in enumerate(lines):
 workflow_steps = list(workflow_step_blocks())
 verification_job_steps = list(workflow_step_blocks("verify"))
 expected_verification_step_identities = [
-    ("Require an explicit release version", ""),
     ("Prepare job-scoped changelog tool cache", ""),
     ("Release only from the default branch", ""),
     ("Bind a proposer dispatch to its exact derived head", ""),
@@ -5903,6 +5954,10 @@ else:
         "NODE_AUTH_TOKEN": "''",
     }
     approved_stamp_body = "\n".join((
+        'if [[ "$PACKAGE_VERSION" == *+* ]]; then',
+        '  echo "::error::npm strips build metadata from package versions; release a version without build metadata."',
+        '  exit 1',
+        'fi',
         "package_dirs(<approved-directories>)",
         'for package_dir in "${package_dirs[@]}"; do',
         '  npm version --prefix "$package_dir" "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version',
@@ -6085,6 +6140,252 @@ for index, line in enumerate(lines):
         problems.append(
             "runs an unexpected credentialed acquisition command (#1712)"
         )
+
+
+# A package-less repository verifies through its own scripts/release-verify.sh,
+# which may run on Node; package metadata cannot say so (#1906). Model the
+# runner's PATH and environment for that hook, but never execute shell text read
+# from a release caller. Only model after both caller step bodies and the exact
+# verification environment match their pinned generated forms.
+PACKAGE_LESS_SELECTED = "steps.release-version.outputs.selected == 'true'"
+PACKAGE_LESS_REFUSAL = "::error::No package.json and no executable scripts/release-verify.sh"
+PACKAGE_LESS_NODE_VERSION = re.compile(r"\$\{\{ '([0-9]+(?:\.[0-9]+){0,2})' \}\}")
+EXPECTED_RELEASE_MODE = os.environ.get("EXPECTED_RELEASE_MODE", "")
+PACKAGE_LESS_SAFE_HOST_ENV = ("LANG", "LC_ALL")
+
+
+class PackageLessUnreadable(Exception):
+    pass
+
+
+def package_less_admits(condition):
+    if condition != PACKAGE_LESS_SELECTED:
+        raise PackageLessUnreadable(
+            "has a verify step condition the package-less check cannot evaluate: %s" % condition
+        )
+    return True
+
+
+# The values a verify step's env: may take from earlier steps, by exact text. A
+# runner resolves them; the check substitutes what the emulated job produced
+# and refuses any other expression rather than guessing its value.
+PACKAGE_LESS_DISPATCH_EXPRESSIONS = {
+    "${{ steps.release-version.outputs.package-version }}": "9.8.7",
+    "${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}": "3",
+}
+
+
+def package_less_runner_environment(search_path, runner_temp, tool_cache):
+    """Build the scrubbed environment that the package-less hook would receive."""
+    environment = {
+        name: os.environ[name]
+        for name in PACKAGE_LESS_SAFE_HOST_ENV
+        if name in os.environ
+    }
+    home = os.path.join(runner_temp, "home")
+    temporary = os.path.join(runner_temp, "tmp")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(temporary, exist_ok=True)
+    environment.update(
+        PATH=search_path,
+        HOME=home,
+        TMPDIR=temporary,
+        RUNNER_TEMP=runner_temp,
+        VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
+    )
+    return environment
+
+
+def package_less_step_environment(step, runtime_outputs):
+    """Resolve a step's own env:, so the check runs it as the runner would."""
+    values = step_mapping_values(step, "env")
+    if values is None:
+        raise PackageLessUnreadable("has a release verification suite env the package-less check cannot read")
+    expressions = dict(PACKAGE_LESS_DISPATCH_EXPRESSIONS)
+    for output in ("path", "cache"):
+        expressions["${{ steps.release-verification-runtime.outputs.%s }}" % output] = (
+            runtime_outputs.get(output, "")
+        )
+    environment = {}
+    for key, raw in values.items():
+        value = yaml_scalar_value(raw)
+        if value is not None and "${{" in value:
+            value = expressions.get(value)
+        if value is None:
+            raise PackageLessUnreadable(
+                "has a release verification suite env value the package-less check cannot evaluate: %s" % key
+            )
+        environment[key] = value
+    return environment
+
+
+def package_less_verification(steps, root, with_hook):
+    """Model the package-less verify job without running caller-provided commands."""
+    tree = os.path.join(root, "tree")
+    runner_temp = os.path.join(root, "runner")
+    os.makedirs(os.path.join(tree, "scripts"))
+    os.makedirs(runner_temp)
+    search_path = os.environ.get("PATH", "")
+    runtime_outputs = {}
+    tool_cache = os.path.join(runner_temp, "verjson-changelog-tools")
+    node_directory = None
+    node_version = None
+    for step in steps:
+        fields = step_mapping_entries(step) or {}
+        name = yaml_scalar_value(fields.get("name", "")) or ""
+        uses = yaml_scalar_value(fields.get("uses", "")) or ""
+        condition = fields.get("if")
+        if uses.casefold().startswith("actions/setup-node@"):
+            if not package_less_admits(condition):
+                continue
+            version = PACKAGE_LESS_NODE_VERSION.fullmatch(
+                yaml_scalar_value((step_mapping_values(step, "with") or {}).get("node-version", "")) or ""
+            )
+            if version is None:
+                raise PackageLessUnreadable("has a setup-node version the package-less check cannot read")
+            node_directory = os.path.join(runner_temp, "setup-node", "bin")
+            node_version = version.group(1)
+            search_path = node_directory + os.pathsep + search_path
+        elif name == "Capture trusted release verification runtime":
+            if not package_less_admits(condition):
+                continue
+            runtime_outputs = {"path": search_path, "cache": tool_cache}
+        elif name == "Run the release verification suite":
+            if not package_less_admits(condition):
+                raise PackageLessUnreadable("does not run its release verification suite on a package-less tree")
+            environment = package_less_runner_environment(search_path, runner_temp, tool_cache)
+            environment.update(package_less_step_environment(step, runtime_outputs))
+            verification_path = environment.get("RELEASE_VERIFICATION_PATH", "")
+            captured_path = runtime_outputs.get("path", "")
+            node_is_visible = (
+                node_directory is not None
+                and node_version is not None
+                and node_directory in captured_path.split(os.pathsep)
+                and node_directory in verification_path.split(os.pathsep)
+            )
+            stdout = "setup-node %s\n" % node_version if node_is_visible else ""
+            if environment.get("GITHUB_TOKEN") or environment.get("NODE_AUTH_TOKEN"):
+                stdout += "host-credential-env-present\n"
+            if with_hook:
+                return subprocess.CompletedProcess(
+                    ["package-less-verification-model"],
+                    0 if node_is_visible else 1,
+                    stdout,
+                    None,
+                )
+            if PACKAGE_LESS_REFUSAL not in (run_body(step) or ""):
+                raise PackageLessUnreadable(
+                    "does not refuse a package-less tree without scripts/release-verify.sh before the snapshot"
+                )
+            return subprocess.CompletedProcess(
+                ["package-less-verification-model"], 1, PACKAGE_LESS_REFUSAL + "\n", None
+            )
+    raise PackageLessUnreadable("has no release verification suite the package-less check can run")
+
+
+def package_less_emulation_is_trusted(steps):
+    """Only model pinned bodies, environment, actions, and conditions."""
+    if EXPECTED_RELEASE_MODE not in APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256:
+        return False
+    setup_steps = []
+    runtime_steps = []
+    verification_steps = []
+    for step in steps:
+        fields = step_mapping_entries(step) or {}
+        name = yaml_scalar_value(fields.get("name", "")) or ""
+        uses = yaml_scalar_value(fields.get("uses", "")) or ""
+        if name == "Capture trusted release verification runtime":
+            runtime_steps.append(step)
+        elif name == "Run the release verification suite":
+            verification_steps.append(step)
+        if uses.casefold().startswith("actions/setup-node@"):
+            setup_steps.append(step)
+    if len(setup_steps) != 1 or len(runtime_steps) != 1 or len(verification_steps) != 1:
+        return False
+    setup_fields = step_mapping_entries(setup_steps[0])
+    runtime_fields = step_mapping_entries(runtime_steps[0])
+    runtime_body = run_body(runtime_steps[0])
+    verification_body = run_body(verification_steps[0])
+    verification_fields = step_mapping_entries(verification_steps[0])
+    return (
+        setup_fields is not None
+        and yaml_scalar_value(setup_fields.get("uses", "") or "") == RELEASE_SETUP_NODE
+        and yaml_scalar_value(setup_fields.get("if", "") or "") == PACKAGE_LESS_SELECTED
+        and runtime_fields is not None
+        and yaml_scalar_value(runtime_fields.get("if", "") or "") == PACKAGE_LESS_SELECTED
+        and verification_fields is not None
+        and yaml_scalar_value(verification_fields.get("if", "") or "") == PACKAGE_LESS_SELECTED
+        and runtime_body is not None
+        and hashlib.sha256(runtime_body.encode()).hexdigest()
+        == APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256[EXPECTED_RELEASE_MODE]
+        and verification_body is not None
+        and hashlib.sha256(verification_body.encode()).hexdigest()
+        == APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256.get(EXPECTED_RELEASE_MODE)
+        and verification_fields is not None
+        and step_mapping_values(verification_steps[0], "env") == EXPECTED_RELEASE_VERIFICATION_ENV
+    )
+
+
+def check_package_less_verification(steps):
+    expected = os.environ.get("EXPECTED_RELEASE_NODE_VERSION", "")
+    if not expected.strip():
+        problems.append(
+            "cannot verify the package-less release hook: "
+            "EXPECTED_RELEASE_NODE_VERSION is unset; regenerate the contract test "
+            "with its configured --node-version (#1906)"
+        )
+        return
+    try:
+        with tempfile.TemporaryDirectory() as root:
+            with_hook = package_less_verification(steps, root, with_hook=True)
+        if with_hook.returncode != 0 or (
+            "setup-node %s" % expected
+        ) not in with_hook.stdout.splitlines():
+            problems.append(
+                "does not give a package-less verification hook the configured Node %s (#1906): %s"
+                % (expected, with_hook.stdout.strip()[-400:])
+            )
+            return
+        if "host-credential-env-present" in with_hook.stdout.splitlines():
+            problems.append(
+                "exposes host credential variables to package-less release verification code (#1906)"
+            )
+            return
+        # release-snapshot is the mode built for package-less repositories
+        # (#1206): the same tree with no hook has nothing to verify and must stop
+        # the release here, before the snapshot job can run.
+        if EXPECTED_RELEASE_MODE == "release-snapshot":
+            with tempfile.TemporaryDirectory() as root:
+                without_hook = package_less_verification(steps, root, with_hook=False)
+            if without_hook.returncode == 0:
+                problems.append(
+                    "lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)"
+                )
+                return
+            # Any other failure is incidental, not the refusal the snapshot relies on.
+            if not any(line.startswith(PACKAGE_LESS_REFUSAL) for line in without_hook.stdout.splitlines()):
+                problems.append(
+                    "does not refuse a package-less tree without scripts/release-verify.sh before the snapshot (#1206): %s"
+                    % without_hook.stdout.strip()[-400:]
+                )
+                return
+    except PackageLessUnreadable as unreadable:
+        problems.append("%s (#1906)" % unreadable)
+        return
+    # Printed here, not by the caller, so the line proves this check ran.
+    print("ok - %s gives a package-less verification hook the configured Node %s (#1906)" % (path, expected))
+
+
+if EXPECTED_RELEASE_MODE not in ("release-node", "release-artifact", "release-snapshot"):
+    problems.append("cannot determine the release caller mode for package-less verification (#1906)")
+elif EXPECTED_RELEASE_MODE == "release-snapshot" and None not in verification_job_steps:
+    if package_less_emulation_is_trusted(verification_job_steps):
+        check_package_less_verification(verification_job_steps)
+    else:
+        problems.append(
+            "cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)"
+        )
+
 for problem in problems:
     sys.stderr.write("FAIL - %s %s\n" % (path, problem))
 sys.exit(1 if problems else 0)
@@ -6158,7 +6459,7 @@ PY
     fail "$release_workflow has invalid pinned package-directory JSON"
     continue
   fi
-  grep -qF "run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
+  grep -qF "run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
     || fail "$release_workflow lacks the resolved-version run title required for idempotent dispatch"
 
   # Comments stripped before structural matching so a migration note naming a
@@ -6300,8 +6601,8 @@ PY
     local job="$1" consumer_pattern="$2" stamp_line consumer_line
     stamp_line="$(grep -n -m1 \
       'npm version .*--no-git-tag-version --ignore-scripts --allow-same-version' \
-      <<<"$job" | cut -d: -f1)"
-    consumer_line="$(grep -n -m1 -E "$consumer_pattern" <<<"$job" | cut -d: -f1)"
+      <<<"$job" | cut -d: -f1 || true)"
+    consumer_line="$(grep -n -m1 -E "$consumer_pattern" <<<"$job" | cut -d: -f1 || true)"
     [ -n "$stamp_line" ] && [ -n "$consumer_line" ] && [ "$stamp_line" -lt "$consumer_line" ]
   }
   stamp_before "$verify_job" 'scripts/release-verify\.sh|npm run build|npm run typecheck|npm run lint|npm test' \
@@ -6309,10 +6610,10 @@ PY
   grep -qF "package_dirs=($workflow_package_dirs_shell)" <<<"$verify_job" \
     || fail "$release_workflow does not stamp every package directory selected for publication (#557)"
   prepare_line="$(grep -n -m1 'scripts/release-prepare-packages\.sh "\$PACKAGE_VERSION"' \
-    <<<"$verify_job" | cut -d: -f1)"
+    <<<"$verify_job" | cut -d: -f1 || true)"
   stamp_line="$(grep -n -m1 \
     'npm version .*--no-git-tag-version --ignore-scripts --allow-same-version' \
-    <<<"$verify_job" | cut -d: -f1)"
+    <<<"$verify_job" | cut -d: -f1 || true)"
   [ -n "$prepare_line" ] && [ -n "$stamp_line" ] && [ "$prepare_line" -lt "$stamp_line" ] \
     || fail "$release_workflow does not prepare package metadata before stamping and verifying the release tree (#550)"
   if [ "$release_mode" = release-node ]; then
@@ -6596,12 +6897,12 @@ PY
         && grep -qF 'fail-on-cache-miss: true' <<<"$build_job" \
         && grep -qF "NODE_AUTH_TOKEN: ''" <<<"$build_job" \
         || fail "$release_workflow private build does not restore dependencies with credentials blanked"
-      acquisition_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
-      build_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$build_job" | sed 's/^[[:space:]]*//')"
+      acquisition_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//' || true)"
+      build_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$build_job" | sed 's/^[[:space:]]*//' || true)"
       [ "$acquisition_selectors" = "$build_selectors" ] \
         || fail "$release_workflow private acquisition and credentialless build runner matrices differ"
-      acquisition_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
-      build_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$build_job" | sed 's/^[[:space:]]*//')"
+      acquisition_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//' || true)"
+      build_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$build_job" | sed 's/^[[:space:]]*//' || true)"
       [ "$acquisition_indices" = "$build_indices" ] \
         || fail "$release_workflow private acquisition and credentialless build dependency indices differ"
       expected_index=0
@@ -6720,12 +7021,9 @@ PY
     <<<"$verify_job" \
     || fail "$release_workflow does not give repository verification hooks a job-writable changelog cache beneath runner.temp (#630)"
   first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { sub(/^[[:space:]]*/, ""); print; if (++count == 2) exit }' <<<"$verify_job")"
-  [ "$first_two_verify_steps" = $'- name: Require an explicit release version\n- name: Prepare job-scoped changelog tool cache' ] \
+  [[ "$first_two_verify_steps" == $'- name: Prepare job-scoped changelog tool cache\n'* ]] \
     && grep -qF 'INPUT_VERSION: ${{ inputs.version }}' <<<"$verify_job" \
-    && grep -qF "python3 -I -X utf8 - <<'PY'" <<<"$verify_job" \
-    && ! grep -qF "PYTHONUTF8" <<<"$verify_job" \
-    && grep -qF "if not os.environ['INPUT_VERSION'].strip():" <<<"$verify_job" \
-    || fail "$release_workflow does not reject blank versions before repository verification"
+    || fail "$release_workflow does not pass the optional version to the release plan"
   grep -qF "if: steps.release-version.outputs.selected == 'true' && steps.release-state.outputs.snapshot-exists == 'true'" <<<"$verify_job" \
     || fail "$release_workflow does not condition resumed verification on an existing snapshot"
   grep -qF 'ref: ${{ steps.release-version.outputs.version }}' <<<"$verify_job" \
@@ -6761,6 +7059,7 @@ PY
   CONTRACT_REF="$CONTRACT_REF" \
     EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
     EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
+    EXPECTED_RELEASE_NODE_VERSION="$EXPECTED_RELEASE_NODE_VERSION" \
     EXPECTED_RELEASE_CACHE_SAVE="$EXPECTED_RELEASE_CACHE_SAVE" \
     EXPECTED_RELEASE_SNAPSHOT_JOB="$EXPECTED_RELEASE_SNAPSHOT_JOB" \
     EXPECTED_RELEASE_BUILD_JOB="$EXPECTED_RELEASE_BUILD_JOB" \
@@ -6770,6 +7069,7 @@ PY
     EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB="$EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB" \
     EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
+    EXPECTED_RELEASE_MODE="$release_mode" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
 
@@ -7629,6 +7929,7 @@ for job in doc["jobs"].values():
     rm -f "$syntax_input"
     ;;
   *)
+    echo "$(basename "$0"): unknown mode; the usage line lists every mode" >&2
     usage
     ;;
 esac

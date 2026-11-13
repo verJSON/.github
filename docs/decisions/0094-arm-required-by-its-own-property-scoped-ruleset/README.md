@@ -5,6 +5,7 @@
 - **Issue:** [#748](https://github.com/Verjson/.github/issues/748) (outage: [#728](https://github.com/Verjson/.github/issues/728))
 - **Supersedes:** [ADR 0091](../0091-ruleset-requires-authorization-arm/README.md)
 - **Amends:** [ADR 0079](../0079-head-bound-ai-authorization-and-native-auto-merge/README.md), [ADR 0090](../0090-human-first-opt-in-ai-review/README.md)
+- **Amended by:** [ADR 0254](../0254-audit-recognizes-the-main-protection-suspension/README.md) (a third, derived `suspended` state for the #1933 owner hold)
 
 ## Context
 

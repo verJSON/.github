@@ -823,10 +823,17 @@ def case_space():
     }
 
 
+# Contract checks that run as their own part, so each one's runtime record is its own cost.
+OWN_PART_CONTRACT_CHECKS = {"allowlist-sweep": "allowlist sweep"}
+
+
 def parts():
     """Deterministic actions-ci parts: the npm-free contract checks, then one part per npm major."""
     cases = case_space()
-    return {"contract": {case for case in cases if case[0] == "contract"}} | {
+    own = {("contract", check): name for name, check in OWN_PART_CONTRACT_CHECKS.items()}
+    return {"contract": {case for case in cases if case[0] == "contract" and case not in own}} | {
+        name: {case} for case, name in own.items()
+    } | {
         f"npm{major}": {case for case in cases if case[0] == "isolation" and case[2] == major}
         for major in harness.SUPPORTED_NPM_RELEASES
     }

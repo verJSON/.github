@@ -186,28 +186,41 @@ grep -q -- '-f source_run_id=9999' "$CALLS" \
 # Every identity the promotion later re-verifies is validated here first, so a
 # malformed one cannot reach `gh workflow run` and mint a promotion attempt.
 forged_case() {
-  local label="$1" var="$2" value="$3"
+  local label="$1" var="$2" value="$3" reason="$4" calls_before_guard="$5"
   if (export "$var=$value"; run_dispatch); then
     fail "forged $label input dispatched"
-  elif ! grep -q '^workflow run ' "$CALLS"; then
-    pass "forged $label input is rejected before dispatch"
-  else
+  elif grep -q '^workflow run ' "$CALLS"; then
     fail "forged $label input reached the dispatch call"
+  elif ! grep -qF "::error::$reason" "$tmp/out"; then
+    fail "forged $label input was rejected without naming its guard: $(tail -1 "$tmp/out")"
+  elif [ "$(grep -c . "$CALLS")" -ne "$calls_before_guard" ]; then
+    fail "forged $label input was rejected at the wrong stage: $(tr '\n' ' ' <"$CALLS")"
+  else
+    pass "forged $label input is rejected before dispatch"
   fi
 }
-forged_case "pr number" PR_NUMBER_VALUE '7; rm -rf /'
-forged_case "zero pr number" PR_NUMBER_VALUE 0
-forged_case "head sha" HEAD_VALUE 'not-a-sha'
-forged_case "short head sha" HEAD_VALUE 1111111111111111111111111111111111111
-forged_case "uppercase head sha" HEAD_VALUE AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-forged_case "authorization check id" CHECK_VALUE 'abc'
-forged_case "default branch" DEFAULT_BRANCH_VALUE 'main;evil'
-forged_case "empty default branch" DEFAULT_BRANCH_VALUE ''
+# Identity inputs are rejected before any API call; the default branch only
+# after the one repository read that supplies it.
+forged_case "pr number" PR_NUMBER_VALUE '7; rm -rf /' 'pull request number is not a positive decimal' 0
+forged_case "zero pr number" PR_NUMBER_VALUE 0 'pull request number is not a positive decimal' 0
+forged_case "head sha" HEAD_VALUE 'not-a-sha' 'expected head SHA is not a 40-hex object name' 0
+forged_case "short head sha" HEAD_VALUE 1111111111111111111111111111111111111 'expected head SHA is not a 40-hex object name' 0
+forged_case "uppercase head sha" HEAD_VALUE AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 'expected head SHA is not a 40-hex object name' 0
+forged_case "authorization check id" CHECK_VALUE 'abc' 'authorization check id is not a positive decimal' 0
+forged_case "default branch" DEFAULT_BRANCH_VALUE 'main;evil' 'default branch is not a safe promotion dispatch ref' 1
+forged_case "empty default branch" DEFAULT_BRANCH_VALUE '' 'default branch is not a safe promotion dispatch ref' 1
 
-if (export DISPATCH_RC=1; run_dispatch); then
+# A distinctive status proves the failure is the dispatch call's own, not an
+# earlier step that happened to exit nonzero.
+if (export DISPATCH_RC=7; run_dispatch); then
   fail "a failed dispatch reported green"
 else
-  pass "a failed dispatch fails the job"
+  dispatch_rc=$?
+  if [ "$dispatch_rc" -eq 7 ] && [ "$(grep -c '^workflow run ' "$CALLS")" -eq 1 ]; then
+    pass "a failed dispatch fails the job"
+  else
+    fail "a failed dispatch did not fail with the dispatch call's own status (rc=$dispatch_rc)"
+  fi
 fi
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }

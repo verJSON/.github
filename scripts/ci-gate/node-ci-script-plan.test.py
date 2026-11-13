@@ -519,8 +519,9 @@ class WorkflowAdoptionTests(unittest.TestCase):
         self.assertEqual(namespace["validated_plan"].entries[0].script, "build")
         namespace["normalized_entries"] = [{"id": "build", "inputs": {}}]
         with patch.dict(os.environ, {"NESTED_MANIFESTS": ""}):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as raised:
                 exec(validation_block, namespace)
+        self.assertEqual(raised.exception.code, "normalized script-plan entry has invalid fields")
 
     def test_checked_in_action_files_match_the_immutable_workflow_pin(self) -> None:
         for filename, expected_sha256 in PINNED_ACTION_FILE_HASHES.items():

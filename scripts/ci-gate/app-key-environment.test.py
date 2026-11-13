@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -61,6 +62,15 @@ def workflow_bindings(directory):
     return bindings
 
 
+def frozen(value):
+    """A read-only copy of a parsed fixture, so a shared one cannot be edited."""
+    if isinstance(value, dict):
+        return types.MappingProxyType({key: frozen(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(frozen(item) for item in value)
+    return value
+
+
 def confinement_pattern(entry):
     """The only expressions that bind a canonical entry's own role environment.
 
@@ -74,6 +84,18 @@ def confinement_pattern(entry):
 
 def workflow(name):
     return yaml.safe_load((ROOT / f".github/workflows/{name}.yml").read_text())
+
+
+# Reusable workflows whose jobs consume an App key: the role environment input each one
+# requires, and the key-bearing jobs that environment binds.
+KEY_CONSUMERS = {
+    "changelog-release": ("release_environment", ["release"]),
+    "container-release": ("release_environment", ["promote"]),
+    "ai-privileged-merge": ("merge_environment", ["privileged_merge"]),
+    "ai-review-merge": ("ai_review_environment", ["gate", "complete-authorization"]),
+    "gate-rearm": ("ai_review_environment", ["arm"]),
+    "merge-admission": ("ai_review_environment", ["evaluate"]),
+}
 
 
 def metadata():
@@ -106,7 +128,10 @@ class StorageAuditTests(unittest.TestCase):
     def test_missing_environment_key_fails_without_accepting_a_broad_fallback(self):
         data = metadata()
         data["repos/Verjson/example/environments/merge-app/secrets?per_page=100"] = [{"total_count": 0, "secrets": []}]
-        self.assertFalse(audit.audit("Verjson/example", data.__getitem__)["compliant"])
+        result = audit.audit("Verjson/example", data.__getitem__)
+        self.assertFalse(result["compliant"])
+        self.assertEqual(result["missingEnvironmentKeys"], [f"merge-app/{audit.ROLES['merge']}"])
+        self.assertEqual((result["broadRepositoryKeys"], result["broadOrganizationKeys"]), ([], []))
 
     def test_branch_wildcards_tags_additional_refs_and_missing_types_are_rejected(self):
         for policies in ([{"name": "*", "type": "branch"}], [{"name": "main", "type": "tag"}],
@@ -114,20 +139,23 @@ class StorageAuditTests(unittest.TestCase):
             with self.subTest(policies=policies):
                 data = metadata()
                 data["repos/Verjson/example/environments/release-app/deployment-branch-policies?per_page=100"] = [{"total_count": len(policies), "branch_policies": policies}]
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, "^release-app permits a ref other than the main branch$"):
                     audit.audit("Verjson/example", data.__getitem__)
 
     def test_protected_branches_only_is_not_main_only(self):
         data = metadata()
         data["repos/Verjson/example/environments/release-app"][0]["deployment_branch_policy"] = {"protected_branches": True, "custom_branch_policies": False}
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "^release-app must use explicit main-only branch admission$"):
             audit.audit("Verjson/example", data.__getitem__)
 
     def test_unreadable_metadata_and_incomplete_pagination_never_prove_absence(self):
-        with self.assertRaises(subprocess.CalledProcessError):
-            audit.audit("Verjson/example", mock.Mock(side_effect=subprocess.CalledProcessError(1, "gh")))
+        unreadable = subprocess.CalledProcessError(1, "gh")
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            audit.audit("Verjson/example", mock.Mock(side_effect=unreadable))
+        self.assertIs(raised.exception, unreadable)
         for pages in ([{"total_count": 1, "secrets": []}], [{"total_count": 2, "secrets": [{"name": "X"}, {"name": "X"}]}]):
-            with self.subTest(pages=pages), self.assertRaises(ValueError):
+            with self.subTest(pages=pages), self.assertRaisesRegex(
+                    ValueError, "^GitHub metadata pagination is incomplete or inconsistent$"):
                 audit.names(pages, "secrets")
 
     def test_malformed_environment_identity_and_boolean_metadata_are_rejected(self):
@@ -136,16 +164,17 @@ class StorageAuditTests(unittest.TestCase):
             with self.subTest(identity=identity):
                 data = metadata()
                 data[path][0]["id"] = identity
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, "^release-app environment identity is unavailable$"):
                     audit.audit("Verjson/example", data.__getitem__)
         for field, value in (("protected_branches", 0), ("custom_branch_policies", 1)):
             with self.subTest(field=field):
                 data = metadata()
                 data[path][0]["deployment_branch_policy"][field] = value
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, "^release-app must use explicit main-only branch admission$"):
                     audit.audit("Verjson/example", data.__getitem__)
         for count in (None, False, "0"):
-            with self.subTest(count=count), self.assertRaises(ValueError):
+            with self.subTest(count=count), self.assertRaisesRegex(
+                    ValueError, "^GitHub metadata pagination is incomplete or inconsistent$"):
                 audit.names([{"total_count": count, "secrets": []}], "secrets")
 
     def test_inventory_collects_every_page_and_never_fetches_secret_values(self):
@@ -155,17 +184,41 @@ class StorageAuditTests(unittest.TestCase):
             self.assertEqual(audit.github("repos/Verjson/example/actions/secrets?per_page=100"), pages)
         self.assertEqual(run.call_args.args[0][:4], ["gh", "api", "--paginate", "--slurp"])
 
+    def test_a_response_without_pages_never_reads_as_empty_metadata(self):
+        with mock.patch.object(audit.subprocess, "run", return_value=mock.Mock(stdout="[]")):
+            with self.assertRaisesRegex(ValueError, "GitHub returned no metadata pages"):
+                audit.github("repos/Verjson/example/actions/secrets?per_page=100")
+
+    def test_a_page_without_its_collection_never_reads_as_empty(self):
+        with self.assertRaisesRegex(ValueError, "GitHub metadata collection is unavailable"):
+            audit.names([{"total_count": 0}], "secrets")
+
+    def test_a_record_without_a_name_never_counts_toward_the_inventory(self):
+        with self.assertRaisesRegex(ValueError, "GitHub metadata identity is unavailable"):
+            audit.names([{"total_count": 1, "secrets": [{"created_at": "2026-11-04"}]}], "secrets")
+
+    def test_a_repository_that_is_not_owner_name_is_rejected_before_any_read(self):
+        api = mock.Mock(side_effect=metadata().__getitem__)
+        with self.assertRaisesRegex(ValueError, "repository must be owner/name"):
+            audit.audit("Verjson/example/actions", api)
+        api.assert_not_called()
+
+    def test_a_default_branch_other_than_main_is_rejected(self):
+        data = metadata()
+        data["repos/Verjson/example"][0]["default_branch"] = "master"
+        with self.assertRaisesRegex(ValueError, "repository default branch must be main"):
+            audit.audit("Verjson/example", data.__getitem__)
+
+    def test_an_unknown_owner_type_never_skips_the_organization_inventory(self):
+        data = metadata()
+        data["repos/Verjson/example"][0]["owner"] = {}
+        with self.assertRaisesRegex(ValueError, "repository owner identity is unavailable"):
+            audit.audit("Verjson/example", data.__getitem__)
+
 
 class WorkflowBoundaryTests(unittest.TestCase):
     def test_key_consumers_declare_required_environment_and_depend_on_keyless_policy(self):
-        consumers = {
-            "changelog-release": ("release_environment", ["release"]),
-            "container-release": ("release_environment", ["promote"]),
-            "ai-privileged-merge": ("merge_environment", ["privileged_merge"]),
-            "ai-review-merge": ("ai_review_environment", ["gate", "complete-authorization"]),
-            "gate-rearm": ("ai_review_environment", ["arm"]),
-        }
-        for name, (field, jobs) in consumers.items():
+        for name, (field, jobs) in KEY_CONSUMERS.items():
             with self.subTest(name=name):
                 doc = workflow(name)
                 trigger = doc.get("on", doc.get(True))
@@ -199,9 +252,9 @@ class WorkflowBoundaryTests(unittest.TestCase):
                         {"actions": "read", "contents": "read"},
                         f"{name}: app-key policy must retain explicit read-only permissions",
                     )
-                    if name == "ai-review-merge":
-                        # The reusable edge carries only the one named secret
-                        # consumed by its environment-bound validator.
+                    if policy["with"]["role"] == "ai-review":
+                        # The policy's environment-bound key validator is key-bearing (ADR
+                        # 0171, 2026-09-27), so the edge carries only that one named secret.
                         self.assertEqual(
                             policy.get("secrets"),
                             {"AI_REVIEW_APP_PRIVATE_KEY": "${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}"},
@@ -225,6 +278,24 @@ class WorkflowBoundaryTests(unittest.TestCase):
                         self.assertIn("needs.app-key-policy.result == 'success'", app_token["if"])
                     elif "always()" in value.get("if", ""):
                         self.assertIn("needs.app-key-policy.result == 'success'", value["if"])
+
+    def test_every_relative_edge_into_a_key_consumer_inherits_the_callers_secrets(self):
+        # ADR 0171: an environment binding alone resolves no secret inside a reusable
+        # workflow; only caller inheritance does. Derived from the workflows, so a new caller
+        # cannot omit it, as the merge-admission caller did (#2031).
+        targets = {f"./.github/workflows/{name}.yml" for name in KEY_CONSUMERS}
+        edges = {
+            (path.name, name): job.get("secrets")
+            for path in sorted(p for pattern in ("*.yml", "*.yaml") for p in (ROOT / ".github/workflows").glob(pattern))
+            for name, job in (yaml.safe_load(path.read_text()).get("jobs") or {}).items()
+            if job.get("uses") in targets
+        }
+        self.assertLessEqual(
+            {("ai-review-merge-dispatch.yml", "review"), ("merge-admission-caller.yml", "admit")}, set(edges),
+        )
+        for edge, secrets in edges.items():
+            with self.subTest(edge=edge):
+                self.assertEqual(secrets, "inherit", f"{edge} does not inherit the caller's secrets")
 
     def test_ai_review_key_policy_validates_the_resolved_environment_secret(self):
         policy = workflow("app-key-environment")
@@ -387,6 +458,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
         cases = [(["gen-ai-review-caller.sh", sha], "ai_review_environment"),
                  (["gen-gate-rearm-caller.sh", sha], "ai_review_environment"),
                  (["gen-ai-review-label-rearm-caller.sh", sha], "ai_review_environment"),
+                 (["gen-ai-review-lifecycle-rearm-caller.sh", sha], "ai_review_environment"),
                  (["gen-privileged-merge-caller.sh", sha, '[{"name":"CI","app_id":1,"workflow_id":2,"workflow_path":".github/workflows/ci.yml"}]'], "merge_environment"),
                  (["gen-container-release.sh", "workflow", sha], "release_environment"),
                  (["gen-changelog-caller.sh", "release-node", sha], "release_environment"),
@@ -419,26 +491,43 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertNotIn("secrets", str(job))
         self.assertNotIn("actions/checkout", str(job))
 
-    def run_policy(self, *, ref="refs/heads/main", name="release-app", role="release", policy=None, unavailable=False):
+    def run_policy(self, *, ref="refs/heads/main", name="release-app", role="release", policy=None, unavailable=False,
+                   default_branch="main", protected_branches=False):
         step = workflow("app-key-environment")["jobs"]["validate"]["steps"][0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             gh = root / "gh"
-            gh.write_text('#!/usr/bin/env python3\nimport json,os,sys\nif os.environ.get("UNAVAILABLE")=="1":sys.exit(1)\nif "deployment-branch-policies" in sys.argv[-1]:print(os.environ["POLICY"])\nelse:print(json.dumps({"id":42,"name":os.environ["ENVIRONMENT"],"deployment_branch_policy":{"protected_branches":False,"custom_branch_policies":True}}))\n')
+            # UNAVAILABLE=1 fails every read; =policies fails only the branch-policy read.
+            gh.write_text('#!/usr/bin/env python3\nimport json,os,sys\nif os.environ.get("UNAVAILABLE")=="1":sys.exit(1)\nif "deployment-branch-policies" in sys.argv[-1]:\n    if os.environ.get("UNAVAILABLE")=="policies":sys.exit(1)\n    print(os.environ["POLICY"])\nelse:print(json.dumps({"id":42,"name":os.environ["ENVIRONMENT"],"deployment_branch_policy":{"protected_branches":os.environ["PROTECTED_BRANCHES"]=="true","custom_branch_policies":True}}))\n')
             gh.chmod(0o755)
             result = subprocess.run(["bash", "-c", step["run"]], text=True, capture_output=True,
-                env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "REF": ref, "DEFAULT_BRANCH": "main",
-                     "ROLE": role, "ENVIRONMENT": name, "REPOSITORY": "Verjson/example", "UNAVAILABLE": "1" if unavailable else "0",
+                env={**os.environ, "LC_ALL": "C", "PATH": f"{root}:{os.environ['PATH']}", "REF": ref, "DEFAULT_BRANCH": default_branch,
+                     "ROLE": role, "ENVIRONMENT": name, "REPOSITORY": "Verjson/example",
+                     "UNAVAILABLE": "policies" if unavailable == "policies" else "1" if unavailable else "0",
+                     "PROTECTED_BRANCHES": "true" if protected_branches else "false",
                      "POLICY": json.dumps(policy or {"total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}]})})
-            return result.returncode
+            return result
 
     def test_native_policy_preflight_accepts_only_main_and_exact_role(self):
-        self.assertEqual(self.run_policy(), 0)
-        for kwargs in ({"ref": "refs/heads/topic"}, {"ref": "refs/tags/main"}, {"name": "unguarded"}, {"role": "unknown"}, {"unavailable": True},
-                       {"policy": {"total_count": 1, "branch_policies": [{"name": "*", "type": "branch"}]}},
-                       {"policy": {"total_count": 1, "branch_policies": [{"name": "main", "type": "tag"}]}}):
+        accepted = self.run_policy()
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        off_main = "::error::App key job ref is not refs/heads/main"
+        other_ref = "::error::App key environment permits a ref other than the main branch"
+        for kwargs, reason in (
+                ({"ref": "refs/heads/topic"}, off_main), ({"ref": "refs/tags/main"}, off_main),
+                ({"name": "unguarded"}, "::error::App key environment is not the role's own environment"),
+                ({"role": "unknown"}, "::error::App key role is not a canonical role"),
+                ({"unavailable": True}, "::error::App key environment metadata is unavailable"),
+                ({"default_branch": "trunk"}, "::error::repository default branch is not main"),
+                ({"protected_branches": True},
+                 "::error::App key environment does not use explicit main-only branch admission"),
+                ({"unavailable": "policies"}, "::error::App key environment branch policies are unavailable"),
+                ({"policy": {"total_count": 1, "branch_policies": [{"name": "*", "type": "branch"}]}}, other_ref),
+                ({"policy": {"total_count": 1, "branch_policies": [{"name": "main", "type": "tag"}]}}, other_ref)):
             with self.subTest(kwargs=kwargs):
-                self.assertNotEqual(self.run_policy(**kwargs), 0)
+                rejected = self.run_policy(**kwargs)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(rejected.stderr.strip().splitlines()[-1:], [reason])
 
 
 
@@ -484,7 +573,8 @@ class WorkflowScanTests(unittest.TestCase):
 
     def test_a_secret_that_is_not_an_app_key_contributes_no_binding(self):
         for name in ("NODE_AUTH_TOKEN", "RELEASE_KEY", "MERGE_APP_ID"):
-            with self.subTest(name=name), self.assertRaises(ValueError):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "^no App key binding was found; the workflow scan is unreliable$"):
                 self.scan({"mint.yml": WORKFLOW % f"secrets.{name}"})
 
     def test_a_key_read_outside_every_job_is_an_error_not_a_silent_zero(self):
@@ -501,7 +591,9 @@ class WorkflowScanTests(unittest.TestCase):
         for body in (preamble, preamble + job):
             # The companion file binds a key inside a job, so the directory-wide
             # "no binding at all" guard cannot be what rejects these.
-            with self.subTest(jobs=body is not preamble), self.assertRaises(ValueError):
+            with self.subTest(jobs=body is not preamble), self.assertRaisesRegex(
+                    ValueError, "^" + re.escape("leak.yml reads ['RELEASE_APP_PRIVATE_KEY'] at workflow scope, "
+                                    "where no environment confines it") + "$"):
                 self.scan({"leak.yml": body, "mint.yml": other})
 
     def test_a_key_read_outside_a_job_is_seen_even_when_a_job_reads_the_same_key(self):
@@ -516,7 +608,9 @@ class WorkflowScanTests(unittest.TestCase):
                 "    environment: release-app\n"
                 "    steps:\n"
                 "      - run: echo \"${{ secrets.RELEASE_APP_PRIVATE_KEY }}\"\n")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(
+                ValueError, "^" + re.escape("leak.yml reads ['RELEASE_APP_PRIVATE_KEY'] at workflow scope, "
+                                    "where no environment confines it") + "$"):
             self.scan({"leak.yml": body})
 
     def test_case_folded_and_space_separated_secrets_references_are_the_same_binding(self):
@@ -560,13 +654,22 @@ class AppKeyRoleManifestTests(unittest.TestCase):
     cannot be added without declaring its confinement (#1285).
     """
 
-    def setUp(self):
-        self.manifest = audit.load_roles()
-        self.bindings = workflow_bindings(ROOT / ".github/workflows")
+    @classmethod
+    def setUpClass(cls):
+        # Parsing every workflow is the expensive part of this class, and no test
+        # changes what it reads. Freezing the shared fixture keeps that true: a
+        # test that tries to edit it raises instead of leaking the edit into the
+        # next test (#1997).
+        cls.manifest = frozen(audit.load_roles())
+        cls.bindings = frozen(workflow_bindings(ROOT / ".github/workflows"))
 
-    def test_manifest_and_workflows_declare_exactly_the_same_app_keys(self):
-        self.assertEqual({entry["secret"] for entry in self.manifest},
-                         {binding["secret"] for binding in self.bindings})
+    def test_workflow_keys_match_manifest_except_held_merge_key(self):
+        declared = {entry["secret"] for entry in self.manifest}
+        bound = {binding["secret"] for binding in self.bindings}
+        # Older pinned callers still use this key, so it remains in the audit.
+        self.assertIn("MERGE_APP_PRIVATE_KEY", declared)
+        self.assertNotIn("MERGE_APP_PRIVATE_KEY", bound)
+        self.assertEqual(declared - {"MERGE_APP_PRIVATE_KEY"}, bound)
 
     def test_every_confined_binding_declares_its_declared_environment(self):
         declared = {entry["secret"]: entry for entry in self.manifest}
@@ -679,7 +782,8 @@ class AppKeyRoleManifestValidationTests(unittest.TestCase):
                           {"environment": ""}, {"environment": None},
                           {"environment": "release-cache"},
                           {"organization_copy": "keep"}, {"organization_copy": None}):
-            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                    ValueError, "^App key role entry is malformed: "):
                 self.manifest(**overrides)
 
     def test_a_caller_owned_entry_may_name_an_environment_outside_the_role_convention(self):
@@ -713,15 +817,19 @@ class AppKeyRoleManifestValidationTests(unittest.TestCase):
             path = Path(directory) / "roles.json"
             entry = {"role": "release", "secret": "RELEASE_APP_PRIVATE_KEY", "environment": "release-app",
                      "confinement": "canonical", "organization_copy": "withdraw"}
-            for roles in ([], {}, [entry, dict(entry, role="other")]):
+            # The duplicate is otherwise well formed, so only the duplicate check rejects it (#1995).
+            duplicate = dict(entry, role="other", environment="other-app")
+            for roles, reason in (([], "manifest is empty"), ({}, "manifest is empty"),
+                                  ([entry, duplicate], "declares a secret twice")):
                 with self.subTest(roles=roles):
                     path.write_text(json.dumps({"roles": roles}), encoding="utf-8")
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, reason):
                         audit.load_roles(path)
 
     def test_a_directory_with_no_binding_is_an_error_not_an_empty_result(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(
+                    ValueError, "^no App key binding was found; the workflow scan is unreliable$"):
                 workflow_bindings(directory)
 
 

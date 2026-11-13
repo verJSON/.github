@@ -27,7 +27,6 @@ import gen_app_client_id_guards
 WORKFLOWS = ROOT / ".github/workflows"
 TOKEN_ACTION = "actions/create-github-app-token@"
 EXPECTED_WORKFLOWS = {
-    "ai-privileged-merge.yml",
     "ai-review-merge.yml",
     "capability-floor-observe.yml",
     "changelog-contract-fleet-report.yml",
@@ -38,6 +37,7 @@ EXPECTED_WORKFLOWS = {
     "dependency-supersession-observe.yml",
     "dependency-supersession-reconcile.yml",
     "gate-rearm.yml",
+    "merge-admission.yml",
     "release-app-canary.yml",
     "renovate-compatibility-reconcile.yml",
     "renovate-grouping-plan.yml",
@@ -94,6 +94,7 @@ class AppClientIdPolicyTests(unittest.TestCase):
                 check=False,
             )
 
+        refusal = "::error::GitHub App client ID is not accepted by the configured App policy\n"
         for client_id in ("Iv1.0123456789abcdef", "Iv" + "a" * 8, "Iv" + "b" * 126):
             with self.subTest(client_id=client_id):
                 self.assertEqual(run_guard(client_id).returncode, 0)
@@ -103,11 +104,14 @@ class AppClientIdPolicyTests(unittest.TestCase):
             payload = f"Ivabcdefgh$(touch${{IFS}}{marker})"
             result = run_guard(payload, CLIENT_ID_MARKER=str(marker))
             self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, refusal)
             self.assertFalse(marker.exists())
 
         for client_id in ("", "123456789", "Iv" + "a" * 127, "Iv" + "a" * 7 + "é"):
             with self.subTest(client_id=client_id):
-                self.assertNotEqual(run_guard(client_id).returncode, 0)
+                result = run_guard(client_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, refusal)
 
     def test_every_canonical_token_mint_has_an_adjacent_exact_guard(self):
         mints = list(guarded_mints())

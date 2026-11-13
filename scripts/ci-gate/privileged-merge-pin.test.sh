@@ -51,18 +51,33 @@ extract_terminal_merge_script "$wf" "$script" \
   && pass "the terminal merge step is found and its non-empty script is extracted" \
   || { echo "FAIL - could not extract the pin check from $wf"; exit 1; }
 
+# A mutant that never built fails extraction too, so it would read as the
+# expected rejection: each mutator proves it changed exactly the target step,
+# and its exit status and output are checked before the verdict is trusted.
+mutant_built() {
+  local status="$1" mutant="$2"
+  [ "$status" -eq 0 ] && [ -s "$mutant" ] && ! cmp -s "$wf" "$mutant"
+}
+
 python3 - "$wf" "$tmp/renamed.yml" "$step_name" <<'MUTATE_NAME_PY'
 import sys
 
 import yaml
 
 workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+renamed = 0
 for step in workflow["jobs"]["privileged_merge"]["steps"]:
     if step.get("name") == sys.argv[3]:
         step["name"] = "Renamed terminal merge step"
+        renamed += 1
+if renamed != 1:
+    raise SystemExit(f"rename mutator changed {renamed} steps, expected 1")
 yaml.safe_dump(workflow, open(sys.argv[2], "w", encoding="utf-8"), sort_keys=False)
 MUTATE_NAME_PY
-if extract_terminal_merge_script "$tmp/renamed.yml" "$tmp/renamed.sh" 2>/dev/null; then
+mutator_status=$?
+if ! mutant_built "$mutator_status" "$tmp/renamed.yml"; then
+  fail "the step-rename mutant was not built (mutator exit $mutator_status), so its rejection proves nothing"
+elif extract_terminal_merge_script "$tmp/renamed.yml" "$tmp/renamed.sh" 2>/dev/null; then
   fail "renaming the terminal merge step left the extraction guard green"
 else
   pass "renaming the terminal merge step makes extraction fail closed"
@@ -74,12 +89,19 @@ import sys
 import yaml
 
 workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+emptied = 0
 for step in workflow["jobs"]["privileged_merge"]["steps"]:
     if step.get("name") == sys.argv[3]:
         step["run"] = ""
+        emptied += 1
+if emptied != 1:
+    raise SystemExit(f"empty-run mutator changed {emptied} steps, expected 1")
 yaml.safe_dump(workflow, open(sys.argv[2], "w", encoding="utf-8"), sort_keys=False)
 MUTATE_RUN_PY
-if extract_terminal_merge_script "$tmp/empty.yml" "$tmp/empty.sh" 2>/dev/null; then
+mutator_status=$?
+if ! mutant_built "$mutator_status" "$tmp/empty.yml"; then
+  fail "the empty-run mutant was not built (mutator exit $mutator_status), so its rejection proves nothing"
+elif extract_terminal_merge_script "$tmp/empty.yml" "$tmp/empty.sh" 2>/dev/null; then
   fail "an empty terminal merge script left the extraction guard green"
 else
   pass "an empty terminal merge script makes extraction fail closed"
@@ -191,11 +213,15 @@ done
 # --- the comparison itself cannot be read ------------------------------------
 # Undetermined provenance must stop the run rather than falling through.
 out="$(EXECUTING_WORKFLOW_SHA="$FORK_SHA" EXECUTING_WORKFLOW_REPOSITORY=Verjson/.github \
-  COMPARE_RC=1 run_case)"
-if ! grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out"; then
+  COMPARE_RC=7 run_case)"
+status=$?
+# Neither refusal names itself. A distinctive stub status shows the failed
+# compare call is what stopped the run: exit 1 is also an unstubbed call's
+# status, and a crash's.
+if [ "$status" -eq 7 ] && ! grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out"; then
   pass "an unreadable comparison fails closed"
 else
-  fail "unreadable comparison did not fail closed: $out"
+  fail "unreadable comparison did not stop the run with the compare call's exit 7 (exit $status): $out"
 fi
 
 # A well-formed response missing `.status` must not be read as acceptance.
@@ -248,10 +274,13 @@ grep -qF 'promotion is not executing from the canonical workflow repository' <<<
 
 # A malformed SHA must be rejected on shape before it can reach the comparison.
 out="$(EXECUTING_WORKFLOW_SHA='main; rm -rf /' EXECUTING_WORKFLOW_REPOSITORY=Verjson/.github run_case)"
-if ! grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out"; then
+status=$?
+# The shape guard exits 1; so does an unstubbed call the run fell through to.
+if [ "$status" -eq 1 ] && ! grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out" \
+  && ! grep -qF 'UNSTUBBED' <<<"$out"; then
   pass "a non-SHA revision value is rejected before the pin check can pass"
 else
-  fail "a malformed revision was accepted: $out"
+  fail "a malformed revision was not stopped by the shape guard (exit $status): $out"
 fi
 
 if [ "$fails" -eq 0 ]; then

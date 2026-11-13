@@ -274,6 +274,20 @@ Candidate npm uses `/dev/null` for user configuration and a fresh empty global
 configuration file inside the sandbox, while retaining only the generated
 private cache setting.
 
+When an npm `package-lock.json` pins Prisma, trusted Node CI code validates the
+locked `prisma`, `@prisma/engines`, and `@prisma/engines-version` metadata before
+it downloads anything. The capability supports npm lockfile versions 2 and 3 on
+GitHub-hosted Ubuntu 24.04 x64 with OpenSSL 3.0. It downloads the locked
+`schema-engine.gz` only from `binaries.prisma.sh`, verifies the published
+SHA-256 and bounded gzip payload, then exposes the executable outside the
+workspace through a read-only bind at `/run/verjson-prisma/schema-engine`.
+Candidate scripts receive that fixed path as `PRISMA_SCHEMA_ENGINE_BINARY`;
+they do not receive the host staging path or credentials, and their existing
+network-isolation policy remains in effect. An `always()` cleanup step removes
+only the stage carrying the current run's owner marker. Unsupported metadata
+or runner targets fail before candidate scripts run. See
+[ADR 0259](decisions/0259-stage-locked-prisma-engine-outside-offline-sandbox/README.md).
+
 The auxiliary source accepts exactly `repository`, `pinFile`, `checkoutPath`, and
 `sparsePath`; the pin file must name the same repository and a lowercase 40-hex
 commit. Rebuild entries must be exact locked package names. The script plan must
@@ -482,11 +496,23 @@ only when its plan entry sets `requiresServices: true` (the standard `test`, `te
 `*:test` names have it by default, so omitting the flag does not guarantee network denial;
 the unprotected reusable keeps the caller's network policy). `browser-cache: true` stores the provisioned browsers
 but does not provision them, and `playwright install --with-deps` does not work inside the
-sandbox. An external adopter run on 2026-10-26 passed `e2e-full / build-test` after a
-Playwright browser-cache miss and downloaded the browsers from `cdn.playwright.dev`
+sandbox.
+
+**This route has not been verified in a live run.** It is derived from the
+script-plan semantics above. The live evidence covers a narrower path. An external adopter
+run on 2026-10-26 passed `e2e-full / build-test` after a Playwright browser-cache miss
 ([run 40380731114](https://github.com/terptechpub/self-publish-ai-app/actions/runs/40380731114)).
-That single run confirms this route can work; it does not guarantee CDN availability,
-so transient DNS failures such as `EAI_AGAIN` can still fail a cold browser install.
+Its `test:ci:e2e-full` script ran `playwright install chromium` itself, and the run
+called the source reusable `node-ci.yml`, which keeps the runner's network policy, so no
+script-plan network isolation was in force; `browser-cache: true` saved what that one
+script downloaded. That run listed no browser package in `secretless-skip-install-scripts`
+and had no separate provisioning entry. The parts specific to this route are
+still unproven: skipping a browser package's install script, provisioning in an
+earlier plan entry that sets `requiresServices: true`, the browsers surviving to
+a later script through the cache directory, and network isolation under the generated
+protected workflow. Treat the route as experimental until
+a run exercises it. No route guarantees CDN availability, so transient DNS
+failures such as `EAI_AGAIN` can still fail a cold browser install.
 
 ## Concurrency belongs to the caller
 
@@ -496,20 +522,23 @@ every call and no `github` field carries the caller's job id), and an empty grou
 startup failure with no jobs, verified on 2026-10-22 (ADR 0238 amendment). Any
 group the reusable declared would be shared by sibling lanes in the caller's run
 and would serialize or cancel them. Declare it once at the caller's workflow
-level, where one group covers every lane. This cancels a superseded pull-request
-run and never a push, merge-queue, tag or dispatch run, because those get a `run-` group
+level, where one group covers every lane. Only a new commit on the pull request
+(`synchronize`) cancels the run it supersedes. An `opened`, `reopened` or
+`ready_for_review` event carries the same head, so it waits for the running run
+instead of cancelling a ready run into a red required check (#1984). A push,
+merge-queue, tag or dispatch run is never cancelled, because those get a `run-` group
 unique to the run, disjoint from the `pr-` groups (a `pull_request_target` run
 never shares a group with a `pull_request` run):
 
 ```yaml
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 ```
 
 The group embeds the workflow name, so two workflows in one repository must not share
 a `name`. A caller whose workflow runs only on `pull_request` may write
-`cancel-in-progress: true` directly.
+`cancel-in-progress: ${{ github.event.action == 'synchronize' }}` directly.
 
 Release cancellation is different: interrupting a run after publication starts
 can leave a partially completed release. Release callers should normally use a
@@ -562,6 +591,17 @@ Without `--levels` the output is the single `ci` job, so the required context st
   unless every level expected for the event and branch succeeded and every other level was
   skipped; failed, cancelled, and unexpectedly skipped levels all fail it. Require
   `test-levels` in rulesets, not the per-level contexts. No job uses `continue-on-error`.
+- **Drafts.** Every generated job, the aggregate included, is skipped while the pull
+  request is a draft, so a draft holds no runner. The trigger requests
+  `ready_for_review`, so marking the pull request ready runs the whole plan on its head.
+  A draft skips rather than fails: a skip is never the SUCCESS the merge gate requires
+  of a required context, while a draft-time failure would stay on the head after the
+  ready run passed ([ADR 0253](decisions/0253-generated-node-ci-callers-defer-drafts/README.md)).
+  The single-job caller follows the same rule, and its `ci / build-test` is not reported
+  on a draft. A multi-level caller's draft does report a skipped `test-levels`, which
+  native protection may count as passing until the ready run's `test-levels` reports.
+  Only the organization merge gate (`assert-mergeable-head.sh`, ADR 0229), run before
+  autonomous merges, holds the merge until then; a native merge is not held.
 - **Errors.** Invalid files exit 1 with one `code path: message` line per error.
 
 ## Publishing a contract-selected release
@@ -689,3 +729,7 @@ consumer execution.
 enabled, `DB_HOST` and `DB_PORT` are reserved for the selected database endpoint
 and cache configuration cannot replace them. Cache-only callers may use those
 names as ordinary container configuration.
+
+## Playwright system libraries
+
+The current Playwright 1.63.0 outside canary may opt into `playwright-sandbox-profile: playwright-chromium-1.63.0-ubuntu-24.04-amd64`. This profile is limited to GitHub-hosted Ubuntu 24.04 amd64 secretless script plans. Trusted setup installs, from signed, hash-pinned Ubuntu metadata, only the packages of the fixed system-library dependency closure that the runner image lacks or ships below their reviewed pins; newer image packages are kept, never downgraded. It writes a receipt of the complete installed closure that is checked before the candidate launches. A superseded pin fails closed until the catalog is re-pinned (ADR 0238, 2026-11-12 amendment). It does not install browser binaries or change the lane’s network policy. Keep `playwright install-deps` out of the untrusted candidate; browser binaries and cold-cache seeding remain separate from this profile.

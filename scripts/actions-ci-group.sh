@@ -103,6 +103,7 @@ command_parallelism="${ACTIONS_CI_COMMAND_PARALLELISM:-$ACTIONS_CI_AVAILABLE_CPU
 declare -a commands=()
 declare -a command_exclusive=()
 declare -a command_budgets=()
+declare -a command_declared_budgets=()
 declare -A command_index_by_pid=()
 declare -A worker_wait_status_by_index=()
 declare -A worker_reported_by_index=()
@@ -176,6 +177,8 @@ while IFS=$'\t' read -r -u "$manifest_fd" command_group command; do
     printf 'empty command in actions-ci group %s\n' "$group" >&2
     exit 2
   }
+  # A declared budget also orders dispatch, so keep it before the tripwire clears it.
+  command_declared_budgets+=("${row_budget:-0}")
   # Row budgets are a pull-request tripwire: without a group budget no row is capped.
   [ -n "$command_budget" ] || row_budget=''
   commands+=("$command")
@@ -611,30 +614,63 @@ wait_for_worker() {
   record_worker_wait "$finished_pid" "$worker_status"
 }
 
-active=0
+# Dispatch order bounds the group's wall time: a long row started late runs
+# alone after its siblings drain. Exclusive rows start first, so they wait on
+# nothing; declared budgets, the manifest's record of measured cost (#1736),
+# then start longest-first, ahead of undeclared rows in manifest order.
+declare -a exclusive_order=() shared_order=()
 for index in "${!commands[@]}"; do
-  if [ "${command_exclusive[$index]}" -eq 1 ]; then
-    while [ "$active" -gt 0 ]; do
-      wait_for_worker
-      active=$((active - 1))
-    done
-  else
-    while [ "$active" -ge "$command_parallelism" ]; do
-      wait_for_worker
-      active=$((active - 1))
-    done
+  [ "${command_exclusive[$index]}" -eq 0 ] || exclusive_order+=("$index")
+done
+while IFS=$'\t' read -r _ index; do
+  shared_order+=("$index")
+done < <(
+  for index in "${!commands[@]}"; do
+    [ "${command_exclusive[$index]}" -eq 1 ] \
+      || printf '%s\t%s\n' "${command_declared_budgets[$index]}" "$index"
+  done | sort -t $'\t' -k1,1nr -k2,2n
+)
+# The order must name every row exactly once before any row starts; a broken
+# sort would otherwise leave rows unstarted behind a misleading result.
+declare -A dispatched_index=()
+for index in "${exclusive_order[@]}" "${shared_order[@]}"; do
+  if [[ ! "$index" =~ ^[0-9]+$ ]] || [ -z "${commands[$index]+set}" ] \
+    || [ -n "${dispatched_index[$index]+set}" ]; then
+    printf 'could not order actions-ci group %s rows for dispatch\n' "$group" >&2
+    exit 2
   fi
+  dispatched_index["$index"]=1
+done
+if [ "${#dispatched_index[@]}" -ne "${#commands[@]}" ]; then
+  printf 'could not order actions-ci group %s rows for dispatch\n' "$group" >&2
+  exit 2
+fi
+
+start_row() {
+  local index="$1"
   printf 'running actions-ci command %s/%s in %s: %s\n' \
-    "$((index + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
+    "$((commands_started + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
   command_started_at["$index"]="$(utc_now)"
   run_command "$index" "${commands[$index]}" </dev/null &
   command_index_by_pid["$!"]="$index"
   commands_started=$((commands_started + 1))
-  active=$((active + 1))
-  if [ "${command_exclusive[$index]}" -eq 1 ]; then
+}
+
+# An exclusive row completes before the next row starts, so it never shares
+# the runner.
+for index in "${exclusive_order[@]}"; do
+  start_row "$index"
+  wait_for_worker
+done
+
+active=0
+for index in "${shared_order[@]}"; do
+  while [ "$active" -ge "$command_parallelism" ]; do
     wait_for_worker
     active=$((active - 1))
-  fi
+  done
+  start_row "$index"
+  active=$((active + 1))
 done
 
 while [ "$active" -gt 0 ]; do
