@@ -4,6 +4,7 @@
 - **Status:** Accepted
 - **Issue:** [#799](https://github.com/Verjson/.github/issues/799)
 - **Category:** release automation and GitHub write authority (sensitive class)
+- **Superseded in part by:** [ADR 0244](../0244-manually-dispatched-fragment-derived-release/README.md) (scheduled release dispatch)
 - **Extends:** [ADR 0038](../0038-canonical-changelog-contract/README.md), [ADR 0060](../0060-node-release-retired/README.md)
 
 ## Context

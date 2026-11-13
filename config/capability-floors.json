@@ -40,6 +40,16 @@
         "scripts/gen-changelog-caller.sh"
       ],
       "assumed_by_org_variable": null
+    },
+    {
+      "id": "ai-review-lifecycle-receipt-binding",
+      "description": "gate-rearm.yml source-binds a delivery from the separate ai-review-lifecycle-rearm.yml caller: schema-2 receipt binding to the protected caller, first run attempt, actor, and exact event head (#1663, first released in v4.0.0). A pin predating this commit binds local delivery source only to the label caller's WORKFLOW_REF, so a lifecycle caller pinned there passes the authorization audit's completeness check yet reaches an arm that skips those bindings (#2000).",
+      "introduced_at": "010fa39da9e718e59a53344e2a7d5575a8319a64",
+      "issue": 2000,
+      "generators": [
+        "scripts/gen-ai-review-lifecycle-rearm-caller.sh"
+      ],
+      "assumed_by_org_variable": null
     }
   ]
 }

@@ -123,3 +123,65 @@ its finding text a function of every item it reports. Changing the format change
 every recorded arm fingerprint once. The single recorded entry was re-recorded in
 the same pull request. Tests show that a same-count swap among unsampled items or
 unsampled mismatches changes the finding, and that the digest does not depend on item order.
+
+## 2026-10-21 amendment: a recorded item set that shrinks is an improvement, not drift
+
+The exact-text comparison read every improvement as a regression. Each adopter that
+regenerated its callers changed the #1810 finding's count and digest, so the
+scheduled `arm-audit` job went red for good news: once on 2026-10-17 (re-recorded by
+hand in #1839) and again on 2026-10-21 (run 39619145007, `missing=17` against a
+recorded `missing=20`). More regenerations were landing the same week, so another
+hand re-record would have reddened again within days.
+
+An expectation entry may now also record its **item set**: `finding_class`, the
+finding text's prefix up to its item summary, and `items`, the full sorted list the
+text's `items=sha256:` digest covers. The adjudicator validates both against the
+recorded text, so the list a reviewer reads is the list the digest commits to. An
+entry without them is compared by exact text, as before.
+
+The producing audit states its item sets positively. Beside its findings, its stdout
+report carries `finding_classes`: every class it evaluated, with that class's sorted
+items, **including the empty ones**. Each finding reaches the adjudicator on its own
+`ERROR:` line, so each class's finding is adjudicated on its own; the suspension
+finding [ADR 0254](../0254-audit-recognizes-the-main-protection-suspension/README.md)
+adds belongs to no class and is still compared by exact text.
+
+For an active item-set entry whose exact text did not reproduce:
+
+- If the observed set for the same class, in the same audit, is a **strict subset**
+  of the recorded set, the entry is `improved`. The verdict stays `match` (exit 0).
+  The run emits a `::notice` annotation, and the step summary carries the
+  replacement entry to re-record.
+- If the observed set is **empty**, the entry is `resolved`. That reads as "no
+  finding": exit 0, with a notice to remove the expectation.
+- Any other outcome is drift, exactly as before. That covers any item not in the
+  recorded set, the same set rendered differently, a different finding class, and a
+  class the report does not state.
+
+### What keeps this from failing open
+
+- Relaxation needs positive evidence. A run with no structured report (stdout that
+  is not a JSON object carrying `finding_classes`, or an audit that aborted before
+  reporting) falls back to exact text. Absence never reads as an improvement.
+- Evidence that is present but malformed or contradictory is `undetermined` (exit 2).
+  That covers a non-list, an unknown key, a nameless class, items that are not
+  sorted unique strings or that carry control characters, a class reported twice, a
+  non-empty class with no finding line or more than one, a finding whose
+  `items=sha256:` digest is not its class's items, and an empty class that still has
+  a finding.
+- An expired entry is never relaxed. A recorded item set must be non-empty, and one
+  class may carry at most one recorded item set per audit.
+- The notice is built only from integers and hex digests this process computed, so
+  no audit- or adopter-controlled text becomes a workflow command.
+
+### Trade-off
+
+A resolved item-set entry no longer fails the run, so the "a recorded finding that
+stops reproducing is drift" rule now applies only to exact-text entries. The
+entry's expiry is what still forces the revisit, and the notice names the entry to
+remove. A shrinking set can also mean the audit is checking less (for example, a
+repository leaving the armed cohort). The notice and the report's
+`armed_repositories` count keep that visible, but they no longer page. This was
+chosen over a count-only tolerance, which would let a same-count swap pass, and over
+re-recording on every change. A daily improvement treadmill trains reviewers to
+re-record without reading, which is the failure the mechanism exists to prevent.

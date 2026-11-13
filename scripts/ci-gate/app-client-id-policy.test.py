@@ -38,6 +38,7 @@ EXPECTED_WORKFLOWS = {
     "dependency-supersession-observe.yml",
     "dependency-supersession-reconcile.yml",
     "gate-rearm.yml",
+    "merge-admission.yml",
     "release-app-canary.yml",
     "renovate-compatibility-reconcile.yml",
     "renovate-grouping-plan.yml",
@@ -94,6 +95,7 @@ class AppClientIdPolicyTests(unittest.TestCase):
                 check=False,
             )
 
+        refusal = "::error::GitHub App client ID is not accepted by the configured App policy\n"
         for client_id in ("Iv1.0123456789abcdef", "Iv" + "a" * 8, "Iv" + "b" * 126):
             with self.subTest(client_id=client_id):
                 self.assertEqual(run_guard(client_id).returncode, 0)
@@ -103,15 +105,18 @@ class AppClientIdPolicyTests(unittest.TestCase):
             payload = f"Ivabcdefgh$(touch${{IFS}}{marker})"
             result = run_guard(payload, CLIENT_ID_MARKER=str(marker))
             self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, refusal)
             self.assertFalse(marker.exists())
 
         for client_id in ("", "123456789", "Iv" + "a" * 127, "Iv" + "a" * 7 + "é"):
             with self.subTest(client_id=client_id):
-                self.assertNotEqual(run_guard(client_id).returncode, 0)
+                result = run_guard(client_id)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, refusal)
 
     def test_every_canonical_token_mint_has_an_adjacent_exact_guard(self):
         mints = list(guarded_mints())
-        self.assertEqual(len(mints), 18)
+        self.assertEqual(len(mints), 19)
         self.assertEqual({path.name for path, *_ in mints}, EXPECTED_WORKFLOWS)
         self.assertEqual(
             sum(path.read_text(encoding="utf-8").count("Iv[") for path in WORKFLOWS.glob("*.yml")),
@@ -141,7 +146,7 @@ class AppClientIdPolicyTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("18 GitHub App token mints", result.stdout)
+        self.assertIn("19 GitHub App token mints", result.stdout)
 
     def test_orphan_final_guard_removal_preserves_the_following_job(self):
         path = WORKFLOWS / "synthetic.yml"

@@ -80,10 +80,12 @@ sed 's/max_attempts=4/max_attempts=1/' "$helper" >"$tmp/mutated-helper.sh"
 : >"$tmp/count"
 : >"$tmp/args"
 if MODE=transient CALL_COUNT="$tmp/count" CALL_ARGS="$tmp/args" \
-  PATH="$tmp:$PATH" bash "$tmp/mutated-helper.sh" Verjson/example 77 >/dev/null 2>&1; then
+  PATH="$tmp:$PATH" bash "$tmp/mutated-helper.sh" Verjson/example 77 >/dev/null 2>"$tmp/mutant-diagnostics"; then
   fail "mutation survived: one-shot PR-files read recovered from a transient failure"
-else
+elif grep -qF 'status=infrastructure_unavailable attempts=1; no review pass reserved' "$tmp/mutant-diagnostics"; then
   pass "mutation rejected: transient recovery requires the bounded retry"
+else
+  fail "one-shot mutant failed without exhausting its single attempt: $(tail -1 "$tmp/mutant-diagnostics")"
 fi
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }

@@ -128,9 +128,9 @@ def audit(repository, api=github):
         path = f"repos/{repository}/environments/{name}"
         environment = api(path)[0]
         policy = environment.get("deployment_branch_policy")
-        if (environment.get("name") != name
-                or type(environment.get("id")) is not int or environment["id"] <= 0
-                or not isinstance(policy, dict)
+        if environment.get("name") != name or type(environment.get("id")) is not int or environment["id"] <= 0:
+            raise ValueError(f"{name} environment identity is unavailable")
+        if (not isinstance(policy, dict)
                 or set(policy) != {"protected_branches", "custom_branch_policies"}
                 or policy["protected_branches"] is not False
                 or policy["custom_branch_policies"] is not True):

@@ -54,6 +54,9 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
         self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+        # jq -e exits 1 only when the comparison itself is false; an expression
+        # error exits 3 or 5 and would otherwise read as a rejection.
+        self.assertEqual((rejected.returncode, rejected.stdout, rejected.stderr), (1, "false\n", ""))
 
 
 if __name__ == "__main__":

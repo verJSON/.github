@@ -5,6 +5,7 @@ from copy import deepcopy
 from hashlib import sha256, sha512
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
+import importlib.util
 import io
 import json
 import os
@@ -21,6 +22,14 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# The npm majors whose credential isolation is verified; node-release-credential-isolation
+# pins the acquisition guard to accept exactly these.
+_NPM_HARNESS_SPEC = importlib.util.spec_from_file_location(
+    "node_release_credential_isolation", ROOT / "scripts/node-release-credential-isolation.test.py",
+)
+_npm_harness = importlib.util.module_from_spec(_NPM_HARNESS_SPEC)
+_NPM_HARNESS_SPEC.loader.exec_module(_npm_harness)
+SUPPORTED_NPM_MAJORS = frozenset(_npm_harness.SUPPORTED_NPM_RELEASES)
 PROJECT_NAME = "release-credential-boundary-fixture"
 PACKAGE_NAME = "@verjson/credential-boundary-fixture"
 PACKAGE_VERSION = "1.0.0"
@@ -1031,10 +1040,18 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                     timeout=60,
                 )
 
+            npm_version = subprocess.run(
+                ["npm", "--version"], cwd=workspace, env=job_environment,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            npm_release = re.fullmatch(r"([0-9]+)\.[0-9]+\.[0-9]+", npm_version)
+            self.assertIsNotNone(npm_release, f"npm reports an unparsable version {npm_version!r}")
             acquired = run_step(
                 acquisition,
                 {"NODE_AUTH_TOKEN": PACKAGE_TOKEN, "PRIVATE_PACKAGE_REGISTRY": origin},
             )
+            if int(npm_release.group(1)) not in SUPPORTED_NPM_MAJORS:
+                self.assert_unsupported_npm_refused(npm_version, acquired, authorizations, workspace, marker)
             self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
             self.assertFalse((workspace / "node_modules").exists(), "credentialed acquisition built a tree")
             self.assertFalse(marker.exists(), "package lifecycle code ran during credentialed acquisition")
@@ -1055,6 +1072,27 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
             self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
             self.assertTrue(marker.exists(), "npm rebuild did not restore dependency lifecycle execution")
             self.assertEqual(marker.read_text(encoding="utf-8"), "")
+
+    def assert_unsupported_npm_refused(self, npm_version, acquired, authorizations, workspace, marker):
+        """The guard must refuse an unverified npm before any credentialed request; then skip."""
+        self.assertNotEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
+        self.assertIn(
+            f"::error::npm {npm_version} has no verified credential-isolation contract",
+            acquired.stdout,
+        )
+        self.assertEqual(authorizations, [], "an unverified npm sent the package credential")
+        self.assertFalse((workspace / "node_modules").exists(), "an unverified npm built a tree")
+        self.assertFalse(marker.exists(), "package lifecycle code ran under an unverified npm")
+        reason = (
+            f"npm {npm_version} is outside the verified credential-isolation majors "
+            f"{sorted(SUPPORTED_NPM_MAJORS)}; the acquisition guard refused it, so the "
+            "tokenless install and lifecycle path was not exercised"
+        )
+        # Actions must exercise the whole path: a runner image that moves npm off a
+        # verified major fails here rather than silently skipping the boundary.
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            self.fail(reason)
+        self.skipTest(reason)
 
 
 if __name__ == "__main__":

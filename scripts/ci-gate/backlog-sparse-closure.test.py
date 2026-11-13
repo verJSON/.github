@@ -47,18 +47,30 @@ CONVERTED = {
     ("release-app-canary.yml", "canary"),
     ("rework-reconcile.yml", "reconcile"),
 }
+CAPABILITY_FLOORS = "config/capability-floors.json"
+CAPABILITY_FLOOR_CONSUMERS = "config/capability-floor-consumers.json"
+
+
+def capability_floor_generators() -> set[str]:
+    """Every generator the two capability-floor configs name.
+
+    The audit and discovery both reject a config whose generator is not a file
+    in their checkout, so registering a generator without checking it out
+    breaks the observe job (#2000). Derived from the configs, never listed, so
+    a new registration cannot pass this test while the job's list lags.
+    """
+    floors = json.loads((ROOT / CAPABILITY_FLOORS).read_text(encoding="utf-8"))
+    consumers = json.loads((ROOT / CAPABILITY_FLOOR_CONSUMERS).read_text(encoding="utf-8"))
+    generators = {generator for capability in floors["capabilities"] for generator in capability["generators"]}
+    return generators | {
+        caller["generator"] for consumer in consumers["consumers"] for caller in consumer["callers"]
+    }
+
+
 # Data the programs read by a computed path, which no static rule derives;
 # proven present by running each job's commands in a sparse checkout (#1827).
 DATA = {
-    ("capability-floor-observe.yml", "observe"): {
-        "config/capability-floor-consumers.json",
-        "config/capability-floors.json",
-        "scripts/gen-ai-review-caller.sh",
-        "scripts/gen-ai-review-label-rearm-caller.sh",
-        "scripts/gen-changelog-caller.sh",
-        "scripts/gen-gate-rearm-caller.sh",
-        "scripts/gen-privileged-merge-caller.sh",
-    },
+    ("capability-floor-observe.yml", "observe"): {CAPABILITY_FLOORS, CAPABILITY_FLOOR_CONSUMERS} | capability_floor_generators(),
     ("rework-reconcile.yml", "reconcile"): {".telemetry/rework-thresholds.json"},
 }
 SHELL_SIBLING = re.compile(r'(?:\$here|\$\{here\}|\$\(dirname "\$0"\)|\$\(dirname \$0\))/([A-Za-z0-9_.-]+)')
