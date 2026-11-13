@@ -4814,9 +4814,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "6354caaa4e23dd2709191e7ad5d0ce9afda32ceeddb4fd71a3a82e8853b3e8d2",
-    "release-artifact": "27a167834373271cf0f7dced6dbf52a43fdafe718f2900291933805d394786c0",
-    "release-snapshot": "27a167834373271cf0f7dced6dbf52a43fdafe718f2900291933805d394786c0",
+    "release-node": "a4cef47dfa57a0a2b2aa410d3037d9574bc92d2df08beebf53ce10120745a056",
+    "release-artifact": "6d8c10b98aa58bd7f0d6b3255a278f0e9a0d027721ef952b4dffcc576b2424c5",
+    "release-snapshot": "6d8c10b98aa58bd7f0d6b3255a278f0e9a0d027721ef952b4dffcc576b2424c5",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
