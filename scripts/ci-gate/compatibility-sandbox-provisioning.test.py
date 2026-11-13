@@ -756,10 +756,20 @@ def validate_root_supervisor_boundary(source):
       return "${FIXTURE_PRODUCER_STATUS:-0}"
     }'''
 
-    def python_source(data, status, delay=0):
+    def python_source(data, status, observation_path=None):
+        wait_for_observation = ""
+        if observation_path is not None:
+            wait_for_observation = (
+                f"_observed = {str(observation_path)!r}\n"
+                "_deadline = time.monotonic() + 5\n"
+                "while not os.path.exists(_observed):\n"
+                "    if time.monotonic() >= _deadline:\n"
+                "        raise RuntimeError('attacker did not observe verifier child')\n"
+                "    time.sleep(0.01)\n"
+            )
         return (
-            "import sys, time\n"
-            f"time.sleep({delay!r})\n"
+            "import os, sys, time\n"
+            f"{wait_for_observation}"
             f"sys.stdout.buffer.write({data!r})\n"
             "sys.stdout.buffer.flush()\n"
             f"raise SystemExit({status})"
@@ -776,14 +786,17 @@ def validate_root_supervisor_boundary(source):
         attacker=False,
         source_override=None,
     ):
-        fixture_source = source_override or python_source(data, status, 0.15 if attacker else 0)
-        if attacker:
-            fixture_source += "\n# VERJSON_SUPERVISOR_FD_INJECTION_CANARY"
-        fixture_digest = hashlib.sha256((fixture_source + "\n").encode("utf-8")).hexdigest()
-        selected_verify = selected_verify.replace(production_digest.group(1), fixture_digest)
         with tempfile.TemporaryDirectory(prefix="verjson-supervisor-boundary-") as fixture:
             runner_temp = pathlib.Path(fixture) / "runner-temp"
             runner_temp.mkdir(mode=0o700)
+            attacker_observed = runner_temp / "attacker-observed"
+            fixture_source = source_override or python_source(
+                data, status, attacker_observed if attacker else None
+            )
+            if attacker:
+                fixture_source += "\n# VERJSON_SUPERVISOR_FD_INJECTION_CANARY"
+            fixture_digest = hashlib.sha256((fixture_source + "\n").encode("utf-8")).hexdigest()
+            selected_verify = selected_verify.replace(production_digest.group(1), fixture_digest)
             stop = threading.Event()
             attacker_error = []
             fd_targets_seen = []
@@ -811,20 +824,27 @@ def validate_root_supervisor_boundary(source):
                         for process_dir in pathlib.Path("/proc").glob("[0-9]*"):
                             try:
                                 command = (process_dir / "cmdline").read_bytes()
-                                if b"VERJSON_SUPERVISOR_FD_INJECTION_CANARY" not in command:
+                                if (
+                                    b"VERJSON_SUPERVISOR_FD_INJECTION_CANARY" not in command
+                                    or os.fsencode(attacker_observed) not in command
+                                ):
                                     continue
                                 fd_targets_seen.append(process_dir.name)
-                                descriptor = os.open(
-                                    process_dir / "fd/0",
-                                    os.O_WRONLY | os.O_NONBLOCK,
-                                )
                                 try:
-                                    os.write(
-                                        descriptor,
-                                        b'import sys; print("b" * 64); sys.exit(0)\n',
+                                    descriptor = os.open(
+                                        process_dir / "fd/0",
+                                        os.O_WRONLY | os.O_NONBLOCK,
                                     )
-                                finally:
-                                    os.close(descriptor)
+                                    try:
+                                        os.write(
+                                            descriptor,
+                                            b'import sys; print("b" * 64); sys.exit(0)\n',
+                                        )
+                                    finally:
+                                        os.close(descriptor)
+                                except (OSError, PermissionError):
+                                    pass
+                                attacker_observed.touch()
                             except (OSError, PermissionError):
                                 pass
                 except BaseException as error:
