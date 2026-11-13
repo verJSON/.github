@@ -73,8 +73,6 @@ exception as a release fix.
 
 ## Active Issues / Areas for Improvement
 
-- [#2064](https://github.com/VerJSON/.github/issues/2064) — Blank release dispatches need an actionable stated-head error and clearer `expected_head` form text; open.
-
 Each entry states the concrete fact and how/when it was last verified — a live re-check,
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
