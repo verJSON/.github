@@ -61,9 +61,14 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
     def test_reviewed_profile_advances_stale_noble_library_pins(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
 
+        self.assertEqual(profile["packages"]["libc-bin"]["version"], "2.39-0ubuntu8.12")
         self.assertEqual(profile["packages"]["libc6"]["version"], "2.39-0ubuntu8.12")
         self.assertEqual(
             profile["packages"]["libglib2.0-0t64"]["version"],
+            "2.80.0-6ubuntu3.10",
+        )
+        self.assertEqual(
+            profile["packages"]["libglib2.0-data"]["version"],
             "2.80.0-6ubuntu3.10",
         )
 
@@ -116,6 +121,23 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             with self.subTest(unsafe_plan=unsafe_plan):
                 with self.assertRaises(playwright_profile.PlaywrightProfileError):
                     playwright_profile.parse_install_plan(unsafe_plan, profile)
+
+    def test_apt_plan_accepts_reviewed_companion_package_upgrades(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        plan = (
+            "Inst libc-bin (2.39-0ubuntu8.12 Ubuntu:24.04/noble-security)\n"
+            "Inst libglib2.0-data (2.80.0-6ubuntu3.10 Ubuntu:24.04/noble-updates)\n"
+        )
+
+        planned = playwright_profile.parse_install_plan(plan, profile)
+
+        self.assertEqual(
+            planned,
+            {
+                ("libc-bin", "amd64"): "2.39-0ubuntu8.12",
+                ("libglib2.0-data", "all"): "2.80.0-6ubuntu3.10",
+            },
+        )
 
     def test_apt_plan_accepts_empty_simulation_annotations(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
@@ -1305,6 +1327,13 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                     ):
                         playwright_profile.cleanup(receipt_path, expected_identity)
             self.assertEqual(receipt_path.read_text(encoding="utf-8"), "replacement receipt")
+
+    def test_cleanup_receipt_identity_rejects_non_ascii_digits(self) -> None:
+        with self.assertRaisesRegex(
+            playwright_profile.PlaywrightProfileError,
+            "^Playwright cleanup requires an invocation receipt identity$",
+        ):
+            playwright_profile._parse_expected_receipt_identity("١:٢")
 
     def test_trusted_command_timeout_kills_its_descendant_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

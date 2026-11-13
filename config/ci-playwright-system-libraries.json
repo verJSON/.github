@@ -37,7 +37,7 @@
         "fonts-freefont-ttf"
       ],
       "id": "playwright-chromium-1.63.0-ubuntu-24.04-amd64",
-      "packageManifestSha256": "3d823cf7faea062bf58125d980508e84ff6bb14b44d5472883c1954446829de5",
+      "packageManifestSha256": "677db569301664a1615f81941f982e8f4162accff4623127e7b32464c3d43698",
       "packages": [
         {
           "architecture": "all",
@@ -257,6 +257,14 @@
         },
         {
           "architecture": "amd64",
+          "filename": "pool/main/g/glibc/libc-bin_2.39-0ubuntu8.12_amd64.deb",
+          "package": "libc-bin",
+          "sha256": "22f0393621e72ed1b53d228ee332180269182b5445761c7d7b74f5cba75a1dd6",
+          "size": 681714,
+          "version": "2.39-0ubuntu8.12"
+        },
+        {
+          "architecture": "amd64",
           "filename": "pool/main/g/glibc/libc6_2.39-0ubuntu8.12_amd64.deb",
           "package": "libc6",
           "sha256": "d821b41fc59cb4978ecd53bc83e5c964ac15d305c8d2ac4c8a35aebe55010fb9",
@@ -461,6 +469,14 @@
           "package": "libglib2.0-0t64",
           "sha256": "ff1b650f655b36dfe202fdbae6bb02b363c7257b6dd23e4f95ab61f716190df3",
           "size": 1547558,
+          "version": "2.80.0-6ubuntu3.10"
+        },
+        {
+          "architecture": "all",
+          "filename": "pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu3.10_all.deb",
+          "package": "libglib2.0-data",
+          "sha256": "f196e280e4286f6dfc5ddaaf8c09cc6e8502e0de77619385e3fde19ea2739122",
+          "size": 50240,
           "version": "2.80.0-6ubuntu3.10"
         },
         {
