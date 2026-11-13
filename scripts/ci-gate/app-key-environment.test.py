@@ -663,9 +663,13 @@ class AppKeyRoleManifestTests(unittest.TestCase):
         cls.manifest = frozen(audit.load_roles())
         cls.bindings = frozen(workflow_bindings(ROOT / ".github/workflows"))
 
-    def test_manifest_and_workflows_declare_exactly_the_same_app_keys(self):
-        self.assertEqual({entry["secret"] for entry in self.manifest},
-                         {binding["secret"] for binding in self.bindings})
+    def test_workflow_keys_match_manifest_except_held_merge_key(self):
+        declared = {entry["secret"] for entry in self.manifest}
+        bound = {binding["secret"] for binding in self.bindings}
+        # Older pinned callers still use this key, so it remains in the audit.
+        self.assertIn("MERGE_APP_PRIVATE_KEY", declared)
+        self.assertNotIn("MERGE_APP_PRIVATE_KEY", bound)
+        self.assertEqual(declared - {"MERGE_APP_PRIVATE_KEY"}, bound)
 
     def test_every_confined_binding_declares_its_declared_environment(self):
         declared = {entry["secret"]: entry for entry in self.manifest}

@@ -47,7 +47,9 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 # The Playwright system-library profile (#1875) adds three guards in both the
 # canonical and generated protected workflows: its JOB_WORKFLOW_SHA fetch pin
 # and the receipt_identity and PLAYWRIGHT_STATE_IDENTITY device:inode checks.
-GUARD_COUNT = 534
+# The terminal hold removes the merge App client-ID and successful-merge
+# artifact-ID guards along with their credential and cleanup paths (#1956).
+GUARD_COUNT = 532
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the

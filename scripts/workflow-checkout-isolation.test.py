@@ -250,7 +250,7 @@ def main() -> int:
         trust_references = validate_sparse_trust_references(
             {WORKFLOWS / "ai-privileged-merge.yml": documents[WORKFLOWS / "ai-privileged-merge.yml"]}
         )
-        require(trust_references >= 5, "ai-privileged-merge.yml trust references were not examined")
+        require(trust_references >= 4, "ai-privileged-merge.yml trust references were not examined")
         validate_sparse_trust_references(documents)
     except ContractError as error:
         print(f"FAIL - repository checkout isolation: {error}")

@@ -25,6 +25,7 @@ Reverse-chronological index of org-level decisions.
 | [0252](0252-exclude-actions-paused-repos-from-required-checks/README.md) | 2026-11-03 | Exclude Actions-paused repositories from required-check rulesets |
 | [0251](0251-hold-unprotected-bootstrap-caller-delivery/README.md) | 2026-10-31 | Hold unprotected bootstrap caller delivery |
 | [0250](0250-offline-snapshot-receipt-inspection/README.md) | 2026-10-29 | Propose offline snapshot receipt inspection |
+| [0249](0249-temporary-autonomous-merge-hold/README.md) | 2026-10-29 | Temporarily hold autonomous terminal merges |
 | [0247](0247-portable-codeowners/README.md) | 2026-10-28 | Portable generated CODEOWNERS |
 | [0244](0244-manually-dispatched-fragment-derived-release/README.md) | 2026-10-28 | Derive manually dispatched release versions from fragments |
 | [0243](0243-agent-authored-changelog-context/README.md) | 2026-10-27 | Dependency updates require agent-authored changelog context |
