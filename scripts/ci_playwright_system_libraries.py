@@ -1416,7 +1416,9 @@ def _parse_control_stanza(data: bytes) -> dict[str, str]:
     return fields
 
 
-def _read_package_indexes(paths: dict[str, Path]) -> dict[tuple[str, str, str], dict[str, Any]]:
+def _read_package_indexes(
+    paths: dict[str, Path], relevant_packages: set[str]
+) -> dict[tuple[str, str, str], dict[str, Any]]:
     options = _apt_options(paths)
     apt_environment = _apt_environment(paths)
     raw_targets = _run(
@@ -1454,7 +1456,9 @@ def _read_package_indexes(paths: dict[str, Path]) -> dict[tuple[str, str, str], 
                 continue
             fields = _parse_control_stanza(stanza)
             required = ("Package", "Version", "Architecture", "Size", "SHA256", "Filename")
-            if any(field not in fields for field in required):
+            if fields.get("Package") not in relevant_packages or any(
+                field not in fields for field in required
+            ):
                 continue
             try:
                 size = int(fields["Size"])
@@ -1966,9 +1970,12 @@ def provision(
         _reject_dpkg_install_plan(planned)
         if require_nonempty_plan and not planned:
             raise PlaywrightProfileError("hosted acceptance requires a nonempty exact package-install plan")
-        indexes = _read_package_indexes(paths)
-        _validate_signed_metadata(indexes, planned, profile)
         needrestart = snapshot["fragments"].get("needrestart")
+        relevant_packages = set(profile["packages"])
+        if needrestart is not None:
+            relevant_packages.add("needrestart")
+        indexes = _read_package_indexes(paths, relevant_packages)
+        _validate_signed_metadata(indexes, planned, profile)
         if needrestart is not None:
             _authenticate_needrestart_fragment(root, needrestart, indexes, options, apt_environment)
         config_view = _make_dpkg_config_view(root, snapshot, suppress_needrestart)

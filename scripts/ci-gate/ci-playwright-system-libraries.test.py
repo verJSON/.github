@@ -1646,7 +1646,29 @@ class SupplyChainGuardTests(unittest.TestCase):
                     playwright_profile.PlaywrightProfileError,
                     "trusted apt indexes disagree on package metadata for example:amd64=1",
                 ):
-                    playwright_profile._read_package_indexes({"lists": lists})
+                    playwright_profile._read_package_indexes({"lists": lists}, {"example"})
+
+    def test_unrelated_signed_index_conflict_does_not_block_pinned_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            lists = Path(temporary_directory)
+            index = lists / "packages"
+            index.touch()
+            stanza = (
+                b"Package: ocl-icd-dev\nVersion: 2.3.2-1build1\nArchitecture: amd64\n"
+                b"Size: 10\nSHA256: " + b"a" * 64 + b"\nFilename: pool/ocl-icd-dev.deb\n"
+            )
+            conflicting = stanza.replace(b"a" * 64, b"b" * 64)
+
+            def read_index(argv: list[str], **_kwargs: Any) -> bytes:
+                return f"{index}\n".encode() if "indextargets" in argv else stanza + b"\n" + conflicting
+
+            with patch.object(playwright_profile, "_apt_options", return_value=[]), patch.object(
+                playwright_profile, "_apt_environment", return_value={}
+            ), patch.object(playwright_profile, "_run", side_effect=read_index):
+                self.assertEqual(
+                    playwright_profile._read_package_indexes({"lists": lists}, {"xvfb", "needrestart"}),
+                    {},
+                )
 
     def test_signed_index_record_that_differs_from_the_pin_is_refused(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
