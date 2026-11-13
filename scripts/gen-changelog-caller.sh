@@ -1119,7 +1119,7 @@ release_head_binding_step=$(cat <<'EOF'
                 exit 2
               fi
               gh api "repos/VerJSON/.github/contents/scripts/changelog.py?ref=$2" --jq .content |
-                python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' \
+                python3 -I -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' \
                   >"$preview_dir/changelog.py"
               shift 2
               python3 -I "$preview_dir/changelog.py" release-plan \
