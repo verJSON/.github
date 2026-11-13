@@ -46,7 +46,9 @@ def decode_receipt(data: bytes) -> dict:
     try:
         receipt = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
                              parse_constant=lambda _: (_ for _ in ()).throw(ReceiptError("invalid number")))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except ReceiptError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise ReceiptError("receipt is invalid JSON") from exc
     if not isinstance(receipt, dict) or set(receipt) != _FIELDS:
         raise ReceiptError("receipt fields are invalid")

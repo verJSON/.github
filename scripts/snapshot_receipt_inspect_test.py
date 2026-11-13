@@ -191,5 +191,12 @@ class SnapshotReceiptInspectionTest(unittest.TestCase):
             decode_receipt(b"{" * (16 * 1024 + 1))
 
 
+    def test_oversized_json_integer_reports_receipt_error(self):
+        malformed = b'{"schemaVersion":' + b"9" * 5000 + b"}"
+
+        with self.assertRaisesRegex(ReceiptError, "receipt is invalid JSON"):
+            decode_receipt(malformed)
+
+
 if __name__ == "__main__":
     unittest.main()
