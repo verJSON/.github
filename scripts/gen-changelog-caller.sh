@@ -4814,9 +4814,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "a4cef47dfa57a0a2b2aa410d3037d9574bc92d2df08beebf53ce10120745a056",
-    "release-artifact": "6d8c10b98aa58bd7f0d6b3255a278f0e9a0d027721ef952b4dffcc576b2424c5",
-    "release-snapshot": "6d8c10b98aa58bd7f0d6b3255a278f0e9a0d027721ef952b4dffcc576b2424c5",
+    "release-node": "c116111a9e9e3a3601eca49a5415dec103739430876d30e0f0b26ff8d62b0896",
+    "release-artifact": "40169cc4109c06e08d5ce356f20c5c387fdd7b7d3c2913eb517e9a15a307f4c9",
+    "release-snapshot": "40169cc4109c06e08d5ce356f20c5c387fdd7b7d3c2913eb517e9a15a307f4c9",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -5935,6 +5935,15 @@ for step in verification_job_steps:
     action_inputs = step_mapping_values(step, "with") if "with" in fields else {}
     if ("env" in fields and environment is None) or ("with" in fields and action_inputs is None):
         problems.append("cannot safely inspect pre-credential verify-step settings (#1717)")
+    if environment is not None and "CONTRACT_REF" in environment:
+        contract_ref = os.environ.get("CONTRACT_REF", "")
+        if not contract_ref or environment["CONTRACT_REF"] != contract_ref:
+            problems.append(
+                "does not bind the release preview to its pinned contract ref (#1717)"
+            )
+        else:
+            environment = dict(environment)
+            environment["CONTRACT_REF"] = "<contract-ref>"
     if step_name == "" and fields.get("uses", "").startswith("actions/setup-node@"):
         action_inputs = None
     digest_fields = dict(fields)

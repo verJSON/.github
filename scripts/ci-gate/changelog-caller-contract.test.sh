@@ -4658,6 +4658,28 @@ text = text[:environment] + text[environment:].replace(
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
+drift_precredential_contract_ref() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+step_name = "      - name: Bind a proposer dispatch to its exact derived head\n"
+if text.count(step_name) != 1:
+    raise SystemExit("release guard step no longer matches generated output")
+start = text.index(step_name)
+end = text.find("\n      - name:", start + len(step_name))
+if end < 0:
+    end = len(text)
+step = text[start:end]
+pattern = re.compile(r"(?m)^(\s*CONTRACT_REF:\s*)[0-9a-f]{40}$")
+step, count = pattern.subn(r"\g<1>" + "deadbeef" * 5, step, count=1)
+if count != 1:
+    raise SystemExit("release guard contract ref no longer matches generated output")
+open(path, "w", encoding="utf-8").write(text[:start] + step + text[end:])
+PY
+}
 add_install_node_options() {
   python3 - "$1/.github/workflows/release.yml" <<'PY'
 import sys
@@ -5364,6 +5386,10 @@ expect_rejection --reason 'contains an unapproved verify step before credentiale
   --pass "the generated suite pins pre-credential step environment fields" \
   --fail "a pre-credential PYTHONPATH mutation was rejected for another reason" \
   "an existing release-plan step injects PYTHONPATH (#1717)" add_precredential_pythonpath
+expect_rejection --reason 'does not bind the release preview to its pinned contract ref (#1717)' \
+  --pass "the generated suite binds the release preview guard to its pinned contract ref" \
+  --fail "a changed release guard contract ref was rejected for another reason" \
+  "the release guard uses a different contract ref than the preview (#1717)" drift_precredential_contract_ref
 expect_rejection --reason 'has an unapproved package-directory assignment in Stamp the dispatched package versions (#1717)' \
   --pass "the generated suite pins package directories in the version-stamp step" \
   --fail "an altered version-stamp package directory was rejected for another reason" \
