@@ -8,8 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / ".github/workflows/node-ci.yml"
 TARGET = ROOT / ".github/workflows/node-ci-protected.yml"
-MAX_SOURCE_BYTES = 480_000
-MAX_OUTPUT_BYTES = 480_000
+# Growth tripwires, not platform limits: each sits a few KiB above the largest
+# reviewed source or output, so crossing one is a review point (ADR 0238).
+MAX_SOURCE_BYTES = 490_000
+MAX_OUTPUT_BYTES = 490_000
 
 CREDENTIAL_ENV_KEYS = (
     "GH_TOKEN",
@@ -1952,6 +1954,8 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                           postgres_state_file,
                           runner_temp=runner_temp,
                       )
+                  if playwright_profile_module is not None:
+                      playwright_profile_module.verify_runtime(playwright_profile_name, playwright_state_file)
                   try:
                       received_signal = host_signals.poll()
                       if received_signal is not None:
