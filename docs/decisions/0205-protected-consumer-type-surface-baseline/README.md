@@ -4,6 +4,7 @@
 - **Issue:** [Verjson/.github#1575](https://github.com/Verjson/.github/issues/1575)
 - **Category:** package credentials / required-workflow provenance — **sensitive class**
 - **Status:** Accepted
+- **Recovery exception:** [ADR 0262](../0262-recover-deleted-protected-type-surface-baseline/README.md) supersedes the base-only rule only after retention removes the declared stable release.
 
 ## Context
 
