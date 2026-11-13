@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -290,7 +291,7 @@ def generated_job_expectations(contract_test: str) -> dict[str, str]:
 
 
 def contract_test_constant(text: str, name: str) -> str:
-    match = re.search(rf"^{name}='(?P<value>[^']*)'$", text, re.MULTILINE)
+    match = re.search(rf"^{name}=(?P<quote>['\"])(?P<value>[^'\"]*)(?P=quote)$", text, re.MULTILINE)
     if match is None:
         raise AssertionError(f"the generated contract test does not declare {name}")
     return match["value"]
@@ -406,7 +407,12 @@ class GeneratorPinManager(unittest.TestCase):
             **generated_job_expectations(contract_test),
             **{
                 name: contract_test_constant(contract_test, name)
-                for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
+                for name in (
+                    "EXPECTED_RELEASE_CHECKOUT",
+                    "EXPECTED_RELEASE_SETUP_NODE",
+                    "EXPECTED_RELEASE_CACHE_SAVE",
+                    "EXPECTED_RELEASE_NODE_VERSION",
+                )
             },
         }
         with tempfile.TemporaryDirectory() as scratch:
@@ -547,7 +553,12 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
         cls.release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
         cls.pins = {
             name: contract_test_constant(contract_test, name)
-            for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
+            for name in (
+                "EXPECTED_RELEASE_CHECKOUT",
+                "EXPECTED_RELEASE_SETUP_NODE",
+                "EXPECTED_RELEASE_CACHE_SAVE",
+                "EXPECTED_RELEASE_NODE_VERSION",
+            )
         }
         # The whole jobs the emitted suite pins (ADR 0099).
         cls.job_expectations = generated_job_expectations(contract_test)
@@ -588,6 +599,19 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             with self.subTest(mode=mode):
                 result = self.check(workflow)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_unapproved_verification_body_is_rejected_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            marker = Path(scratch) / "unapproved-body-executed"
+            workflow = self.workflows["release-snapshot"]
+            anchor = '            echo "Running this repository\'s scripts/release-verify.sh"'
+            self.assertEqual(workflow.count(anchor), 1)
+            mutated = workflow.replace(anchor, f"            touch {shlex.quote(str(marker))}\n{anchor}")
+
+            result = self.check(mutated)
+
+            self.assert_rejected(result, "does not match the approved release verification script")
+            self.assertFalse(marker.exists(), "the unapproved verification body was executed")
 
     def test_a_verify_checkout_moved_off_its_declared_commit_is_rejected(self) -> None:
         for mode, workflow in self.workflows.items():

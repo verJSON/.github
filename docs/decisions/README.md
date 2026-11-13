@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0262](0262-recover-deleted-protected-type-surface-baseline/README.md) | 2026-11-13 | Recover a deleted protected type-surface baseline through a declaration-only PR |
 | [0261](0261-generated-container-candidate-callers-defer-drafts/README.md) | 2026-11-12 | Generated container-candidate callers skip drafts and cancel only on new commits |
 | [0260](0260-native-merge-admission-through-a-producer-posted-check/README.md) | 2026-11-12 | Native merge admission through a producer-posted `merge-admission` check |
 | [0259](0259-stage-locked-prisma-engine-outside-offline-sandbox/README.md) | 2026-11-10 | Stage the locked Prisma schema engine outside the offline candidate sandbox |
@@ -22,6 +23,7 @@ Reverse-chronological index of org-level decisions.
 | [0254](0254-audit-recognizes-the-main-protection-suspension/README.md) | 2026-11-03 | The arm audit recognizes the main-protection suspension as a reviewed state |
 | [0253](0253-generated-node-ci-callers-defer-drafts/README.md) | 2026-11-03 | Generated Node CI callers skip drafts and cancel only on new commits |
 | [0252](0252-exclude-actions-paused-repos-from-required-checks/README.md) | 2026-11-03 | Exclude Actions-paused repositories from required-check rulesets |
+| [0250](0250-offline-snapshot-receipt-inspection/README.md) | 2026-10-29 | Propose offline snapshot receipt inspection |
 | [0247](0247-portable-codeowners/README.md) | 2026-10-28 | Portable generated CODEOWNERS |
 | [0244](0244-manually-dispatched-fragment-derived-release/README.md) | 2026-10-28 | Derive manually dispatched release versions from fragments |
 | [0243](0243-agent-authored-changelog-context/README.md) | 2026-10-27 | Dependency updates require agent-authored changelog context |

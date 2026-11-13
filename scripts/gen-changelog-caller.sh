@@ -6189,7 +6189,7 @@ PACKAGE_LESS_DISPATCH_EXPRESSIONS = {
 def package_less_runner_environment(search_path, runner_temp, tool_cache):
     """What the runner gives every verify step; the host's shell startup is not part of it."""
     environment = {
-        key: value for key, value in os.environ.items() if key not in ("BASH_ENV", "ENV")
+        key: os.environ[key] for key in ("LANG", "LC_ALL") if key in os.environ
     }
     environment.update(
         PATH=search_path, RUNNER_TEMP=runner_temp, VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
@@ -6339,7 +6339,31 @@ def check_package_less_verification(steps):
     print("ok - %s gives a package-less verification hook the configured Node %s (#1906)" % (path, expected))
 
 
-if None not in verification_job_steps:
+def approved_package_less_body(step, approved):
+    body = run_body(step)
+    return (
+        body is not None
+        and release_mode in approved
+        and hashlib.sha256(body.encode()).hexdigest() == approved[release_mode]
+    )
+
+
+if (
+    None not in verification_job_steps
+    and len(verification_runtime_steps) == 1
+    and len(verification_steps) == 1
+    and verification_runtime_fields is not None
+    and set(verification_runtime_fields) == {"name", "id", "if", "shell", "run"}
+    and verification_fields is not None
+    and verification_fields.get("shell") == "/bin/bash --noprofile --norc -e -o pipefail {0}"
+    and step_mapping_values(verification_steps[0], "env") == EXPECTED_RELEASE_VERIFICATION_ENV
+    and approved_package_less_body(
+        verification_runtime_steps[0], APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256
+    )
+    and approved_package_less_body(
+        verification_steps[0], APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256
+    )
+):
     check_package_less_verification(verification_job_steps)
 
 for problem in problems:

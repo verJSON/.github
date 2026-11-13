@@ -7068,11 +7068,9 @@ assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snaps
 assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snapshot-late-path-capture \
   move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
 
-# The emitted suite runs each release caller's verify job on a package-less
-# tree whose executable scripts/release-verify.sh runs on Node (#1906). Each
-# mutation below also moves the pinned pre-credential or verification digest,
-# so its case requires the package-less check's own reason, which the suite
-# reports beside the digest's.
+# The emitted suite runs approved verify bodies on a package-less tree whose
+# executable scripts/release-verify.sh runs on Node (#1906). Mutated scripts
+# and verification environments are rejected before the dynamic check runs.
 mutate_snapshot_release() { # mutate_snapshot_release <adopter> <old> <new>
   python3 - "$1/.github/workflows/release.yml" "$2" "$3" <<'PY'
 import sys
@@ -7127,6 +7125,8 @@ PY
 expect_release_mode_rejection release-snapshot \
   "release-snapshot setup-node after the runtime capture (#1906)" install_node_after_runtime_capture \
   'does not give a package-less verification hook the configured Node 24 (#1906)'
+# Changing the no-hook branch to succeed must invalidate the approved body.
+# The checker rejects that body before trying the altered branch.
 pass_package_less_tree_without_hook() {
   mutate_snapshot_release "$1" \
     '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
@@ -7138,10 +7138,9 @@ pass_package_less_tree_without_hook() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot passing a package-less tree without a verification hook (#1906)" pass_package_less_tree_without_hook \
-  'lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)'
-# Failing is not refusing: a caller that runs the absent hook anyway fails on a
-# package-less tree for an incidental reason (no such file), which must not
-# count as the refusal the snapshot depends on.
+  'does not match the approved release verification script (#1717)'
+# Replacing the no-hook refusal with an attempted run also invalidates the
+# approved body, even though that run would fail for an incidental reason.
 run_absent_hook_on_package_less_tree() {
   mutate_snapshot_release "$1" \
     '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
@@ -7153,10 +7152,9 @@ run_absent_hook_on_package_less_tree() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot failing a package-less tree without its refusal (#1906)" run_absent_hook_on_package_less_tree \
-  'does not refuse a package-less tree without scripts/release-verify.sh before the snapshot (#1206)'
-# The suite runs with the step's own env:, never one the check supplies: a
-# verification PATH that does not come from the runtime capture never sees the
-# configured Node, whatever the check would have injected.
+  'does not match the approved release verification script (#1717)'
+# A fixed verification PATH differs from the approved step environment and is
+# rejected before the suite can run under it.
 verify_on_fixed_system_path() {
   mutate_snapshot_release "$1" \
     '          RELEASE_VERIFICATION_PATH: ${{ steps.release-verification-runtime.outputs.path }}
@@ -7166,8 +7164,9 @@ verify_on_fixed_system_path() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot verifying on a fixed system PATH (#1906)" verify_on_fixed_system_path \
-  'does not give a package-less verification hook the configured Node 24 (#1906)'
-# An env expression the check does not know is refused, never resolved to empty.
+  'does not isolate release verification from prior lifecycle environment (#1717)'
+# An unknown expression changes the approved environment and is rejected
+# before the checker tries to evaluate it.
 verify_with_an_unknown_expression() {
   mutate_snapshot_release "$1" \
     '          PACKAGE_VERSION: ${{ steps.release-version.outputs.package-version }}
@@ -7177,7 +7176,7 @@ verify_with_an_unknown_expression() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot verifying with an env expression the check cannot evaluate (#1906)" verify_with_an_unknown_expression \
-  'has a release verification suite env value the package-less check cannot evaluate: PACKAGE_VERSION'
+  'does not isolate release verification from prior lifecycle environment (#1717)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
 grep -Fqx "$expected_release_fallback" "$emitted" \

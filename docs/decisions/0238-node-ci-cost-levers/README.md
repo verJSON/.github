@@ -81,7 +81,7 @@ An external adopter can trade per-minute rate for wall time on a vetted size wit
 holding an old pin. The security posture of the secretless lane is unchanged: no input in this
 change touches credentials, network policy, or the sandbox. Item 5's direction is recorded
 in the 2026-10-24 amendment below; implementation remains subject to its security gates.
-Item 6 remains open and is reported on the issue.
+Item 6 is resolved by the 2026-10-28 amendment below; implementation must follow that fixed profile contract.
 
 *Annotation 2026-10-23 (#1875).* Items 5 and 6 here are this ADR's own numbering
 (build-once artifacts; sandbox system packages). They are not changes 5 and 6 of the
@@ -455,6 +455,20 @@ The reusable `ai-review-merge.yml` worker has no workflow-level concurrency or d
 - **ARB:** GO on the 1 MiB admission cap and bounded hashing; Astra and Sol converged. Fable and Opus Agent review tools were unavailable.
 The caller workflow blob at `CALLER_WORKFLOW_SHA` is rejected before extraction when its Git-reported size exceeds 1 MiB. Accepted blobs are written to a temporary file with a 30-second subprocess timeout, checked for exact byte count and successful extraction, and hashed in 64 KiB chunks. The limit bounds verifier output and hashing work; it does not claim to bound Git's internal object reconstruction or prior fetch and checkout costs. Digest comparison, path and mode checks, fallback selection, and enrollment gates are unchanged.
 
+## Amendment 2026-10-28 — Playwright system-library profile (#1875)
+
+Local package provenance for the reviewed archive key is `ubuntu-keyring` 2023.11.28.1build1: the downloaded `.deb` SHA256 is `c377ccf26964f4c206c05c0bc7adb708e031beb919bb9a0ff63af983d064cd66`; extracting its `ubuntu-archive-keyring.gpg` yielded SHA256 `80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31`. This does not verify the actual hosted runner key bytes; hosted acceptance must confirm the pinned digest before the profile is accepted. The catalog and provisioner pin that key digest. Before APT starts, the trusted provisioner checks the canonical source path, opens the key without following links, verifies its root ownership, stable file identity, and exact bytes, then copies the key into the private invocation root; the parent directories' modes are not an admission condition (2026-11-12 amendment below). APT uses only that root-owned, read-only snapshot in all `Signed-By` entries. A missing, changed, oversized, replaced, or mismatched key fails closed. A runner-image key rotation requires fresh package provenance and an explicit digest/catalog review; it must not be handled by relaxing metadata checks or copying whatever key the host provides.
+
+D2 is resolved for the fixed profile `playwright-chromium-1.63.0-ubuntu-24.04-amd64`. A trusted GitHub-hosted Ubuntu 24.04 amd64 step may install the profile’s exact Chromium system-library archives offline after validating the signed Ubuntu Noble package indexes, exact dependency plan, package versions, sizes, and SHA256 digests of every archive it installs; closure packages the image already ships at or above their pins are left in place (2026-11-12 amendment below). The catalog accepts only the fixed profile ID; callers cannot supply package names, versions, URLs, paths, or commands. The trusted step writes a root-owned receipt under `/run`, which the runner verifies immediately before the existing Bubblewrap launch. The lane’s network policy and existing read-only system mounts remain unchanged. Browser binaries and cold-cache seeding remain separate; no apt or Playwright `install-deps` command runs in the untrusted candidate. PostgreSQL profile provisioning remains a separate contract.
+
+APT receives a root-owned, non-writable `APT_CONFIG` under its private temporary root. Before APT reads configuration parts, that file redirects `Dir::Etc::Parts` to an empty private directory and `Dir::Etc::main` to `/dev/null`; the sanitized environment passes the exact file to `apt-get`, `apt-helper`, and `apt-get indextargets`, while fixed signed sources and later isolation options remain in force. Before installation, the provisioner audits `/etc/dpkg/dpkg.cfg` and the exact Noble fragment glob `/etc/dpkg/dpkg.cfg.d/[0-9A-Za-z_-]*`. The scanner opens configuration without following symlinks, checks root ownership, mode, stable file identity, and size limits, and rejects any physical line of 1023 bytes or more before comment or whitespace processing. It accepts only the narrow benign directives and hook grammar; quoted or assigned `no-debsig`, differential options, malformed syntax, and unknown directives fail closed.
+
+Every global `pre-invoke`, `post-invoke`, or `status-logger` hook fails closed except a hook in the exact `/etc/dpkg/dpkg.cfg.d/needrestart` file. That exception is admitted only after `dpkg-query` confirms the installed package identity, version, and architecture and the installed bytes match the exact file in the corresponding `.deb`, whose control identity, size, and SHA256 match the authenticated Noble package index. The installer runs in a private mount and PID namespace with a read-only copy of `/etc/dpkg` that omits only this verified fragment and a private empty read-only `HOME`. Directory snapshots compare stable identity, ownership, and mode while ignoring mutable directory counters; the complete loaded `/etc/dpkg` configuration tree and file bytes must remain unchanged on the host. Any namespace setup, descendant teardown, or cleanup failure prevents a receipt.
+
+The actual installed-state plan must be nonempty for hosted acceptance and may not install, upgrade, downgrade, or reinstall `dpkg`; this check runs before package downloads or package mutation. The reviewed closure may list `dpkg`; the guard applies only to what the actual plan would change (2026-11-12 amendment below). APT, dpkg queries, and `dpkg-deb` use one supervised subprocess path that handles SIGTERM, timeout, child-spawn registration races, and TERM-resistant descendants. No receipt is written until the child process group and private temporary state are gone and the installed package state and dpkg audit pass.
+
+Maintainer scripts from the exact archives in the reviewed closure execute as root on the trusted ephemeral GitHub-hosted runner. When dpkg upgrades an installed package, it may also invoke scripts from the prior runner-image version, so trust includes the runner image’s installed package state. The private namespace masks dpkg configuration and the private home only; it is not a general filesystem sandbox. The profile step completes before the untrusted candidate runs, uses no secrets, and preserves the lane’s existing network policy. The pre-merge acceptance job is limited to same-repository pull requests, requests only `contents: read`, selects the fixed GitHub-hosted Ubuntu 24.04 image, and records runner-image identity, the real nonempty install plan, receipt verification, host-config comparison, dpkg audit, and receipt cleanup.
+
 ## Amendment 2026-11-02 — authenticate the inner supervisor before control
 
 - **Issue:** [Verjson/.github#1966](https://github.com/Verjson/.github/issues/1966).
@@ -513,3 +527,38 @@ reused until it is reaped, so the peek and the targeted reap name the same proce
 Recording a stolen status back onto the `Popen` object was rejected: it depends on
 every reaping path remembering to forward the status, and a single omission fails open.
 `reaped` in the terminal record still counts the candidate once plus each adopted child.
+
+## Amendment 2026-11-12 — protected generator byte tripwire
+
+- **Issue:** [Verjson/.github#1875](https://github.com/Verjson/.github/issues/1875); pull request [Verjson/.github#1938](https://github.com/Verjson/.github/pull/1938).
+
+`scripts/gen-node-ci-protected.py` bounds the canonical `node-ci.yml` source and its
+generated protected twin. The 2026-10-25 build-once change set both bounds to 480,000
+bytes, about 4.5 KiB above the largest file reviewed at the time (the then 475,474-byte
+protected workflow); no platform limit was derived. Merging the Playwright profile with
+the Prisma engine staging and supervisor changes made the canonical source 483,271 bytes.
+Both bounds rise to 490,000 bytes, restoring a similar margin above the 483,271-byte
+source and the 467,757-byte protected output. The bounds remain growth tripwires:
+crossing one is a review point, not a routine bump. This raise is a labeled stopgap.
+The durable remedy is to move inline candidate-execution heredocs from the canonical
+workflow into the pinned trusted helper modules, so that per-feature workflow glue stays
+small and the files regain headroom.
+
+## Amendment 2026-11-12 — archive key parents and installed-closure pins (#1875)
+
+- **Issue:** [Verjson/.github#1875](https://github.com/Verjson/.github/issues/1875); pull request [Verjson/.github#1938](https://github.com/Verjson/.github/pull/1938).
+
+**Archive key parent directories.** Hosted acceptance failed on every head of #1938 through run 40726247539 with `Ubuntu archive signing key parent is unsafe (/usr/share, uid=0, mode=0777)`: the GitHub-hosted Ubuntu 24.04 image ships `/usr/share` world-writable, so the 2026-10-28 parent-chain mode check could never pass there. That check added no integrity. The key's bytes are pinned by SHA256 and read through a single no-follow descriptor whose type, root ownership, device/inode identity, size, and timestamps are re-checked before and after the read; only the authenticated bytes are copied into the private root-owned snapshot that APT uses. A writable parent can therefore only cause a different file to be read, and any bytes other than the pinned key fail with `Ubuntu archive signing key digest mismatch`. The parent-mode check is removed; the canonical-path, descriptor, identity, and digest checks remain. Tests cover a `0777` parent with authentic bytes (admitted) and with substituted bytes (refused for the digest).
+
+**Pin only what the plan installs.** The 2026-10-28 design requested all 148 closure packages at exact versions and required each to be installed at exactly that version. The closure is computed against an empty system, so it includes packages the hosted image already ships, such as `libc6`, `libssl3t64`, `libsystemd0`, and `zlib1g`, which the image refreshes from `noble-updates` and `noble-security` (for example `libc6` 2.39-0ubuntu8.12 in `noble-security` against the 8.9 pin). The exact design would therefore demand a downgrade of a security-patched image library, and would fail outright once a pinned version left the signed index, because the `noble-updates` and `noble-security` indexes publish only the newest version of each package.
+
+The decision:
+
+1. A closure package that dpkg reports as installed (`ii`) for the pinned architecture at a version at or above its pin, under dpkg's version ordering, is accepted as the image provides it and is not requested.
+2. Only closure packages that are missing or older than their pin are requested, each at its exact pinned version. Every row of the resulting APT plan must be a closure package at its exact pin, so a dependency that needs an unpinned version, including a newer version of an image package, fails closed. Every planned package's signed index record must equal its pin, and every downloaded archive must match the pinned size, SHA256, and control identity. The `dpkg` plan guard is unchanged.
+3. After installation, the receipt records every closure package at its actual installed version, at or above its pin; verification before the candidate launch still detects any later change.
+4. The catalog-only `Dir::State::status=/dev/null` simulation is removed. It could only succeed while every pin was still in the signed indexes. That the catalog is the complete dependency closure is a property established when the catalog is reviewed; at run time, the exact-pin plan check and the post-install closure check enforce it against the real image.
+
+Alternatives considered: keeping exact whole-closure pins (downgrades patched image libraries and decays as soon as Ubuntu publishes an update); additionally requiring each image package's installed version to appear in the signed index (refuses any image built before the newest update, because the update pockets list only the newest version, and a version string attests no bytes, since dpkg keeps no archive digest); and installing whatever the signed index offers (gives up the reviewed pin for what the profile adds). The trade-off accepted: the profile verifies what it installs and does not re-attest the runner image's own packages, which are already the trust base for the kernel, `sudo`, Python, and dpkg that run the provisioner; a package older than its pin is upgraded to the pin, never accepted.
+
+**Re-pin cadence.** A pinned version that a planned install needs disappears from the update pockets when Ubuntu supersedes it, and provisioning then fails closed with an unpinned-plan or missing-version error rather than installing anything unreviewed. Re-pin the catalog (new versions, sizes, SHA256 digests, manifest and catalog digests, re-reviewed against the signed indexes) whenever that failure appears in hosted acceptance or an adopter run, and with every Playwright profile version bump. Hosted acceptance runs on every catalog change and must pass on the ready pull request before merge. A scheduled freshness probe would report pin decay before adopters do; it is not added here, because it would widen the fixed hosted placement that ADR 0240's 2026-10-28 amendment limits to pull requests.
