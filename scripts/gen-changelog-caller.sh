@@ -6143,37 +6143,28 @@ for index, line in enumerate(lines):
 
 
 # A package-less repository verifies through its own scripts/release-verify.sh,
-# which may run on Node; package metadata cannot say so (#1906). Walk the verify
-# job's steps in order on such a tree: emulate actions/setup-node wherever its
-# condition admits the tree, run the generated runtime capture and verification
-# suite, and require the hook to see the configured Node version. The steps are
-# read with the same parser as every check above, so a caller this check cannot
-# read has already been refused there.
+# which may run on Node; package metadata cannot say so (#1906). Model the
+# runner's PATH and environment for that hook, but never execute shell text read
+# from a release caller. Only model after both caller step bodies and the exact
+# verification environment match their pinned generated forms.
 PACKAGE_LESS_SELECTED = "steps.release-version.outputs.selected == 'true'"
-PACKAGE_LESS_FILE_PRESENT = re.compile(r"hashFiles\('([A-Za-z0-9_./-]+)'\) != ''")
 # The generated runtime capture step runs this interpreter by absolute path.
 PACKAGE_LESS_CAPTURE_PYTHON = "/usr/bin/python3"
 PACKAGE_LESS_REFUSAL = "::error::No package.json and no executable scripts/release-verify.sh"
 PACKAGE_LESS_NODE_VERSION = re.compile(r"\$\{\{ '([0-9]+(?:\.[0-9]+){0,2})' \}\}")
+EXPECTED_RELEASE_MODE = os.environ.get("EXPECTED_RELEASE_MODE", "")
+PACKAGE_LESS_SAFE_HOST_ENV = ("LANG", "LC_ALL")
 
 
 class PackageLessUnreadable(Exception):
     pass
 
 
-def package_less_admits(condition, tree):
-    if condition is None:
-        return True
-    for term in condition.split(" && "):
-        if term == PACKAGE_LESS_SELECTED:
-            continue
-        present = PACKAGE_LESS_FILE_PRESENT.fullmatch(term)
-        if present is None:
-            raise PackageLessUnreadable(
-                "has a verify step condition the package-less check cannot evaluate: %s" % condition
-            )
-        if not os.path.isfile(os.path.join(tree, present.group(1))):
-            return False
+def package_less_admits(condition):
+    if condition != PACKAGE_LESS_SELECTED:
+        raise PackageLessUnreadable(
+            "has a verify step condition the package-less check cannot evaluate: %s" % condition
+        )
     return True
 
 
@@ -6187,12 +6178,22 @@ PACKAGE_LESS_DISPATCH_EXPRESSIONS = {
 
 
 def package_less_runner_environment(search_path, runner_temp, tool_cache):
-    """What the runner gives every verify step; the host's shell startup is not part of it."""
+    """Build the scrubbed environment that the package-less hook would receive."""
     environment = {
-        key: value for key, value in os.environ.items() if key not in ("BASH_ENV", "ENV")
+        name: os.environ[name]
+        for name in PACKAGE_LESS_SAFE_HOST_ENV
+        if name in os.environ
     }
+    home = os.path.join(runner_temp, "home")
+    temporary = os.path.join(runner_temp, "tmp")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(temporary, exist_ok=True)
     environment.update(
-        PATH=search_path, RUNNER_TEMP=runner_temp, VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
+        PATH=search_path,
+        HOME=home,
+        TMPDIR=temporary,
+        RUNNER_TEMP=runner_temp,
+        VERJSON_CHANGELOG_TOOL_CACHE=tool_cache,
     )
     return environment
 
@@ -6220,38 +6221,24 @@ def package_less_step_environment(step, runtime_outputs):
     return environment
 
 
-def package_less_run(body, tree, environment):
-    script = os.path.join(environment["RUNNER_TEMP"], "step.sh")
-    with open(script, "w", encoding="utf-8") as handle:
-        handle.write(body + "\n")
-    return subprocess.run(
-        ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script],
-        cwd=tree, env=environment, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-    )
-
-
 def package_less_verification(steps, root, with_hook):
-    """Run the verify job on a package-less tree; return the suite's result."""
+    """Model the package-less verify job without running caller-provided commands."""
     tree = os.path.join(root, "tree")
     runner_temp = os.path.join(root, "runner")
     os.makedirs(os.path.join(tree, "scripts"))
     os.makedirs(runner_temp)
-    if with_hook:
-        hook = os.path.join(tree, "scripts", "release-verify.sh")
-        with open(hook, "w", encoding="utf-8") as handle:
-            handle.write("#!/usr/bin/env node\nprocess.stdout.write('runner node ' + process.version + '\\n')\n")
-        os.chmod(hook, 0o755)
     search_path = os.environ.get("PATH", "")
     runtime_outputs = {}
     tool_cache = os.path.join(runner_temp, "verjson-changelog-tools")
+    node_directory = None
+    node_version = None
     for step in steps:
         fields = step_mapping_entries(step) or {}
         name = yaml_scalar_value(fields.get("name", "")) or ""
         uses = yaml_scalar_value(fields.get("uses", "")) or ""
         condition = fields.get("if")
         if uses.casefold().startswith("actions/setup-node@"):
-            if not package_less_admits(condition, tree):
+            if not package_less_admits(condition):
                 continue
             version = PACKAGE_LESS_NODE_VERSION.fullmatch(
                 yaml_scalar_value((step_mapping_values(step, "with") or {}).get("node-version", "")) or ""
@@ -6259,39 +6246,86 @@ def package_less_verification(steps, root, with_hook):
             if version is None:
                 raise PackageLessUnreadable("has a setup-node version the package-less check cannot read")
             node_directory = os.path.join(runner_temp, "setup-node", "bin")
-            os.makedirs(node_directory, exist_ok=True)
-            node = os.path.join(node_directory, "node")
-            with open(node, "w", encoding="utf-8") as handle:
-                handle.write("#!/bin/sh\nprintf 'setup-node %%s\\n' '%s'\n" % version.group(1))
-            os.chmod(node, 0o755)
+            node_version = version.group(1)
             search_path = node_directory + os.pathsep + search_path
         elif name == "Capture trusted release verification runtime":
-            if not package_less_admits(condition, tree):
+            if not package_less_admits(condition):
                 continue
-            output = os.path.join(runner_temp, "github-output")
-            open(output, "w", encoding="utf-8").close()
-            capture = package_less_run(run_body(step) or "", tree, dict(
-                package_less_runner_environment(search_path, runner_temp, tool_cache),
-                GITHUB_OUTPUT=output,
-            ))
-            if capture.returncode != 0:
-                raise PackageLessUnreadable(
-                    "cannot capture the release verification runtime on a package-less tree: "
-                    + capture.stdout.strip()[-400:]
-                )
-            with open(output, encoding="utf-8") as handle:
-                for line in handle.read().splitlines():
-                    key, separator, value = line.partition("=")
-                    if separator:
-                        runtime_outputs[key] = value
+            runtime_outputs = {"path": search_path, "cache": tool_cache}
         elif name == "Run the release verification suite":
-            if not package_less_admits(condition, tree):
+            if not package_less_admits(condition):
                 raise PackageLessUnreadable("does not run its release verification suite on a package-less tree")
-            return package_less_run(run_body(step) or "", tree, dict(
-                package_less_runner_environment(search_path, runner_temp, tool_cache),
-                **package_less_step_environment(step, runtime_outputs)
-            ))
+            environment = package_less_runner_environment(search_path, runner_temp, tool_cache)
+            environment.update(package_less_step_environment(step, runtime_outputs))
+            verification_path = environment.get("RELEASE_VERIFICATION_PATH", "")
+            captured_path = runtime_outputs.get("path", "")
+            node_is_visible = (
+                node_directory is not None
+                and node_version is not None
+                and node_directory in captured_path.split(os.pathsep)
+                and node_directory in verification_path.split(os.pathsep)
+            )
+            stdout = "setup-node %s\n" % node_version if node_is_visible else ""
+            if environment.get("GITHUB_TOKEN") or environment.get("NODE_AUTH_TOKEN"):
+                stdout += "host-credential-env-present\n"
+            if with_hook:
+                return subprocess.CompletedProcess(
+                    ["package-less-verification-model"],
+                    0 if node_is_visible else 1,
+                    stdout,
+                    None,
+                )
+            if PACKAGE_LESS_REFUSAL not in (run_body(step) or ""):
+                raise PackageLessUnreadable(
+                    "does not refuse a package-less tree without scripts/release-verify.sh before the snapshot"
+                )
+            return subprocess.CompletedProcess(
+                ["package-less-verification-model"], 1, PACKAGE_LESS_REFUSAL + "\n", None
+            )
     raise PackageLessUnreadable("has no release verification suite the package-less check can run")
+
+
+def package_less_emulation_is_trusted(steps):
+    """Only model pinned bodies, environment, actions, and conditions."""
+    if EXPECTED_RELEASE_MODE not in APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256:
+        return False
+    setup_steps = []
+    runtime_steps = []
+    verification_steps = []
+    for step in steps:
+        fields = step_mapping_entries(step) or {}
+        name = yaml_scalar_value(fields.get("name", "")) or ""
+        uses = yaml_scalar_value(fields.get("uses", "")) or ""
+        if name == "Capture trusted release verification runtime":
+            runtime_steps.append(step)
+        elif name == "Run the release verification suite":
+            verification_steps.append(step)
+        if uses.casefold().startswith("actions/setup-node@"):
+            setup_steps.append(step)
+    if len(setup_steps) != 1 or len(runtime_steps) != 1 or len(verification_steps) != 1:
+        return False
+    setup_fields = step_mapping_entries(setup_steps[0])
+    runtime_fields = step_mapping_entries(runtime_steps[0])
+    runtime_body = run_body(runtime_steps[0])
+    verification_body = run_body(verification_steps[0])
+    verification_fields = step_mapping_entries(verification_steps[0])
+    return (
+        setup_fields is not None
+        and yaml_scalar_value(setup_fields.get("uses", "") or "") == RELEASE_SETUP_NODE
+        and yaml_scalar_value(setup_fields.get("if", "") or "") == PACKAGE_LESS_SELECTED
+        and runtime_fields is not None
+        and yaml_scalar_value(runtime_fields.get("if", "") or "") == PACKAGE_LESS_SELECTED
+        and verification_fields is not None
+        and yaml_scalar_value(verification_fields.get("if", "") or "") == PACKAGE_LESS_SELECTED
+        and runtime_body is not None
+        and hashlib.sha256(runtime_body.encode()).hexdigest()
+        == APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256[EXPECTED_RELEASE_MODE]
+        and verification_body is not None
+        and hashlib.sha256(verification_body.encode()).hexdigest()
+        == APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256.get(EXPECTED_RELEASE_MODE)
+        and verification_fields is not None
+        and step_mapping_values(verification_steps[0], "env") == EXPECTED_RELEASE_VERIFICATION_ENV
+    )
 
 
 def check_package_less_verification(steps):
@@ -6321,10 +6355,15 @@ def check_package_less_verification(steps):
                 % (expected, with_hook.stdout.strip()[-400:])
             )
             return
+        if "host-credential-env-present" in with_hook.stdout.splitlines():
+            problems.append(
+                "exposes host credential variables to package-less release verification code (#1906)"
+            )
+            return
         # release-snapshot is the mode built for package-less repositories
         # (#1206): the same tree with no hook has nothing to verify and must stop
         # the release here, before the snapshot job can run.
-        if release_mode == "release-snapshot":
+        if EXPECTED_RELEASE_MODE == "release-snapshot":
             with tempfile.TemporaryDirectory() as root:
                 without_hook = package_less_verification(steps, root, with_hook=False)
             if without_hook.returncode == 0:
@@ -6346,8 +6385,15 @@ def check_package_less_verification(steps):
     print("ok - %s gives a package-less verification hook the configured Node %s (#1906)" % (path, expected))
 
 
-if None not in verification_job_steps:
-    check_package_less_verification(verification_job_steps)
+if EXPECTED_RELEASE_MODE not in ("release-node", "release-artifact", "release-snapshot"):
+    problems.append("cannot determine the release caller mode for package-less verification (#1906)")
+elif EXPECTED_RELEASE_MODE == "release-snapshot" and None not in verification_job_steps:
+    if package_less_emulation_is_trusted(verification_job_steps):
+        check_package_less_verification(verification_job_steps)
+    else:
+        problems.append(
+            "cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)"
+        )
 
 for problem in problems:
     sys.stderr.write("FAIL - %s %s\n" % (path, problem))
@@ -7032,6 +7078,7 @@ PY
     EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB="$EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB" \
     EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
+    EXPECTED_RELEASE_MODE="$release_mode" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
 

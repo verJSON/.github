@@ -186,6 +186,11 @@ else
   echo "$fails failed"
   exit 1
 fi
+package_less_node_version="$(sed -n 's/^EXPECTED_RELEASE_NODE_VERSION="\([^"]*\)"$/\1/p' "$emitted")"
+if [[ -z "$package_less_node_version" ]]; then
+  fail "generated contract test does not declare its configured Node version"
+  exit 1
+fi
 
 # Case shards skip everything between the BEGIN and END markers, so no case may
 # read anything defined there (#1736). The shard test requires BEGIN directly
@@ -7053,7 +7058,7 @@ fi
 # The check runs only inside the emitted suite's release-shape check; the
 # release-snapshot rejection cases below exercise its refusals, and this shows
 # it runs, and accepts, a discovered generated release caller (#1906).
-if grep -qE '^ok - .*/\.github/workflows/release\.yml gives a package-less verification hook the configured Node 24 \(#1906\)$' "$ADOPTER_LOG"; then
+if grep -qF "gives a package-less verification hook the configured Node $package_less_node_version (#1906)" "$ADOPTER_LOG"; then
   pass "emitted suite runs the package-less Node verification check on the release caller"
 else
   fail "emitted suite never ran the package-less Node verification check on the release caller (#1906)"
@@ -7099,14 +7104,14 @@ gate_setup_node_on_package_json() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot setup-node gated on package.json (#1906)" gate_setup_node_on_package_json \
-  'does not give a package-less verification hook the configured Node 24 (#1906)'
-# A condition the check cannot evaluate is refused, never read as true.
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
+# Changed modeled conditions are refused before any condition expression is read.
 gate_setup_node_on_package_glob() {
   set_setup_node_condition "$1" "steps.release-version.outputs.selected == 'true' && hashFiles('**/package.json') != ''"
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot setup-node gated on a glob (#1906)" gate_setup_node_on_package_glob \
-  'has a verify step condition the package-less check cannot evaluate'
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
 # Order is the property: Node installed after the runtime is captured never
 # reaches the hook, however the check happens to collect the steps.
 install_node_after_runtime_capture() {
@@ -7126,7 +7131,7 @@ PY
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot setup-node after the runtime capture (#1906)" install_node_after_runtime_capture \
-  'does not give a package-less verification hook the configured Node 24 (#1906)'
+  "does not give a package-less verification hook the configured Node $package_less_node_version (#1906)"
 pass_package_less_tree_without_hook() {
   mutate_snapshot_release "$1" \
     '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
@@ -7138,7 +7143,7 @@ pass_package_less_tree_without_hook() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot passing a package-less tree without a verification hook (#1906)" pass_package_less_tree_without_hook \
-  'lets a package-less tree without scripts/release-verify.sh pass release verification (#1206)'
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
 # Failing is not refusing: a caller that runs the absent hook anyway fails on a
 # package-less tree for an incidental reason (no such file), which must not
 # count as the refusal the snapshot depends on.
@@ -7153,7 +7158,7 @@ run_absent_hook_on_package_less_tree() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot failing a package-less tree without its refusal (#1906)" run_absent_hook_on_package_less_tree \
-  'does not refuse a package-less tree without scripts/release-verify.sh before the snapshot (#1206)'
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
 # The suite runs with the step's own env:, never one the check supplies: a
 # verification PATH that does not come from the runtime capture never sees the
 # configured Node, whatever the check would have injected.
@@ -7166,7 +7171,7 @@ verify_on_fixed_system_path() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot verifying on a fixed system PATH (#1906)" verify_on_fixed_system_path \
-  'does not give a package-less verification hook the configured Node 24 (#1906)'
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
 # An env expression the check does not know is refused, never resolved to empty.
 verify_with_an_unknown_expression() {
   mutate_snapshot_release "$1" \
@@ -7177,7 +7182,7 @@ verify_with_an_unknown_expression() {
 }
 expect_release_mode_rejection release-snapshot \
   "release-snapshot verifying with an env expression the check cannot evaluate (#1906)" verify_with_an_unknown_expression \
-  'has a release verification suite env value the package-less check cannot evaluate: PACKAGE_VERSION'
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
 grep -Fqx "$expected_release_fallback" "$emitted" \
