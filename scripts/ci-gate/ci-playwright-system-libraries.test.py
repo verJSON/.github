@@ -58,6 +58,15 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 with self.assertRaises(playwright_profile.PlaywrightProfileError):
                     playwright_profile.resolve_profile(caller_value)
 
+    def test_reviewed_profile_advances_stale_noble_library_pins(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+
+        self.assertEqual(profile["packages"]["libc6"]["version"], "2.39-0ubuntu8.12")
+        self.assertEqual(
+            profile["packages"]["libglib2.0-0t64"]["version"],
+            "2.80.0-6ubuntu3.10",
+        )
+
     def test_profile_requires_github_hosted_ubuntu_24_04_amd64(self) -> None:
         valid_os_release = {"ID": "ubuntu", "VERSION_ID": "24.04"}
 
@@ -621,13 +630,13 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
     def test_receipt_records_an_image_package_newer_than_its_pin(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         package_versions = {key: state[1] for key, state in pinned_installed_state(profile).items()}
-        package_versions[("libc6", "amd64")] = "2.39-0ubuntu8.12"
+        package_versions[("libc6", "amd64")] = "2.39-0ubuntu8.13"
 
         receipt = playwright_profile.create_receipt(PROFILE_ID, package_versions)
 
         self.assertEqual(len(receipt["packages"]), len(profile["packages"]))
         self.assertIn(
-            {"package": "libc6", "architecture": "amd64", "version": "2.39-0ubuntu8.12"},
+            {"package": "libc6", "architecture": "amd64", "version": "2.39-0ubuntu8.13"},
             receipt["packages"],
         )
         playwright_profile.verify_receipt(receipt, PROFILE_ID, package_versions)
@@ -665,12 +674,12 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
     def test_installed_closure_accepts_an_image_package_newer_than_its_pin(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         installed = pinned_installed_state(profile)
-        self.assertEqual(profile["packages"]["libc6"]["version"], "2.39-0ubuntu8.9")
-        installed[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.12")
+        self.assertEqual(profile["packages"]["libc6"]["version"], "2.39-0ubuntu8.12")
+        installed[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.13")
 
         closure = playwright_profile._installed_profile_closure(profile, installed)
 
-        self.assertEqual(closure[("libc6", "amd64")], "2.39-0ubuntu8.12")
+        self.assertEqual(closure[("libc6", "amd64")], "2.39-0ubuntu8.13")
 
     def test_installed_closure_refuses_a_missing_closure_package(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
@@ -686,7 +695,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
     def test_install_request_pins_only_packages_the_image_does_not_satisfy(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         installed = pinned_installed_state(profile)
-        installed[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.12")
+        installed[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.13")
         installed[("libnss3", "amd64")] = ("ii ", "2:3.98-1ubuntu0.2")
         del installed[("xvfb", "amd64")]
 
@@ -697,7 +706,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
     def test_provisioning_installs_only_unsatisfied_pins_and_keeps_newer_image_packages(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         before = pinned_installed_state(profile)
-        before[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.12")
+        before[("libc6", "amd64")] = ("ii ", "2.39-0ubuntu8.13")
         before[("libnss3", "amd64")] = ("ii ", "2:3.98-1ubuntu0.2")
         del before[("xvfb", "amd64")]
         after = dict(before)
@@ -757,7 +766,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
         self.assertEqual(list(install.call_args.args[0][-2:]), expected_specs)
         receipt = write_receipt.call_args.args[1]
         self.assertIn(
-            {"package": "libc6", "architecture": "amd64", "version": "2.39-0ubuntu8.12"},
+            {"package": "libc6", "architecture": "amd64", "version": "2.39-0ubuntu8.13"},
             receipt["packages"],
         )
 
@@ -844,6 +853,10 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             archive_dir = cache_dir / "archives"
             partial_dir = archive_dir / "partial"
             partial_dir.mkdir(parents=True)
+            nested_partial_dir = partial_dir / "nested"
+            nested_partial_dir.mkdir()
+            partial_entry = nested_partial_dir / "stale.part"
+            partial_entry.touch()
             archive = archive_dir / playwright_profile._apt_cache_filename(
                 package, record["version"], record["architecture"]
             )
@@ -873,7 +886,10 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 )
 
         sealed_paths = {path for action, path, _uid, _gid in events if action == "chown"}
-        self.assertEqual(sealed_paths, {cache_dir, archive_dir, partial_dir, lock, archive})
+        self.assertEqual(
+            sealed_paths,
+            {cache_dir, archive_dir, partial_dir, nested_partial_dir, partial_entry, lock, archive},
+        )
         self.assertTrue(
             all((uid, gid) == (0, 0) for action, _path, uid, gid in events if action == "chown")
         )
@@ -882,6 +898,48 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             index for index, event in enumerate(events) if event[0] == "verify"
         )
         self.assertLess(last_seal, first_archive_verification)
+
+    def test_archive_cache_sealing_failure_stops_before_archive_digest_verification(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+        record = next(iter(profile["packages"].values()))
+        package = record["package"]
+        planned = {(package, record["architecture"]): record["version"]}
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_dir = Path(temporary_directory) / "cache"
+            archive_dir = cache_dir / "archives"
+            partial_dir = archive_dir / "partial"
+            partial_dir.mkdir(parents=True)
+            partial_entry = partial_dir / "unfinished.part"
+            partial_entry.touch()
+            archive = archive_dir / playwright_profile._apt_cache_filename(
+                package, record["version"], record["architecture"]
+            )
+            archive.touch()
+
+            def fail_sealing_partial_entry(
+                path: str | os.PathLike[str],
+                _uid: int,
+                _gid: int,
+                *,
+                follow_symlinks: bool = True,
+            ) -> None:
+                del follow_symlinks
+                if Path(path) == partial_entry:
+                    raise OSError("injected partial-cache sealing failure")
+
+            with patch.object(
+                playwright_profile.os, "chown", side_effect=fail_sealing_partial_entry
+            ), patch.object(playwright_profile, "_verify_archive") as verify_archive:
+                with self.assertRaisesRegex(
+                    playwright_profile.PlaywrightProfileError,
+                    "APT archive cache could not be sealed root-owned",
+                ):
+                    playwright_profile._validate_archive_cache(
+                        {"cache": cache_dir, "archives": archive_dir}, planned, profile
+                    )
+
+            verify_archive.assert_not_called()
 
     def test_namespace_install_is_fixed_private_and_no_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1634,6 +1692,13 @@ raise SystemExit(0)
                         '[[ "${helper_copy_sha256%% *}" == "$PLAYWRIGHT_HELPER_SHA256" ]]',
                         step["run"],
                     )
+                    digest_comparison = step["run"].index(
+                        '[[ "${helper_copy_sha256%% *}" == "$PLAYWRIGHT_HELPER_SHA256" ]]'
+                    )
+                    privileged_invocation = step["run"].index(
+                        f'/usr/bin/python3 -I "$helper_copy" {command}'
+                    )
+                    self.assertLess(digest_comparison, privileged_invocation)
                     self.assertIn("trap cleanup_helper_copy EXIT", step["run"])
                     self.assertIn(
                         'sudo /usr/bin/rm -f -- "$helper_copy_dir/ci_playwright_system_libraries.py"',
@@ -1648,6 +1713,101 @@ raise SystemExit(0)
                         f'/usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" {command}',
                         step["run"],
                     )
+
+    def test_privileged_workflow_steps_refuse_a_digest_mismatch_before_running_helper(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        steps_to_run = {
+            "Provision Playwright system-library profile": "provision",
+            "Remove Playwright system-library receipt": "cleanup",
+        }
+        sudo_stub = """#!/usr/bin/env bash
+set -euo pipefail
+command="$1"
+shift
+case "$command" in
+  /usr/bin/mktemp)
+    /usr/bin/mktemp -d "$PROFILE_TEST_ROOT/helper.XXXXXX"
+    ;;
+  /usr/bin/install)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    /usr/bin/cp -- "$1" "$2"
+    /usr/bin/chmod 0500 -- "$2"
+    ;;
+  /usr/bin/sha256sum)
+    /usr/bin/sha256sum "$@"
+    ;;
+  /usr/bin/env)
+    printf '%s\\n' "$*" >> "$PRIVILEGED_EXECUTION_LOG"
+    ;;
+  /usr/bin/rm)
+    /usr/bin/rm "$@"
+    ;;
+  /usr/bin/rmdir)
+    /usr/bin/rmdir "$@"
+    ;;
+  *)
+    echo "unexpected privileged helper command: $command" >&2
+    exit 99
+    ;;
+esac
+"""
+
+        for relative_path in (
+            ".github/workflows/node-ci.yml",
+            ".github/workflows/node-ci-protected.yml",
+        ):
+            with self.subTest(workflow=relative_path):
+                workflow = yaml.safe_load(
+                    (root / relative_path).read_text(encoding="utf-8")
+                )
+                steps = workflow["jobs"]["build-test"]["steps"]
+                for step_name, command in steps_to_run.items():
+                    with self.subTest(step=step_name):
+                        step = next(item for item in steps if item.get("name") == step_name)
+                        with tempfile.TemporaryDirectory() as temporary_directory:
+                            temp_root = Path(temporary_directory)
+                            runner_temp = temp_root / "runner-temp"
+                            runner_temp.mkdir()
+                            (runner_temp / "ci_playwright_system_libraries.py").write_text(
+                                "trusted test helper\\n", encoding="utf-8"
+                            )
+                            state_file = temp_root / "receipt.json"
+                            state_file.write_text('{"receipt":"fixture"}\\n', encoding="utf-8")
+                            bin_dir = temp_root / "bin"
+                            bin_dir.mkdir()
+                            sudo_path = bin_dir / "sudo"
+                            sudo_path.write_text(sudo_stub, encoding="utf-8")
+                            sudo_path.chmod(0o700)
+                            execution_log = temp_root / "privileged-execution.log"
+                            env = {
+                                **os.environ,
+                                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                                "RUNNER_TEMP": str(runner_temp),
+                                "PROFILE_TEST_ROOT": str(temp_root),
+                                "PRIVILEGED_EXECUTION_LOG": str(execution_log),
+                                "PLAYWRIGHT_HELPER_SHA256": "0" * 64,
+                                "PLAYWRIGHT_PROFILE": PROFILE_ID,
+                                "PLAYWRIGHT_STATE_FILE": str(state_file),
+                                "PLAYWRIGHT_STATE_IDENTITY": "1:2",
+                                "RUNNER_ENVIRONMENT": "github-hosted",
+                                "RUNNER_OS": "Linux",
+                            }
+                            result = subprocess.run(
+                                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]],
+                                cwd=temp_root,
+                                env=env,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                                timeout=15,
+                            )
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn(
+                                "trusted Playwright helper changed before privileged use",
+                                result.stderr,
+                            )
+                            self.assertFalse(execution_log.exists())
 
     def test_hosted_acceptance_is_same_repository_read_only_and_path_gated(self) -> None:
         root = Path(__file__).resolve().parents[2]

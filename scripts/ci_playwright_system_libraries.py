@@ -30,8 +30,8 @@ from functools import wraps
 
 PROFILE_ID = "playwright-chromium-1.63.0-ubuntu-24.04-amd64"
 PLAYWRIGHT_VERSION = "1.63.0"
-EXPECTED_CATALOG_SHA256 = "2c4a7d73cbbd86e72b6830156fa4bc4c852bc5a6f0bfab387fc26b511c015715"
-EXPECTED_MANIFEST_SHA256 = "e20854d12666e7db8cc947158056de7b49a272d45628c9faa9d8e491b5fb8d87"
+EXPECTED_CATALOG_SHA256 = "c05b059b03b203f85a57c8612685b2e4e35c97711dfb593e174bfa290a1ef1d3"
+EXPECTED_MANIFEST_SHA256 = "3d823cf7faea062bf58125d980508e84ff6bb14b44d5472883c1954446829de5"
 STATE_SCHEMA_VERSION = 1
 MAX_PACKAGE_COUNT = 256
 MAX_PACKAGE_BYTES = 128 * 1024 * 1024
@@ -1723,11 +1723,15 @@ def _seal_archive_cache(paths: dict[str, Path]) -> None:
             raise PlaywrightProfileError("APT archive cache directory has an unsafe identity")
         os.chown(directory, 0, 0, follow_symlinks=False)
 
-    try:
-        with os.scandir(archive_dir) as entries:
+    def seal_entries(directory: Path) -> None:
+        with os.scandir(directory) as entries:
             for entry in entries:
-                if entry.name != "partial":
-                    os.chown(entry.path, 0, 0, follow_symlinks=False)
+                os.chown(entry.path, 0, 0, follow_symlinks=False)
+                if entry.is_dir(follow_symlinks=False):
+                    seal_entries(Path(entry.path))
+
+    try:
+        seal_entries(archive_dir)
     except OSError as error:
         raise PlaywrightProfileError("APT archive cache could not be sealed root-owned") from error
 
