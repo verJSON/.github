@@ -139,6 +139,18 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             },
         )
 
+    def test_apt_plan_diagnostic_names_an_unpinned_package_and_version(self) -> None:
+        profile = playwright_profile.resolve_profile(PROFILE_ID)
+
+        with self.assertRaisesRegex(
+            playwright_profile.PlaywrightProfileError,
+            r"Playwright apt plan selected an unpinned package: libc-bin=2\.39-0ubuntu8\.13",
+        ):
+            playwright_profile.parse_install_plan(
+                "Inst libc-bin (2.39-0ubuntu8.13 Ubuntu:24.04/noble-security)\n",
+                profile,
+            )
+
     def test_apt_plan_accepts_empty_simulation_annotations(self) -> None:
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         package = "libgcc-s1"

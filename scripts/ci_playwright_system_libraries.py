@@ -620,7 +620,9 @@ def parse_install_plan(plan_output: str, profile: dict[str, Any]) -> dict[tuple[
         record = profile["packages"].get(package)
         architecture = match.group("architecture") or (record["architecture"] if record else "")
         if record is None or architecture != record["architecture"] or version != record["version"]:
-            raise PlaywrightProfileError("Playwright apt plan selected an unpinned package")
+            raise PlaywrightProfileError(
+                f"Playwright apt plan selected an unpinned package: {package}={version}"
+            )
         _validate_plan_architecture_annotation(match.group("details"), architecture)
         key = (package, architecture)
         if key in planned:
