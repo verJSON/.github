@@ -219,10 +219,46 @@ else:
     receipt_run = str(head_receipt.get("run") or "")
     if receipt_env.get("EXPECTED_HEAD") != "${{ inputs.expected_head }}":
         bad("the proposer guard does not read expected_head")
+    if receipt_env.get("COMPONENT") != "${{ inputs.component }}":
+        bad("the proposer guard does not preserve component selection for its preview command")
+    if receipt_env.get("CONTRACT_REF") != (snapshot.get("with") or {}).get("contract_ref"):
+        bad("the proposer preview does not use the canonical contract pin")
+    if receipt_env.get("DEFAULT_BRANCH") != "${{ github.event.repository.default_branch }}":
+        bad("the proposer guard does not name the default branch in its re-dispatch command")
+    if receipt_env.get("FRAGMENTS") != "${{ inputs.fragments }}":
+        bad("the proposer guard does not preserve fragment selection for its preview command")
+    if receipt_env.get("PREFIX") != "${{ inputs.prefix }}":
+        bad("the proposer guard does not preserve the version prefix for its preview command")
     if receipt_env.get("SELECTOR_DIGEST") != "${{ inputs.selector_digest }}":
         bad("the proposer guard does not bind selector_digest with expected_head")
     if '"$GITHUB_SHA" != "$EXPECTED_HEAD"' not in receipt_run:
         bad("the proposer guard does not fail a mutable-branch TOCTOU head change")
+    if "GITHUB_WORKFLOW_REF" not in receipt_run or "printf -v dispatch_command" not in receipt_run:
+        bad("the proposer guard does not print an exact workflow re-dispatch command")
+    for preview_piece in (
+        'git -C "$repo_root" rev-parse HEAD',
+        'rev-parse --is-shallow-repository',
+        'status --porcelain --untracked-files=all',
+        'contents/scripts/changelog.py?ref=$2',
+        '>"$preview_dir/changelog.py"',
+        'python3 -I "$preview_dir/changelog.py"',
+        '--repo-root "$repo_root"',
+    ):
+        if preview_piece not in receipt_run:
+            bad(f"the release-plan preview does not pin its source tree and contract: {preview_piece}")
+    if any(command in receipt_run for command in ("git clone", "git fetch", "git checkout")):
+        bad("the local preview must not introduce repository materialization into the workflow job")
+    if "printf -v preview_command" not in receipt_run:
+        bad("the proposer guard does not print a reproducible release-plan preview command")
+    for dispatch_input in (
+        '"version=$INPUT_VERSION"',
+        '"prefix=$PREFIX"',
+        '"component=$COMPONENT"',
+        '"fragments=$FRAGMENTS"',
+        '"selector_digest=$SELECTOR_DIGEST"',
+    ):
+        if dispatch_input not in receipt_run:
+            bad(f"the proposer guard does not preserve re-dispatch input {dispatch_input}")
 
 selector_receipts = [
     step for step in steps_of(verify)
@@ -708,9 +744,14 @@ run_guard() { # run_guard <script> [env assignments...]
       RUNNER_TEMP="$tmp/runner" \
       GITHUB_STEP_SUMMARY="$tmp/summary" \
       GITHUB_SHA="$(printf 'c%.0s' {1..40})" \
+      GITHUB_REPOSITORY=VerJSON/example \
+      GITHUB_WORKFLOW_REF=VerJSON/example/.github/workflows/release.yml@refs/heads/main \
+      CONTRACT_REF="$(printf 'e%.0s' {1..40})" \
       COMPONENT= \
+      DEFAULT_BRANCH=main \
       FRAGMENTS= \
       EXPECTED_SELECTOR_DIGEST= \
+      PREFIX=v \
       CI_PACKAGE_RETENTION_KEEP=3 \
       LC_ALL=C \
       "${@:2}" bash -eo pipefail "$1" ) >"$tmp/guard.out" 2>&1
@@ -790,8 +831,52 @@ expect_guard_rejection "the exact-head guard rejects partial proposer receipts" 
 # must state the exact default-branch commit the derivation authorizes (#1939).
 expect_guard_rejection "the exact-head guard requires a stated head for a blank version" \
   "the exact-head guard admitted a blank version without a stated head" \
-  1 "::error::A blank version derives the release from the dispatched commit, so expected_head must name that exact default-branch commit as a canonical lowercase 40-hex SHA." \
+  1 "::error title=Release head required::Blank-version release dispatched at commit $expected_head needs expected_head set to that exact default-branch SHA." \
   "$head_guard" INPUT_VERSION= EXPECTED_HEAD= SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+grep -qF "Re-dispatch from main: gh workflow run release.yml --repo VerJSON/example --ref main -f version= -f prefix=v -f component= -f fragments= -f selector_digest= -f expected_head=$expected_head" "$tmp/guard.out" \
+  && pass "the blank-version error prints an exact re-dispatch command" \
+  || fail "the blank-version error omitted or changed its re-dispatch command: $(cat "$tmp/guard.out")"
+test_contract_ref="$(printf 'e%.0s' {1..40})"
+grep -qF "Preview locally (full, clean checkout at the dispatched SHA required): bash -euo pipefail -c" "$tmp/guard.out" \
+  && grep -qF "$expected_head $test_contract_ref --prefix v --version ''" "$tmp/guard.out" \
+  && grep -qF 'git -C "$repo_root" rev-parse HEAD' "$tmp/guard.out" \
+  && pass "the blank-version preview verifies the dispatched tree and pinned contract" \
+  || fail "the blank-version error omitted or changed its pinned local preview: $(cat "$tmp/guard.out")"
+custom_selector_digest="$(printf 'a%.0s' {1..64})"
+custom_fragments=$'NEXT/first.md\nNEXT/second.md'
+expect_guard_rejection "the re-dispatch command preserves custom selection inputs" \
+  "the re-dispatch command omitted custom selection inputs" \
+  1 "::error title=Release head required::Blank-version release dispatched at commit $expected_head needs expected_head set to that exact default-branch SHA." \
+  "$head_guard" INPUT_VERSION= EXPECTED_HEAD= PREFIX=schema-v COMPONENT=python "FRAGMENTS=$custom_fragments" "SELECTOR_DIGEST=$custom_selector_digest" "GITHUB_SHA=$expected_head"
+grep -qF -- "Re-dispatch from main: gh workflow run release.yml --repo VerJSON/example --ref main -f version= -f prefix=schema-v -f component=python -f \$'fragments=NEXT/first.md\\nNEXT/second.md' -f selector_digest=$custom_selector_digest -f expected_head=$expected_head" "$tmp/guard.out" \
+  && pass "the custom-selection re-dispatch retains every selector" \
+  || fail "the custom-selection re-dispatch changed its selectors: $(cat "$tmp/guard.out")"
+grep -qF -- "$expected_head $test_contract_ref --prefix schema-v --version '' --component python --fragment NEXT/first.md --fragment NEXT/second.md" "$tmp/guard.out" \
+  && pass "the custom-selection preview retains every selected fragment" \
+  || fail "the custom-selection preview changed its selection: $(cat "$tmp/guard.out")"
+mutated_head_guard="$tmp/head-guard-mutated.sh"
+python3 - "$head_guard" "$mutated_head_guard" <<'PY'
+from pathlib import Path
+import sys
+
+guard = Path(sys.argv[1]).read_text(encoding="utf-8")
+mutations = (
+    ('if [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]]; then', "if false; then"),
+    ('if [ "$GITHUB_SHA" != "$EXPECTED_HEAD" ]; then', "if false; then"),
+)
+for original, replacement in mutations:
+    if guard.count(original) != 1:
+        raise SystemExit(f"expected one guard anchor, found {guard.count(original)}: {original}")
+    guard = guard.replace(original, replacement, 1)
+Path(sys.argv[2]).write_text(guard, encoding="utf-8")
+PY
+if run_guard "$mutated_head_guard" INPUT_VERSION= EXPECTED_HEAD= SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"; then
+  grep -qF "Dispatch is bound to head" "$tmp/guard.out" \
+    && pass "mutation evidence: bypassing the blank-head and stated-head checks admits the dispatch" \
+    || fail "the guard mutation unexpectedly passed for another reason: $(cat "$tmp/guard.out")"
+else
+  fail "the guard mutation did not demonstrate the fail-closed checks: $(cat "$tmp/guard.out")"
+fi
 if run_guard "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"; then
   pass "the exact-head guard accepts a blank version bound to its stated head without a selector digest"
 else

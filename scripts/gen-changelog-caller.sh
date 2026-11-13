@@ -1086,8 +1086,13 @@ release_cache_restore='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1
 release_head_binding_step=$(cat <<'EOF'
       - name: Bind a proposer dispatch to its exact derived head
         env:
+          COMPONENT: ${{ inputs.component }}
+          CONTRACT_REF: __VERJSON_CONTRACT_REF__
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EXPECTED_HEAD: ${{ inputs.expected_head }}
+          FRAGMENTS: ${{ inputs.fragments }}
           INPUT_VERSION: ${{ inputs.version }}
+          PREFIX: ${{ inputs.prefix }}
           SELECTOR_DIGEST: ${{ inputs.selector_digest }}
         run: |
           # A blank version is derived from the dispatched tree, so the operator
@@ -1095,7 +1100,55 @@ release_head_binding_step=$(cat <<'EOF'
           # proposer receipt both-or-neither.
           if [ -z "$INPUT_VERSION" ]; then
             if [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]]; then
-              echo "::error::A blank version derives the release from the dispatched commit, so expected_head must name that exact default-branch commit as a canonical lowercase 40-hex SHA."
+              preview_script="$(cat <<'PREVIEW_SCRIPT'
+              set -euo pipefail
+              preview_dir="$(mktemp -d)"
+              trap 'rm -rf -- "$preview_dir"' EXIT
+              repo_root="$(git rev-parse --show-toplevel)"
+              current_sha="$(git -C "$repo_root" rev-parse HEAD)"
+              if [ "$current_sha" != "$1" ]; then
+                printf 'Preview requires a full local checkout at %s; current checkout is %s.\n' "$1" "$current_sha" >&2
+                exit 2
+              fi
+              if [ "$(git -C "$repo_root" rev-parse --is-shallow-repository)" = true ]; then
+                echo "Preview requires complete history so prior release tags are available." >&2
+                exit 2
+              fi
+              if [ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]; then
+                echo "Preview requires a clean checkout of the dispatched commit." >&2
+                exit 2
+              fi
+              gh api "repos/VerJSON/.github/contents/scripts/changelog.py?ref=$2" --jq .content |
+                python3 -I -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' \
+                  >"$preview_dir/changelog.py"
+              shift 2
+              python3 -I "$preview_dir/changelog.py" release-plan \
+                --repo-root "$repo_root" "$@"
+          PREVIEW_SCRIPT
+              )"
+              preview_args=(bash -euo pipefail -c "$preview_script" _ "$GITHUB_SHA" "$CONTRACT_REF" --prefix "$PREFIX" --version "$INPUT_VERSION")
+              [ -z "$COMPONENT" ] || preview_args+=(--component "$COMPONENT")
+              while IFS= read -r fragment; do
+                [ -z "$fragment" ] || preview_args+=(--fragment "$fragment")
+              done <<<"$FRAGMENTS"
+              printf -v preview_command '%q ' "${preview_args[@]}"
+              workflow_file="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+              workflow_file="${workflow_file%@*}"
+              dispatch_args=(
+                gh workflow run "$workflow_file"
+                --repo "$GITHUB_REPOSITORY"
+                --ref "$DEFAULT_BRANCH"
+                -f "version=$INPUT_VERSION"
+                -f "prefix=$PREFIX"
+                -f "component=$COMPONENT"
+                -f "fragments=$FRAGMENTS"
+                -f "selector_digest=$SELECTOR_DIGEST"
+                -f "expected_head=$GITHUB_SHA"
+              )
+              printf -v dispatch_command '%q ' "${dispatch_args[@]}"
+              echo "::error title=Release head required::Blank-version release dispatched at commit $GITHUB_SHA needs expected_head set to that exact default-branch SHA."
+              printf 'Preview locally (full, clean checkout at the dispatched SHA required): %s\n' "$preview_command"
+              printf 'Re-dispatch from %s: %s\n' "$DEFAULT_BRANCH" "$dispatch_command"
               exit 1
             fi
             if [ -n "$SELECTOR_DIGEST" ] && [[ ! "$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}$ ]]; then
@@ -1117,6 +1170,8 @@ release_head_binding_step=$(cat <<'EOF'
           echo "Dispatch is bound to head $EXPECTED_HEAD and selector ${SELECTOR_DIGEST:-none}."
 EOF
 )
+
+release_head_binding_step="${release_head_binding_step//__VERJSON_CONTRACT_REF__/$ref}"
 
 release_plan_step=$(cat <<'EOF'
       - name: Resolve the release selection and version
@@ -1342,7 +1397,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
+        description: Optional exact SemVer tag; blank derives the next version and requires expected_head
         required: false
         type: string
         default: ''
@@ -1352,7 +1407,7 @@ on:
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Exact default-branch commit this dispatch authorizes; required when version is blank
+        description: Required when version is blank; exact default-branch commit you previewed (40 lowercase hex)
         required: false
         type: string
         default: ''
@@ -1962,7 +2017,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
+        description: Optional exact SemVer tag; blank derives the next version and requires expected_head
         required: false
         type: string
         default: ''
@@ -1972,7 +2027,7 @@ on:
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Exact default-branch commit this dispatch authorizes; required when version is blank
+        description: Required when version is blank; exact default-branch commit you previewed (40 lowercase hex)
         required: false
         type: string
         default: ''
@@ -2377,7 +2432,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
+        description: Optional exact SemVer tag; blank derives the next version and requires expected_head
         required: false
         type: string
         default: ''
@@ -2387,7 +2442,7 @@ on:
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Exact default-branch commit this dispatch authorizes; required when version is blank
+        description: Required when version is blank; exact default-branch commit you previewed (40 lowercase hex)
         required: false
         type: string
         default: ''
@@ -4100,7 +4155,7 @@ EXPECTED_TRIGGER_BLOCK = (
     (2, "workflow_dispatch:"),
     (4, "inputs:"),
     (6, "version:"),
-    (8, "description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head"),
+    (8, "description: Optional exact SemVer tag; blank derives the next version and requires expected_head"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
@@ -4110,7 +4165,7 @@ EXPECTED_TRIGGER_BLOCK = (
     (8, "type: string"),
     (8, f"default: {release_default_prefix_yaml}"),
     (6, "expected_head:"),
-    (8, "description: Exact default-branch commit this dispatch authorizes; required when version is blank"),
+    (8, "description: Required when version is blank; exact default-branch commit you previewed (40 lowercase hex)"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
@@ -4759,9 +4814,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "639d473d29fff274a0ff6e439df02fb6d8e3f76baa0531e77197f40a56aa65a7",
-    "release-artifact": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
-    "release-snapshot": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
+    "release-node": "a7ec0ee88d55aa76b082522e210a5faa9eeab3aeaa101af6a984c5e50eb0bfe7",
+    "release-artifact": "e00e288ecc4cd105b62d676db86ea13f19a91c7ed30bfd5b8be496a9b7cef6ee",
+    "release-snapshot": "e00e288ecc4cd105b62d676db86ea13f19a91c7ed30bfd5b8be496a9b7cef6ee",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -5880,6 +5935,15 @@ for step in verification_job_steps:
     action_inputs = step_mapping_values(step, "with") if "with" in fields else {}
     if ("env" in fields and environment is None) or ("with" in fields and action_inputs is None):
         problems.append("cannot safely inspect pre-credential verify-step settings (#1717)")
+    if environment is not None and "CONTRACT_REF" in environment:
+        contract_ref = os.environ.get("CONTRACT_REF", "")
+        if not contract_ref or environment["CONTRACT_REF"] != contract_ref:
+            problems.append(
+                "does not bind the release preview to its pinned contract ref (#1717)"
+            )
+        else:
+            environment = dict(environment)
+            environment["CONTRACT_REF"] = "<contract-ref>"
     if step_name == "" and fields.get("uses", "").startswith("actions/setup-node@"):
         action_inputs = None
     digest_fields = dict(fields)
