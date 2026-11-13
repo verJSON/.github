@@ -254,12 +254,21 @@ RUNTIME_BASELINE = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR")
 COULD_NOT_RUN = (126, 127)
 
 
-def run_release_shape(checker: Path, workflow: Path, inputs: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_release_shape(
+    checker: Path,
+    workflow: Path,
+    inputs: dict[str, str],
+    *,
+    unset: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
     """Run the extracted check on this interpreter with only the runtime and its inputs."""
     environment = {name: os.environ[name] for name in RUNTIME_BASELINE if name in os.environ}
+    environment.update(inputs)
+    for name in unset:
+        environment.pop(name, None)
     result = subprocess.run(
         [sys.executable, "-I", str(checker), str(workflow)],
-        env={**environment, **inputs}, capture_output=True, text=True,
+        env=environment, capture_output=True, text=True,
     )
     # A loader or exec failure is not a verdict: reported as a refusal it would
     # satisfy a rejection case, and as a failure it hides the real cause.
@@ -290,10 +299,14 @@ def generated_job_expectations(contract_test: str) -> dict[str, str]:
 
 
 def contract_test_constant(text: str, name: str) -> str:
-    match = re.search(rf"^{name}='(?P<value>[^']*)'$", text, re.MULTILINE)
+    match = re.search(
+        rf"^{name}=(?:'(?P<single>[^']*)'|\"(?P<double>[^\"]*)\")$",
+        text,
+        re.MULTILINE,
+    )
     if match is None:
         raise AssertionError(f"the generated contract test does not declare {name}")
-    return match["value"]
+    return match["single"] if match["single"] is not None else match["double"]
 
 
 def renovate_pattern(pattern: str) -> re.Pattern[str]:
@@ -406,7 +419,12 @@ class GeneratorPinManager(unittest.TestCase):
             **generated_job_expectations(contract_test),
             **{
                 name: contract_test_constant(contract_test, name)
-                for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
+                for name in (
+                    "EXPECTED_RELEASE_CHECKOUT",
+                    "EXPECTED_RELEASE_SETUP_NODE",
+                    "EXPECTED_RELEASE_CACHE_SAVE",
+                    "EXPECTED_RELEASE_NODE_VERSION",
+                )
             },
         }
         with tempfile.TemporaryDirectory() as scratch:
@@ -547,7 +565,12 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
         cls.release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
         cls.pins = {
             name: contract_test_constant(contract_test, name)
-            for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
+            for name in (
+                "EXPECTED_RELEASE_CHECKOUT",
+                "EXPECTED_RELEASE_SETUP_NODE",
+                "EXPECTED_RELEASE_CACHE_SAVE",
+                "EXPECTED_RELEASE_NODE_VERSION",
+            )
         }
         # The whole jobs the emitted suite pins (ADR 0099).
         cls.job_expectations = generated_job_expectations(contract_test)
@@ -556,19 +579,30 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             for mode, arguments in RELEASE_MODES.items()
         }
 
-    def check(self, workflow: str, **pins: str) -> subprocess.CompletedProcess[str]:
+    def check(
+        self,
+        workflow: str,
+        *,
+        unset: tuple[str, ...] = (),
+        **pins: str,
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as scratch:
             checker = Path(scratch) / "release-shape.py"
             checker.write_text(self.release_shape, encoding="utf-8")
             target = Path(scratch) / "release.yml"
             target.write_text(workflow, encoding="utf-8")
-            return run_release_shape(checker, target, {
-                "CONTRACT_REF": self.ref,
-                "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
-                **self.job_expectations,
-                **self.pins,
-                **pins,
-            })
+            return run_release_shape(
+                checker,
+                target,
+                {
+                    "CONTRACT_REF": self.ref,
+                    "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+                    **self.job_expectations,
+                    **self.pins,
+                    **pins,
+                },
+                unset=unset,
+            )
 
     def swap_step_pin(self, workflow: str, step_name: str, variable: str) -> str:
         declared = self.pins[variable].split(" #", 1)[0]
@@ -588,6 +622,26 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             with self.subTest(mode=mode):
                 result = self.check(workflow)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_configured_node_version_is_refused(self) -> None:
+        result = self.check(
+            self.workflows["release-snapshot"],
+            unset=("EXPECTED_RELEASE_NODE_VERSION",),
+        )
+        self.assert_rejected(
+            result,
+            "EXPECTED_RELEASE_NODE_VERSION is unset; regenerate the contract test",
+        )
+
+    def test_package_less_hook_must_use_configured_node_version(self) -> None:
+        result = self.check(
+            self.workflows["release-snapshot"],
+            EXPECTED_RELEASE_NODE_VERSION="25",
+        )
+        self.assert_rejected(
+            result,
+            "does not give a package-less verification hook the configured Node 25 (#1906)",
+        )
 
     def test_a_verify_checkout_moved_off_its_declared_commit_is_rejected(self) -> None:
         for mode, workflow in self.workflows.items():

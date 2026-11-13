@@ -6296,6 +6296,13 @@ def package_less_verification(steps, root, with_hook):
 
 def check_package_less_verification(steps):
     expected = os.environ.get("EXPECTED_RELEASE_NODE_VERSION", "")
+    if not expected.strip():
+        problems.append(
+            "cannot verify the package-less release hook: "
+            "EXPECTED_RELEASE_NODE_VERSION is unset; regenerate the contract test "
+            "with its configured --node-version (#1906)"
+        )
+        return
     if not (os.path.isfile(PACKAGE_LESS_CAPTURE_PYTHON) and os.access(PACKAGE_LESS_CAPTURE_PYTHON, os.X_OK)):
         problems.append(
             "cannot be checked on a package-less tree: this host has no executable %s, which the"
