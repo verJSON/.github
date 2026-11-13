@@ -5,4 +5,4 @@ impact: patch
 title: Refresh public runner isolation digest baselines
 ---
 
-Refreshed two frozen backlog digests to match the merged canonical workflow contents. The official runner-isolation scanner passes with the backlog classifications unchanged.
+Refreshed two frozen backlog digests after the final release-caller generator update changed their scanned source context. The official runner-isolation scanner passes with the backlog classifications unchanged.
