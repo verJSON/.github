@@ -5,4 +5,4 @@ impact: patch
 title: Point release proposal to the ecosystem decision repository
 ---
 
-Keep a stable pointer in the canonical automation repository while the proposed cross-repository source-bound release decision moves to verjson-docs. No live release behavior changes.
+Keep a stable pointer and archived proposal link in the canonical automation repository while the proposed cross-repository source-bound release decision moves to verjson-docs. Distinguish the shipped source-equality guard from the unratified release authority; no live release behavior changes.
