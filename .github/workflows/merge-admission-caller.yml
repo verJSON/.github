@@ -24,6 +24,7 @@ on:
       - AI review + auto-merge
       - Authn required type surface
       - CLI projects required package surface
+      - Playwright profile hosted acceptance
     types: [completed]
   # The periodic sweep, targeted every 15 minutes. A schedule is best-effort: GitHub delays
   # or drops scheduled runs under load and disables them on a public repository after 60
