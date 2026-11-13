@@ -1017,10 +1017,9 @@ def main() -> int:
     require("AI review authorization" in rearm_text and "AI review authorization" in promote_text,
             "arm and promotion must agree on the unambiguous required-check name")
     terminal_merge_text = TERMINAL_MERGE.read_text(encoding="utf-8")
-    require("terminal-merge.sh" in promote_text and "gh pr merge" in terminal_merge_text and
-            "--admin --squash" in terminal_merge_text and
-            '--match-head-commit "$EXPECTED_HEAD_SHA"' in terminal_merge_text,
-            "trusted continuation must terminally merge only the exact authorized head")
+    require("Hold autonomous terminal merge" in promote_text and "gh pr merge" not in terminal_merge_text and
+            "exit 1" in terminal_merge_text,
+            "trusted continuation must hold autonomous terminal merges")
     require("retention-days: 90" in rearm_text,
             "arm receipts must survive the supported long-lived hold window")
     require("REQUIRED_CHECK_POLICY" in promote_text and "vars.AI_REVIEW_REQUIRED_CHECKS" not in promote_text and
@@ -1245,9 +1244,9 @@ def main() -> int:
     mutated_second_step["jobs"]["privileged_merge"]["steps"].append(
         {"run": "gh api commits/head/check-runs"})
     mutated_multiline = yaml.safe_load(yaml.safe_dump(promote))
-    promotion_script = mutated_multiline["jobs"]["privileged_merge"]["steps"][-1]["run"]
-    mutated_multiline["jobs"]["privileged_merge"]["steps"][-1]["run"] = (
-        "while\n  true\ndo\n" + promotion_script + "\ndone")
+    mutated_multiline["jobs"]["privileged_merge"]["steps"].append(
+        {"run": "while\n  true\ndo\n  gh pr checks 7\ndone"}
+    )
     mutated_indirect = yaml.safe_load(yaml.safe_dump(promote))
     mutated_indirect["jobs"]["privileged_merge"]["steps"].append(
         {"run": 'prefix="repos/$TARGET_REPO/com"\n'

@@ -17,7 +17,7 @@
       "input": "merge_environment",
       "confinement": "canonical",
       "organization_copy": "withdraw",
-      "reason": "Privileged merge and promotion retry mint merge tokens through the caller-selected main-only environment."
+      "reason": "Older pinned merge callers may still use this key; the current canonical terminal route holds before token minting. Keep auditing its confinement until those callers retire."
     },
     {
       "role": "ai-review",
