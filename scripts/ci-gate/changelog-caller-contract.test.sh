@@ -186,6 +186,11 @@ else
   echo "$fails failed"
   exit 1
 fi
+package_less_node_version="$(sed -n 's/^EXPECTED_RELEASE_NODE_VERSION="\([^"]*\)"$/\1/p' "$emitted")"
+if [[ -z "$package_less_node_version" ]]; then
+  fail "generated contract test does not declare its configured Node version"
+  exit 1
+fi
 
 # Case shards skip everything between the BEGIN and END markers, so no case may
 # read anything defined there (#1736). The shard test requires BEGIN directly
@@ -6989,14 +6994,24 @@ grep -qE '^  verify:$' <<<"$snapshot_release" \
 # Regression: publish's tag/note verification step once read the version from
 # `steps.release-version.outputs.version` (always empty there), so the exact-tag
 # check failed on every release.
-# A snapshot-only adopter need not be a Node project (#1206): the Node steps are
-# guarded on package.json and a repository without one must verify through its
-# own scripts/release-verify.sh rather than falling back to npm test.
+# A snapshot-only adopter need not be a Node project (#1206): its package steps
+# are guarded on package.json and a repository without one must verify through
+# its own scripts/release-verify.sh rather than falling back to npm test. That
+# hook may itself run on Node, which package metadata cannot announce, so the
+# configured Node runtime is installed whether or not package.json exists (#1906).
 snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:space:]]*$/{seen=0} seen' <<<"$snapshot_release")"
-[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 7 ] \
+snapshot_setup_node_condition="$(awk '
+  /^      - uses: actions\/setup-node@/ { found = 1; next }
+  found && /^      - / { exit }
+  found && /^        if: / { sub(/^        if: /, ""); print; exit }
+' <<<"$snapshot_verify_job")"
+[ "$snapshot_setup_node_condition" = "steps.release-version.outputs.selected == 'true'" ] \
+  && pass "release-snapshot installs the configured Node runtime whether or not package.json exists (#1906)" \
+  || fail "release-snapshot gates setup-node on something other than the selected release, so a package-less Node-based verify hook runs without its configured Node: ${snapshot_setup_node_condition:-<no condition>}"
+[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 6 ] \
   && grep -qF 'elif [ ! -f package.json ]; then' <<<"$snapshot_verify_job" \
   && grep -qF 'No package.json and no executable scripts/release-verify.sh' <<<"$snapshot_verify_job" \
-  && pass "release-snapshot guards setup-node, dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
+  && pass "release-snapshot guards dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
   || fail "release-snapshot still assumes a Node project: a non-npm adopter would fail at npm ci or verify nothing"
 snapshot_publish_job="$(awk '/^  publish:[[:space:]]*$/{seen=1} seen' <<<"$snapshot_release")"
 grep -qF 'VERSION: ${{ needs.verify.outputs.version }}' <<<"$snapshot_publish_job" \
@@ -7040,6 +7055,14 @@ if [ "$status" -eq 0 ]; then
 else
   fail "emitted suite rejects a generated release-snapshot caller: $(tail -2 "$ADOPTER_LOG")"
 fi
+# The check runs only inside the emitted suite's release-shape check; the
+# release-snapshot rejection cases below exercise its refusals, and this shows
+# it runs, and accepts, a discovered generated release caller (#1906).
+if grep -qF "gives a package-less verification hook the configured Node $package_less_node_version (#1906)" "$ADOPTER_LOG"; then
+  pass "emitted suite runs the package-less Node verification check on the release caller"
+else
+  fail "emitted suite never ran the package-less Node verification check on the release caller (#1906)"
+fi
 SCHED_SCRIPT
 )"
 assert_mutable_verification_path_rejected "$snapshot_adopter" release-snapshot snapshot-mutable-path
@@ -7049,6 +7072,117 @@ assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snaps
   add_verify_job_path_override 'overrides the runner-managed PATH before release verification (#1717)'
 assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snapshot-late-path-capture \
   move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
+
+# The emitted suite runs each release caller's verify job on a package-less
+# tree whose executable scripts/release-verify.sh runs on Node (#1906). Each
+# mutation below also moves the pinned pre-credential or verification digest,
+# so its case requires the package-less check's own reason, which the suite
+# reports beside the digest's.
+mutate_snapshot_release() { # mutate_snapshot_release <adopter> <old> <new>
+  python3 - "$1/.github/workflows/release.yml" "$2" "$3" <<'PY'
+import sys
+path, old, new = sys.argv[1:4]
+text = open(path, encoding="utf-8").read()
+if text.count(old) != 1:
+    raise SystemExit(f"mutation anchor occurs {text.count(old)} times, expected once: {old!r}")
+open(path, "w", encoding="utf-8").write(text.replace(old, new))
+PY
+}
+set_setup_node_condition() { # set_setup_node_condition <adopter> <condition>
+  local setup_node
+  setup_node="$(sed -n 's/^      - uses: \(actions\/setup-node@.*\)$/\1/p' "$1/.github/workflows/release.yml")"
+  mutate_snapshot_release "$1" \
+    "      - uses: $setup_node
+        if: steps.release-version.outputs.selected == 'true'
+" \
+    "      - uses: $setup_node
+        if: $2
+"
+}
+gate_setup_node_on_package_json() {
+  set_setup_node_condition "$1" "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''"
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot setup-node gated on package.json (#1906)" gate_setup_node_on_package_json \
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
+# Changed modeled conditions are refused before any condition expression is read.
+gate_setup_node_on_package_glob() {
+  set_setup_node_condition "$1" "steps.release-version.outputs.selected == 'true' && hashFiles('**/package.json') != ''"
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot setup-node gated on a glob (#1906)" gate_setup_node_on_package_glob \
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
+# Order is the property: Node installed after the runtime is captured never
+# reaches the hook, however the check happens to collect the steps.
+install_node_after_runtime_capture() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+starts = [index for index, line in enumerate(lines) if line.startswith("      - ")]
+setup = next(index for index in starts if lines[index].startswith("      - uses: actions/setup-node@"))
+capture = starts[starts.index(setup) + 1]
+if lines[capture] != "      - name: Capture trusted release verification runtime":
+    raise SystemExit("setup-node is no longer directly followed by the runtime capture")
+after_capture = starts[starts.index(capture) + 1]
+lines[setup:after_capture] = lines[capture:after_capture] + lines[setup:capture]
+open(path, "w", encoding="utf-8").write("\n".join(lines))
+PY
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot setup-node after the runtime capture (#1906)" install_node_after_runtime_capture \
+  "does not give a package-less verification hook the configured Node $package_less_node_version (#1906)"
+pass_package_less_tree_without_hook() {
+  mutate_snapshot_release "$1" \
+    '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
+            exit 1
+' \
+    '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
+            exit 0
+'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot passing a package-less tree without a verification hook (#1906)" pass_package_less_tree_without_hook \
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
+# Failing is not refusing: a caller that runs the absent hook anyway fails on a
+# package-less tree for an incidental reason (no such file), which must not
+# count as the refusal the snapshot depends on.
+run_absent_hook_on_package_less_tree() {
+  mutate_snapshot_release "$1" \
+    '            echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
+            exit 1
+' \
+    '            verification_status=0
+            run_clean scripts/release-verify.sh || verification_status=$?
+'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot failing a package-less tree without its refusal (#1906)" run_absent_hook_on_package_less_tree \
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
+# The suite runs with the step's own env:, never one the check supplies: a
+# verification PATH that does not come from the runtime capture never sees the
+# configured Node, whatever the check would have injected.
+verify_on_fixed_system_path() {
+  mutate_snapshot_release "$1" \
+    '          RELEASE_VERIFICATION_PATH: ${{ steps.release-verification-runtime.outputs.path }}
+' \
+    '          RELEASE_VERIFICATION_PATH: /usr/bin:/bin
+'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot verifying on a fixed system PATH (#1906)" verify_on_fixed_system_path \
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
+# An env expression the check does not know is refused, never resolved to empty.
+verify_with_an_unknown_expression() {
+  mutate_snapshot_release "$1" \
+    '          PACKAGE_VERSION: ${{ steps.release-version.outputs.package-version }}
+          RELEASE_VERIFICATION_PATH:' \
+    '          PACKAGE_VERSION: ${{ inputs.version }}
+          RELEASE_VERIFICATION_PATH:'
+}
+expect_release_mode_rejection release-snapshot \
+  "release-snapshot verifying with an env expression the check cannot evaluate (#1906)" verify_with_an_unknown_expression \
+  'cannot safely model package-less verification from a caller that differs from its pinned steps (#1906)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
 grep -Fqx "$expected_release_fallback" "$emitted" \

@@ -254,12 +254,23 @@ RUNTIME_BASELINE = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR")
 COULD_NOT_RUN = (126, 127)
 
 
-def run_release_shape(checker: Path, workflow: Path, inputs: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_release_shape(
+    checker: Path,
+    workflow: Path,
+    inputs: dict[str, str],
+    *,
+    unset: tuple[str, ...] = (),
+    host_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run the extracted check on this interpreter with only the runtime and its inputs."""
     environment = {name: os.environ[name] for name in RUNTIME_BASELINE if name in os.environ}
+    environment.update(host_env or {})
+    environment.update(inputs)
+    for name in unset:
+        environment.pop(name, None)
     result = subprocess.run(
         [sys.executable, "-I", str(checker), str(workflow)],
-        env={**environment, **inputs}, capture_output=True, text=True,
+        env=environment, capture_output=True, text=True,
     )
     # A loader or exec failure is not a verdict: reported as a refusal it would
     # satisfy a rejection case, and as a failure it hides the real cause.
@@ -290,10 +301,14 @@ def generated_job_expectations(contract_test: str) -> dict[str, str]:
 
 
 def contract_test_constant(text: str, name: str) -> str:
-    match = re.search(rf"^{name}='(?P<value>[^']*)'$", text, re.MULTILINE)
+    match = re.search(
+        rf"^{name}=(?:'(?P<single>[^']*)'|\"(?P<double>[^\"]*)\")$",
+        text,
+        re.MULTILINE,
+    )
     if match is None:
         raise AssertionError(f"the generated contract test does not declare {name}")
-    return match["value"]
+    return match["single"] if match["single"] is not None else match["double"]
 
 
 def renovate_pattern(pattern: str) -> re.Pattern[str]:
@@ -406,7 +421,12 @@ class GeneratorPinManager(unittest.TestCase):
             **generated_job_expectations(contract_test),
             **{
                 name: contract_test_constant(contract_test, name)
-                for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
+                for name in (
+                    "EXPECTED_RELEASE_CHECKOUT",
+                    "EXPECTED_RELEASE_SETUP_NODE",
+                    "EXPECTED_RELEASE_CACHE_SAVE",
+                    "EXPECTED_RELEASE_NODE_VERSION",
+                )
             },
         }
         with tempfile.TemporaryDirectory() as scratch:
@@ -415,7 +435,11 @@ class GeneratorPinManager(unittest.TestCase):
             for mode, arguments in RELEASE_MODES.items():
                 workflow = Path(scratch) / f"{mode}.yml"
                 workflow.write_text(generate(renovated, mode, ref, *arguments), encoding="utf-8")
-                result = run_release_shape(checker, workflow, inputs)
+                result = run_release_shape(
+                    checker,
+                    workflow,
+                    {**inputs, "EXPECTED_RELEASE_MODE": mode},
+                )
                 self.assertEqual(result.returncode, 0, f"{mode}: {result.stderr}")
 
     def test_generator_pins_match_this_repository_workflow_pins(self) -> None:
@@ -547,7 +571,12 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
         cls.release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
         cls.pins = {
             name: contract_test_constant(contract_test, name)
-            for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
+            for name in (
+                "EXPECTED_RELEASE_CHECKOUT",
+                "EXPECTED_RELEASE_SETUP_NODE",
+                "EXPECTED_RELEASE_CACHE_SAVE",
+                "EXPECTED_RELEASE_NODE_VERSION",
+            )
         }
         # The whole jobs the emitted suite pins (ADR 0099).
         cls.job_expectations = generated_job_expectations(contract_test)
@@ -556,19 +585,103 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             for mode, arguments in RELEASE_MODES.items()
         }
 
-    def check(self, workflow: str, **pins: str) -> subprocess.CompletedProcess[str]:
+    def check(
+        self,
+        workflow: str,
+        *,
+        mode: str = "release-snapshot",
+        unset: tuple[str, ...] = (),
+        host_env: dict[str, str] | None = None,
+        checker_source: str | None = None,
+        **pins: str,
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as scratch:
             checker = Path(scratch) / "release-shape.py"
-            checker.write_text(self.release_shape, encoding="utf-8")
+            checker.write_text(
+                self.release_shape if checker_source is None else checker_source,
+                encoding="utf-8",
+            )
             target = Path(scratch) / "release.yml"
             target.write_text(workflow, encoding="utf-8")
-            return run_release_shape(checker, target, {
-                "CONTRACT_REF": self.ref,
-                "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
-                **self.job_expectations,
-                **self.pins,
-                **pins,
-            })
+            return run_release_shape(
+                checker,
+                target,
+                {
+                    "CONTRACT_REF": self.ref,
+                    "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+                    "EXPECTED_RELEASE_MODE": mode,
+                    **self.job_expectations,
+                    **self.pins,
+                    **pins,
+                },
+                unset=unset,
+                host_env=host_env,
+            )
+
+    def prepend_step_command(self, workflow: str, step_name: str, command: str) -> str:
+        lines = workflow.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip() != f"- name: {step_name}":
+                continue
+            for run_index in range(index + 1, len(lines)):
+                if lines[run_index].lstrip().startswith("- name:"):
+                    break
+                if lines[run_index].strip() == "run: |":
+                    indent = len(lines[run_index]) - len(lines[run_index].lstrip()) + 2
+                    lines.insert(run_index + 1, " " * indent + command)
+                    return "\n".join(lines)
+        raise AssertionError(f"could not find run body for workflow step {step_name!r}")
+
+    def untrusted_verification_body_workflow(self, command: str) -> str:
+        return self.prepend_step_command(
+            self.workflows["release-snapshot"],
+            "Run the release verification suite",
+            command,
+        )
+
+    def step_environment(self, workflow: str, step_name: str, key: str, value: str) -> str:
+        lines = workflow.splitlines()
+        start = next(
+            index for index, line in enumerate(lines)
+            if line.strip() == f"- name: {step_name}"
+        )
+        end = next(
+            index for index in range(start + 1, len(lines))
+            if len(lines[index]) - len(lines[index].lstrip()) == 6
+            and lines[index].lstrip().startswith("- ")
+        )
+        target = next(
+            index for index in range(start + 1, end)
+            if lines[index].lstrip().startswith(f"{key}:")
+        )
+        indentation = lines[target][:len(lines[target]) - len(lines[target].lstrip())]
+        lines[target] = f"{indentation}{key}: {json.dumps(value)}"
+        return "\n".join(lines)
+
+    def step_condition(self, workflow: str, step_name: str, condition: str) -> str:
+        lines = workflow.splitlines()
+        if step_name == "setup-node":
+            start = next(
+                index for index, line in enumerate(lines)
+                if line.strip().startswith("- uses: actions/setup-node@")
+            )
+        else:
+            start = next(
+                index for index, line in enumerate(lines)
+                if line.strip() == f"- name: {step_name}"
+            )
+        end = next(
+            index for index in range(start + 1, len(lines))
+            if len(lines[index]) - len(lines[index].lstrip()) == 6
+            and lines[index].lstrip().startswith("- ")
+        )
+        target = next(
+            index for index in range(start + 1, end)
+            if lines[index].lstrip().startswith("if:")
+        )
+        indentation = lines[target][:len(lines[target]) - len(lines[target].lstrip())]
+        lines[target] = f"{indentation}if: {json.dumps(condition)}"
+        return "\n".join(lines)
 
     def swap_step_pin(self, workflow: str, step_name: str, variable: str) -> str:
         declared = self.pins[variable].split(" #", 1)[0]
@@ -586,8 +699,132 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
     def test_every_generated_release_mode_passes_unmodified(self) -> None:
         for mode, workflow in self.workflows.items():
             with self.subTest(mode=mode):
-                result = self.check(workflow)
+                result = self.check(workflow, mode=mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_package_less_check_does_not_run_for_package_modes(self) -> None:
+        for mode in ("release-node", "release-artifact"):
+            with self.subTest(mode=mode):
+                result = self.check(self.workflows[mode], mode=mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("package-less verification hook", result.stdout + result.stderr)
+
+    def test_package_less_check_refuses_an_unknown_release_mode(self) -> None:
+        result = self.check(
+            self.workflows["release-snapshot"],
+            unset=("EXPECTED_RELEASE_MODE",),
+        )
+        self.assert_rejected(
+            result,
+            "cannot determine the release caller mode for package-less verification (#1906)",
+        )
+
+    def test_missing_configured_node_version_is_refused(self) -> None:
+        result = self.check(
+            self.workflows["release-snapshot"],
+            unset=("EXPECTED_RELEASE_NODE_VERSION",),
+        )
+        self.assert_rejected(
+            result,
+            "EXPECTED_RELEASE_NODE_VERSION is unset; regenerate the contract test",
+        )
+
+    def test_package_less_hook_must_use_configured_node_version(self) -> None:
+        result = self.check(
+            self.workflows["release-snapshot"],
+            EXPECTED_RELEASE_NODE_VERSION="25",
+        )
+        self.assert_rejected(
+            result,
+            "does not give a package-less verification hook the configured Node 25 (#1906)",
+        )
+
+    def test_package_less_hook_does_not_inherit_host_credentials(self) -> None:
+        result = self.check(
+            self.workflows["release-snapshot"],
+            host_env={
+                "GITHUB_TOKEN": "host-github-token-canary",
+                "NODE_AUTH_TOKEN": "host-node-token-canary",
+            },
+        )
+        self.assertNotIn(
+            "host-credential-env-present",
+            result.stdout + result.stderr,
+        )
+
+    def test_package_less_caller_body_is_rejected_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-caller-body-") as temporary:
+            marker = Path(temporary) / "caller-body-ran"
+            workflow = self.untrusted_verification_body_workflow(f"touch {marker}")
+            result = self.check(workflow)
+            self.assert_rejected(
+                result,
+                "does not match the approved release verification script",
+            )
+            self.assertFalse(marker.exists(), "caller-controlled run body executed")
+
+    def test_package_less_caller_environment_is_rejected_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="release-caller-env-") as temporary:
+            marker = Path(temporary) / "bash-env-ran"
+            bash_env = Path(temporary) / "bash-env.sh"
+            bash_env.write_text(f"touch {marker}\n", encoding="utf-8")
+            workflow = self.step_environment(
+                self.workflows["release-snapshot"],
+                "Run the release verification suite",
+                "BASH_ENV",
+                str(bash_env),
+            )
+            result = self.check(workflow)
+            self.assert_rejected(
+                result,
+                "does not isolate release verification from prior lifecycle environment",
+            )
+            self.assertFalse(marker.exists(), "caller-controlled BASH_ENV executed")
+
+    def test_package_less_model_refuses_hashfiles_paths_outside_the_temporary_tree(self) -> None:
+        modeled_steps = (
+            "setup-node",
+            "Capture trusted release verification runtime",
+            "Run the release verification suite",
+        )
+        conditions = (
+            "hashFiles('/etc/passwd') != ''",
+            "hashFiles('../outside') != ''",
+        )
+        for step_name in modeled_steps:
+            for condition in conditions:
+                with self.subTest(step=step_name, condition=condition):
+                    workflow = self.step_condition(
+                        self.workflows["release-snapshot"],
+                        step_name,
+                        condition,
+                    )
+                    result = self.check(workflow)
+                    self.assert_rejected(
+                        result,
+                        "cannot safely model package-less verification from a caller that differs from its pinned steps",
+                    )
+
+    def test_package_less_credential_canary_rejects_a_widened_environment(self) -> None:
+        safe_host_env = 'PACKAGE_LESS_SAFE_HOST_ENV = ("LANG", "LC_ALL")'
+        widened_host_env = (
+            'PACKAGE_LESS_SAFE_HOST_ENV = '
+            '("LANG", "LC_ALL", "GITHUB_TOKEN", "NODE_AUTH_TOKEN")'
+        )
+        checker_source = self.release_shape.replace(safe_host_env, widened_host_env, 1)
+        self.assertNotEqual(checker_source, self.release_shape)
+        result = self.check(
+            self.workflows["release-snapshot"],
+            host_env={
+                "GITHUB_TOKEN": "host-github-token-canary",
+                "NODE_AUTH_TOKEN": "host-node-token-canary",
+            },
+            checker_source=checker_source,
+        )
+        self.assert_rejected(
+            result,
+            "exposes host credential variables to package-less release verification code (#1906)",
+        )
 
     def test_a_verify_checkout_moved_off_its_declared_commit_is_rejected(self) -> None:
         for mode, workflow in self.workflows.items():
@@ -597,7 +834,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
                 )
                 self.assertNotEqual(swapped, workflow)
                 self.assert_rejected(
-                    self.check(swapped),
+                    self.check(swapped, mode=mode),
                     "does not use the approved verify-job step sequence (#1717)",
                 )
 
@@ -606,7 +843,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             with self.subTest(mode=mode):
                 swapped = self.swap_step_pin(workflow, "", "EXPECTED_RELEASE_SETUP_NODE")
                 self.assertNotEqual(swapped, workflow)
-                result = self.check(swapped)
+                result = self.check(swapped, mode=mode)
                 self.assert_rejected(result, "does not use the approved verify-job step sequence (#1717)")
                 self.assert_rejected(result, "does not use the approved setup-node inputs (#1717)")
 
@@ -616,7 +853,12 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             "--build-runner", "ubuntu-24.04", "--approved-internal-package", "@verjson/ai",
         )
         self.assertEqual(
-            self.check(workflow, EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="@verjson/ai").returncode, 0,
+            self.check(
+                workflow,
+                mode="release-artifact",
+                EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="@verjson/ai",
+            ).returncode,
+            0,
         )
         for step_name, variable in (
             ("Check out the canonical dependency acquisition contract", "EXPECTED_RELEASE_CHECKOUT"),
@@ -627,7 +869,11 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
                 swapped = workflow[:start] + self.swap_step_pin(workflow[start:], step_name, variable)
                 self.assertNotEqual(swapped, workflow)
                 self.assert_rejected(
-                    self.check(swapped, EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="@verjson/ai"),
+                    self.check(
+                        swapped,
+                        mode="release-artifact",
+                        EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="@verjson/ai",
+                    ),
                     "does not match the approved private dependency acquisition job (#1712)",
                 )
 
@@ -638,9 +884,13 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             "--build-runner", "ubuntu-24.04", "--approved-internal-package", "@verjson/ai",
         )
         allowlist = {"EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES": "@verjson/ai"}
-        self.assertEqual(self.check(workflow, **allowlist).returncode, 0)
+        self.assertEqual(
+            self.check(workflow, mode="release-artifact", **allowlist).returncode,
+            0,
+        )
         self.assert_rejected(
-            self.check(workflow), "does not pin the private dependency allowlists to the generated contract (#1712)",
+            self.check(workflow, mode="release-artifact"),
+            "does not pin the private dependency allowlists to the generated contract (#1712)",
         )
         for names in (
             ("APPROVED_PRIVATE_PACKAGES",),
@@ -655,7 +905,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
                     lines[index] = f"{indent}{name}: '@verjson/ai,@verjson/secret'"
                     lines.insert(index + 1, f"{indent}# {name}: '@verjson/ai'")
                 self.assert_rejected(
-                    self.check("\n".join(lines), **allowlist),
+                    self.check("\n".join(lines), mode="release-artifact", **allowlist),
                     "does not pin the private dependency allowlists to the generated contract (#1712)",
                 )
 
@@ -675,7 +925,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             for value in values:
                 with self.subTest(variable=variable, value=value):
                     self.assert_rejected(
-                        self.check(workflow, **{variable: value}),
+                    self.check(workflow, mode="release-node", **{variable: value}),
                         f"{variable} does not name a pinned {action[variable]}",
                     )
 
