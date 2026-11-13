@@ -125,7 +125,8 @@ class ReviewAttemptCountTest(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("review attempt accounting failed closed: reviews payload must be an array", result.stderr)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import re
 import subprocess
 import sys
@@ -246,6 +247,10 @@ def test_public_pull_request_events_preempt_every_caller_lane() -> None:
         "CI_LANE_FALLBACK": PERSISTENT,
     }
     for shape in catalog.SHAPES:
+        if shape == catalog.FIXED_HOSTED_PROFILE_ACCEPTANCE:
+            check("fixed hosted shape stays on the literal hosted image",
+                  catalog.expression(shape), catalog.HOSTED)
+            continue
         expression = catalog.expression(shape)
         for event_name in catalog.PUBLIC_PR_EVENTS:
             for private in (False, None):
@@ -416,6 +421,9 @@ def test_a_profile_that_does_not_match_the_owner_stays_hosted() -> None:
 def test_generator_check_rejects_a_hand_edited_runs_on() -> None:
     gen = ROOT / "scripts/gen-runner-lane.py"
     with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "playwright-profile-hosted-acceptance.yml").write_text(
+            (ROOT / ".github/workflows/playwright-profile-hosted-acceptance.yml").read_text()
+        )
         workflow = Path(tmp) / "w.yml"
         stamped = "jobs:\n  a:\n    # runner-lane: caller-runner\n" + catalog.runs_on_line("caller-runner", "    ") + "\n"
         for text, want in ((stamped, 0),
@@ -432,6 +440,9 @@ def test_generator_check_rejects_a_hand_edited_runs_on() -> None:
 
 def test_generator_checks_yaml_suffix_workflows() -> None:
     with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "playwright-profile-hosted-acceptance.yml").write_text(
+            (ROOT / ".github/workflows/playwright-profile-hosted-acceptance.yml").read_text()
+        )
         (Path(tmp) / "w.yaml").write_text(
             "jobs:\n  a:\n    # runner-lane: caller-runner\n    runs-on: self-hosted\n")
         code = subprocess.run([sys.executable, str(ROOT / "scripts/gen-runner-lane.py"), "--check", tmp],
@@ -453,6 +464,13 @@ def test_analyzer_allowlist_accepts_every_catalog_shape() -> None:
     spec.loader.exec_module(module)
     for shape in catalog.SHAPES:
         expression = " ".join(catalog.expression(shape).split())
+        if shape == catalog.FIXED_HOSTED_PROFILE_ACCEPTANCE:
+            check(
+                "fixed hosted selector is not globally expression-allowlisted",
+                expression in module.REVIEWED_SELECTOR_EXPRESSIONS,
+                False,
+            )
+            continue
         allowed = (
             expression in module.REVIEWED_SELECTOR_EXPRESSIONS
             or module.is_public_pr_hosted_wrapper(
@@ -461,6 +479,157 @@ def test_analyzer_allowlist_accepts_every_catalog_shape() -> None:
         )
         check(f"allowlist has {shape}",
               allowed, True)
+
+
+def _check_fixed_hosted_generator(sources: dict[str, str]) -> tuple[int, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, source in sources.items():
+            (Path(tmp) / name).write_text(source)
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/gen-runner-lane.py"), "--check", tmp],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode, result.stdout + result.stderr
+
+
+def test_fixed_hosted_profile_acceptance_is_bound_to_one_site() -> None:
+    workflow_path = ROOT / ".github/workflows/playwright-profile-hosted-acceptance.yml"
+    source = workflow_path.read_text()
+    workflow = yaml.safe_load(source)
+    job = workflow["jobs"]["hosted-profile-acceptance"]
+    shape = catalog.FIXED_HOSTED_PROFILE_ACCEPTANCE
+    check(
+        "hosted profile job has exact fixed-hosted marker and selector",
+        _runner_lane_site_matches(source, "hosted-profile-acceptance", shape),
+        True,
+    )
+    check("hosted profile job has no matrix routing", "strategy" in job, False)
+    code, output = _check_fixed_hosted_generator(
+        {workflow_path.name: source}
+    )
+    check("fixed-hosted generator accepts authorized workflow/job", code, 0)
+
+    marker = f"    # runner-lane: {shape}\n"
+    mutations = (
+        ("missing marker", {workflow_path.name: source.replace(marker, "", 1)}),
+        ("duplicate marker", {workflow_path.name: source.replace(marker, marker + marker, 1)}),
+        (
+            "marker moved to another job",
+            {workflow_path.name: source.replace("hosted-profile-acceptance:", "other-job:", 1)},
+        ),
+        (
+            "copied marker to another workflow",
+            {workflow_path.name: source, "unauthorized.yml": source},
+        ),
+        (
+            "alternate hosted image",
+            {workflow_path.name: source.replace("runs-on: ubuntu-24.04", "runs-on: ubuntu-latest", 1)},
+        ),
+        (
+            "runner variable override",
+            {workflow_path.name: source.replace(
+                "runs-on: ubuntu-24.04",
+                "runs-on: ${{ vars.CI_LANE_UNTRUSTED || '[\\\"ubuntu-24.04\\\"]' }}",
+                1,
+            )},
+        ),
+        (
+            "matrix override",
+            {workflow_path.name: source.replace(
+                "    timeout-minutes: 25",
+                "    strategy: {matrix: {runner: [ubuntu-24.04]}}\n    timeout-minutes: 25",
+                1,
+            )},
+        ),
+        (
+            "job-level permission override",
+            {workflow_path.name: source.replace(
+                "    timeout-minutes: 25",
+                "    permissions: {contents: write}\n    timeout-minutes: 25",
+                1,
+            )},
+        ),
+        (
+            "secret reference",
+            {workflow_path.name: source.replace(
+                "          RUNNER_OS: ${{ runner.os }}",
+                "          RUNNER_OS: ${{ runner.os }}\n          SECRET: ${{ secrets.TEST }}",
+                1,
+            )},
+        ),
+        (
+            "reusable workflow input path",
+            {workflow_path.name: source.replace(
+                "  pull_request:\n",
+                "  workflow_call:\n    inputs: {}\n  pull_request:\n",
+                1,
+            )},
+        ),
+        (
+            "inline pull_request_target trigger",
+            {workflow_path.name: source.replace(
+                "  pull_request:\n",
+                "  pull_request:\n  pull_request_target: {}\n",
+                1,
+            )},
+        ),
+        (
+            "quoted job-level permission override",
+            {workflow_path.name: source.replace(
+                "    timeout-minutes: 25\n",
+                '    "permissions": {"contents": "write"}\n    timeout-minutes: 25\n',
+                1,
+            )},
+        ),
+        (
+            "duplicate YAML document",
+            {workflow_path.name: source + "\n---\n{}\n"},
+        ),
+        (
+            "oversized workflow source",
+            {workflow_path.name: source + ("#" * 4096)},
+        ),
+    )
+    for label, sources in mutations:
+        code, output = _check_fixed_hosted_generator(sources)
+        check(f"fixed-hosted generator rejects {label}", code != 0, True)
+
+
+def test_fixed_hosted_profile_source_rejects_fifo_without_blocking() -> None:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        fifo = Path(temporary_directory) / catalog.FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW
+        os.mkfifo(fifo)
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import runner_lane_catalog\n"
+            "try:\n"
+            "    runner_lane_catalog.read_fixed_hosted_profile_source(sys.argv[2])\n"
+            "except ValueError as error:\n"
+            "    if 'regular file' not in str(error):\n"
+            "        raise\n"
+            "    print('rejected non-regular workflow')\n"
+            "else:\n"
+            "    raise SystemExit('FIFO was accepted')\n"
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(ROOT / "scripts"), str(fifo)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            check("fixed-hosted workflow FIFO rejected without blocking", False, True)
+            return
+        check("fixed-hosted workflow FIFO rejected without blocking", result.returncode, 0)
+        check(
+            "fixed-hosted workflow FIFO rejected as non-regular",
+            result.stdout.strip(),
+            "rejected non-regular workflow",
+        )
 
 
 if __name__ == "__main__":

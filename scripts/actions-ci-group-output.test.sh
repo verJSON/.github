@@ -614,21 +614,22 @@ cat >"$tmp/normal-check.sh" <<'EOF'
 if [ -e "$ACTIONS_CI_EXCLUSIVE_ACTIVE" ]; then
   exit 11
 fi
-mkdir "$ACTIONS_CI_NORMAL_ACTIVE" || exit 12
+# Normal rows may overlap each other, so each one holds its own marker.
+mkdir -p "$ACTIONS_CI_NORMAL_ACTIVE" && : >"$ACTIONS_CI_NORMAL_ACTIVE/$$" || exit 12
 sleep 0.1
 if [ -e "$ACTIONS_CI_EXCLUSIVE_ACTIVE" ]; then
   exit 13
 fi
-rmdir "$ACTIONS_CI_NORMAL_ACTIVE"
+rm -f "$ACTIONS_CI_NORMAL_ACTIVE/$$"
 EOF
 cat >"$tmp/exclusive-check.sh" <<'EOF'
 #!/usr/bin/env bash
-if [ -e "$ACTIONS_CI_NORMAL_ACTIVE" ]; then
+if [ -n "$(ls -A "$ACTIONS_CI_NORMAL_ACTIVE" 2>/dev/null)" ]; then
   exit 21
 fi
 mkdir "$ACTIONS_CI_EXCLUSIVE_ACTIVE" || exit 22
 sleep 0.1
-if [ -e "$ACTIONS_CI_NORMAL_ACTIVE" ]; then
+if [ -n "$(ls -A "$ACTIONS_CI_NORMAL_ACTIVE" 2>/dev/null)" ]; then
   exit 23
 fi
 rmdir "$ACTIONS_CI_EXCLUSIVE_ACTIVE"
@@ -648,6 +649,68 @@ if ACTIONS_CI_COMMAND_BUDGET_SECONDS=10 \
 else
   cat "$tmp/exclusive.out" "$tmp/exclusive.err" >&2
   fail "an exclusive command overlapped a sibling manifest row"
+fi
+
+# Dispatch order bounds the group's wall time: a long row started last runs
+# alone after its siblings finish. Exclusive rows start first, so they drain
+# nothing; declared budgets then start longest-first, before undeclared rows.
+# No group budget is set, as on a push run: the declaration still orders rows.
+printf 'platform\t%secho %s >>"$ACTIONS_CI_DISPATCH_ORDER"\n' \
+  '' plain-a '@budget=5 ' short-budget '@exclusive ' exclusive '@budget=9 ' long-budget '' plain-b \
+  >"$tmp/dispatch.tsv"
+if ACTIONS_CI_GROUP_MANIFEST="$tmp/dispatch.tsv" \
+  ACTIONS_CI_COMMAND_PARALLELISM=1 \
+  ACTIONS_CI_DISPATCH_ORDER="$tmp/dispatch-order" \
+  bash "$runner" platform >"$tmp/dispatch.out" 2>"$tmp/dispatch.err"; then
+  if [ "$(paste -sd ' ' "$tmp/dispatch-order")" = 'exclusive long-budget short-budget plain-a plain-b' ]; then
+    pass "rows start exclusive first, then by declared budget, then in manifest order"
+  else
+    fail "rows started out of dispatch order: $(paste -sd ' ' "$tmp/dispatch-order")"
+  fi
+else
+  cat "$tmp/dispatch.out" "$tmp/dispatch.err" >&2
+  fail "the dispatch-order fixture group failed"
+fi
+
+# Rows declaring the same budget keep manifest order by row number, not by
+# text: row 11 must not start before row 3.
+{
+  printf 'platform\ttrue\n%.0s' 1 2
+  printf 'platform\t@budget=7 echo row-3 >>"$ACTIONS_CI_DISPATCH_ORDER"\n'
+  printf 'platform\ttrue\n%.0s' 4 5 6 7 8 9 10
+  printf 'platform\t@budget=7 echo row-11 >>"$ACTIONS_CI_DISPATCH_ORDER"\n'
+} >"$tmp/tie.tsv"
+if ACTIONS_CI_GROUP_MANIFEST="$tmp/tie.tsv" \
+  ACTIONS_CI_COMMAND_PARALLELISM=1 \
+  ACTIONS_CI_DISPATCH_ORDER="$tmp/tie-order" \
+  bash "$runner" platform >"$tmp/tie.out" 2>"$tmp/tie.err"; then
+  if [ "$(paste -sd ' ' "$tmp/tie-order")" = 'row-3 row-11' ]; then
+    pass "equal declared budgets start in manifest row order"
+  else
+    fail "equal declared budgets started out of manifest order: $(paste -sd ' ' "$tmp/tie-order")"
+  fi
+else
+  cat "$tmp/tie.out" "$tmp/tie.err" >&2
+  fail "the equal-budget fixture group failed"
+fi
+
+# The runner refuses to start anything when it cannot order every row.
+mkdir -p "$tmp/broken-sort-bin"
+printf '#!/usr/bin/env bash\nexit 2\n' >"$tmp/broken-sort-bin/sort"
+chmod +x "$tmp/broken-sort-bin/sort"
+printf 'platform\ttouch "$ACTIONS_CI_ROW_RAN"\nplatform\t@budget=5 touch "$ACTIONS_CI_ROW_RAN"\n' \
+  >"$tmp/unordered.tsv"
+ACTIONS_CI_GROUP_MANIFEST="$tmp/unordered.tsv" \
+  ACTIONS_CI_ROW_RAN="$tmp/unordered-row-ran" \
+  PATH="$tmp/broken-sort-bin:$PATH" bash "$runner" platform \
+  >"$tmp/unordered.out" 2>"$tmp/unordered.err"
+unordered_status=$?
+if [ "$unordered_status" -eq 2 ] && [ ! -e "$tmp/unordered-row-ran" ] \
+  && grep -q 'could not order actions-ci group platform rows' "$tmp/unordered.err"; then
+  pass "an incomplete dispatch order fails before any row starts"
+else
+  cat "$tmp/unordered.out" "$tmp/unordered.err" >&2
+  fail "an incomplete dispatch order exited $unordered_status or started a row"
 fi
 
 [ "$fails" -eq 0 ] || exit 1

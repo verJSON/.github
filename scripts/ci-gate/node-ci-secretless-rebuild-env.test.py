@@ -1555,6 +1555,37 @@ def main():
                 "CACHE_URL": "redis://localhost:6379/0",
                 "UNDECLARED_SECRET": "must-not-reach-consumer",
             }
+            for blocked_name in (
+                "VERJSON_CI_PLAYWRIGHT_PROFILE",
+                "VERJSON_CI_PLAYWRIGHT_STATE",
+                "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
+            ):
+                for source_name in ("DB_ENV", "CACHE_ENV"):
+                    db_env = (
+                        f"{blocked_name}=attacker"
+                        if source_name == "DB_ENV"
+                        else "DATABASE_URL=postgres://localhost:5432/app_test"
+                    )
+                    cache_env = (
+                        f"{blocked_name}=attacker"
+                        if source_name == "CACHE_ENV"
+                        else "CACHE_URL=redis://localhost:6379/0"
+                    )
+                    try:
+                        compatibility_service_env_from_script(
+                            compatibility_step["run"],
+                            "test:compat",
+                            '[{"script":"test:compat","requiresServices":true}]',
+                            db_env,
+                            cache_env,
+                            {**compatibility_environment, blocked_name: "must-not-reach"},
+                        )
+                    except SystemExit as error:
+                        assert "compatibility service environment includes a protected variable" == str(error)
+                    else:
+                        raise AssertionError(
+                            f"compatibility services accepted blocked {blocked_name} from {source_name}"
+                        )
             denied_compatibility_services = compatibility_service_env_from_script(
                 compatibility_step["run"],
                 "test:compat",

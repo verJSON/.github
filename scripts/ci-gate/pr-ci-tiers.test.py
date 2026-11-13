@@ -102,6 +102,17 @@ class PullRequestCiTierTests(unittest.TestCase):
             condition(workflow, "publish"),
         )
 
+    def test_playwright_profile_acceptance_skips_drafts_and_cancels_superseded_runs(self):
+        # Its real hosted package transaction is Tier 2 integration work.
+        workflow = load_workflow("playwright-profile-hosted-acceptance.yml")
+        self.assertTrue(EXPECTED_REVIEW_TYPES <= pull_request_types(workflow))
+        self.assertIn("github.event.pull_request.number", workflow["concurrency"]["group"])
+        self.assertEqual(workflow["concurrency"]["cancel-in-progress"], "true")
+        self.assertIn(
+            "!github.event.pull_request.draft",
+            condition(workflow, "hosted-profile-acceptance"),
+        )
+
     def test_runner_isolation_runs_on_every_pull_request_and_main_push(self):
         # ADR 0235: the review digests bind every tracked file, so the check
         # cannot sit behind a path filter or a draft guard.
@@ -143,6 +154,7 @@ class PullRequestCiTierTests(unittest.TestCase):
             "shell-test-groups",
             "CLI projects required package surface",
             "container candidate reusable-call contract",
+            "Playwright profile hosted acceptance",
             "ready_for_review",
         ):
             self.assertIn(expected, documentation)

@@ -27,27 +27,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # A schedule event carries no repository record and always runs on the default
+          # branch, so its ref names the default branch (ADR 0260's periodic sweep).
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || (github.event_name == 'schedule' && github.ref_name) || '' }}
           ROLE: ${{ inputs.role }}
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          case "$ROLE" in release|merge|ai-review) ;; *) exit 1 ;; esac
-          [ "$ENVIRONMENT" = "$ROLE-app" ]
-          [ "$REF" = refs/heads/main ]
-          [ "$DEFAULT_BRANCH" = main ]
-          environment_record=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT")
+          fail() { echo "::error::$1" >&2; exit 1; }
+          case "$ROLE" in release|merge|ai-review) ;; *) fail "App key role is not a canonical role" ;; esac
+          [ "$ENVIRONMENT" = "$ROLE-app" ] || fail "App key environment is not the role's own environment"
+          [ "$REF" = refs/heads/main ] || fail "App key job ref is not refs/heads/main"
+          [ "$DEFAULT_BRANCH" = main ] || fail "repository default branch is not main"
+          environment_record=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT") ||
+            fail "App key environment metadata is unavailable"
           jq -e --arg name "$ENVIRONMENT" '
             .name == $name and (.id | type == "number" and . > 0) and
             .deployment_branch_policy.protected_branches == false and
             .deployment_branch_policy.custom_branch_policies == true
-          ' <<<"$environment_record" >/dev/null
-          policies=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies?per_page=100")
+          ' <<<"$environment_record" >/dev/null || fail "App key environment does not use explicit main-only branch admission"
+          policies=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies?per_page=100") ||
+            fail "App key environment branch policies are unavailable"
           jq -e '
             .total_count == 1 and (.branch_policies | length) == 1 and
             .branch_policies[0].name == "main" and
             .branch_policies[0].type == "branch"
-          ' <<<"$policies" >/dev/null
+          ' <<<"$policies" >/dev/null || fail "App key environment permits a ref other than the main branch"
 
   validate-ai-review-key:
     if: ${{ inputs.role == 'ai-review' }}

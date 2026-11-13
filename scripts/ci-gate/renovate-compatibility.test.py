@@ -41,7 +41,7 @@ class CompatibilityPolicyTest(unittest.TestCase):
         results = compat.reconcile(malformed, [])["results"]
         self.assertEqual(["invalid-observation"] * len(malformed), [item["reason"] for item in results])
         for item in malformed:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "^invalid compatibility observation$"):
                 compat.fingerprint(item)
 
     def test_supported_ecosystems_have_bounded_package_shapes(self):

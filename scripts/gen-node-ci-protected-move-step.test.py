@@ -114,10 +114,15 @@ class MoveStepBeforeGuardBoundaryTests(unittest.TestCase):
             "        run: |\n"
             "          echo done\n"
         )
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as raised:
             self.module.move_step_before_guard(
                 document, "Move me", "Before step", "Guard step"
             )
+        self.assertEqual(
+            raised.exception.code,
+            "protected node-ci step ordering boundary drifted: no step marker found "
+            "after 'Move me' (before 'Before step', guard 'Guard step')",
+        )
 
 
 if __name__ == "__main__":

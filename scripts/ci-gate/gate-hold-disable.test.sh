@@ -48,7 +48,7 @@ case "$*" in
     if [ "$count" -eq 1 ]; then cat "$META_FILE"; else cat "$DISABLED_META_FILE"; fi ;;
   "api graphql "*) cat "$GRAPHQL_FILE" ;;
   *"commits/"*"/check-runs "*) cat "$LATEST_FILE" ;;
-  *"actions/runs/7001 --jq"*) printf '2\n' ;;
+  *"actions/runs/7001 --jq"*) printf '%s\n' "${ARM_RUN_ATTEMPT_VALUE-2}" ;;
   *"actions/runs/7001") printf '{"event":"pull_request_target","path":".github/workflows/gate-rearm.yml","head_repository":{"full_name":"verJSON/example"},"run_attempt":2}\n' ;;
   *"actions/runs/8000") jq -nc --arg path "${SOURCE_RUN_PATH:-.github/workflows/ai-review-label-rearm.yml}" --arg actor "${SOURCE_RUN_ACTOR:-maintainer}" --arg branch "${SOURCE_RUN_BRANCH:-main}" --argjson run_id "${SOURCE_RUN_ID:-8000}" --argjson repo_id "${SOURCE_REPO_ID:-1234}" --arg head_repo "${SOURCE_HEAD_REPO:-Verjson/example}" --arg repo_full "${SOURCE_REPO_FULL:-Verjson/example}" --argjson workflow_id "${SOURCE_WORKFLOW_ID:-77}" '{id:$run_id,event:"pull_request_target",path:$path,workflow_id:$workflow_id,run_attempt:1,head_sha:"0123456789abcdef0123456789abcdef01234567",head_branch:$branch,head_repository:{full_name:$head_repo},repository:{id:$repo_id,full_name:$repo_full},actor:{login:$actor}}' ;;
   *"actions/workflows/ai-review-lifecycle-rearm.yml"*"--jq"*) printf '88\n' ;;
@@ -170,11 +170,22 @@ run_arm(){
     SOURCE_REPO_FULL="${SOURCE_REPO_FULL_OVERRIDE:-verJSON/example}" \
     SOURCE_RUN_ACTOR="${SOURCE_RUN_ACTOR_OVERRIDE:-maintainer}" \
     WORKFLOW_REF="${WORKFLOW_REF_OVERRIDE:-Verjson/example/.github/workflows/$caller@refs/heads/main}" \
-    bash "${ARM_SCRIPT:-$tmp/arm.sh}")
+    LC_ALL=C bash "${ARM_SCRIPT:-$tmp/arm.sh}")
 }
 
 
-expect_fail(){ label="$1"; if run_arm >"$tmp/out" 2>&1; then fail "$label"; else pass "$label"; fi; }
+# expect_fail LABEL REASON...: the arm must fail and its output must name every
+# REASON, so a refusal by an earlier, unrelated check cannot pass for this one.
+expect_fail(){
+  local label="$1" reason; shift
+  if run_arm >"$tmp/out" 2>&1; then fail "$label"; return; fi
+  for reason in "$@"; do
+    grep -qF -- "$reason" "$tmp/out" || { fail "$label: no line names: $reason ($(tail -1 "$tmp/out"))"; return; }
+  done
+  pass "$label"
+}
+# Names REASON in the last refusal's output, for a hand-written negative block.
+names_reason(){ grep -qF -- "$1" "$tmp/out"; }
 run_preauthorize(){ bash "$tmp/preauthorize.sh"; }
 
 if python3 - "$workflow" <<'PY'
@@ -307,6 +318,8 @@ for permission in read triage write push; do
     fail "$permission actor cleared a draft hold"
   elif grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS"; then
     fail "$permission actor reached privileged dispatch"
+  elif ! names_reason 'lacks maintain/admin permission to clear a hold'; then
+    fail "$permission actor is rejected before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
   else
     pass "$permission actor is rejected before App-token mint"
   fi
@@ -331,6 +344,8 @@ if run_preauthorize >"$tmp/out" 2>&1; then
   fail "permission API failure cleared a draft hold"
 elif grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS"; then
   fail "permission API failure reached privileged dispatch"
+elif ! names_reason '::error::could not authorize hold-clearing actor'; then
+  fail "permission API failure remains fail-closed before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
 else
   pass "permission API failure remains fail-closed before App-token mint"
 fi
@@ -343,6 +358,8 @@ if run_preauthorize >"$tmp/out" 2>&1; then
   fail "triage actor cleared a hold label"
 elif grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS"; then
   fail "triage actor reached privileged dispatch after removing a hold label"
+elif ! names_reason '::error::maintainer lacks maintain/admin permission to clear a hold'; then
+  fail "triage actor is denied hold-label removal before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
 else
   pass "triage actor is denied hold-label removal before App-token mint"
 fi
@@ -373,6 +390,8 @@ if run_preauthorize >"$tmp/out" 2>&1; then
   fail "permission API failure allowed hold-label removal"
 elif grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS"; then
   fail "permission API failure reached privileged dispatch for hold-label removal"
+elif ! names_reason '::error::could not authorize hold-clearing actor'; then
+  fail "hold-label permission API failure fails closed before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
 else
   pass "hold-label permission API failure fails closed before App-token mint"
 fi
@@ -391,6 +410,8 @@ for permission in triage write; do
       || grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS" \
       || [ -s "$GITHUB_ENV" ]; then
     fail "$permission title-hold removal did not fail before token mint for the event actor"
+  elif ! names_reason '::error::pr-author lacks maintain/admin permission to clear a hold'; then
+    fail "$permission event actor is checked by login and denied title-hold removal before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
   else
     pass "$permission event actor is checked by login and denied title-hold removal before App-token mint"
   fi
@@ -418,6 +439,8 @@ for label in ai-review re-review; do
         || grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS" \
         || [ -s "$GITHUB_ENV" ]; then
       fail "$permission $label actor was not rejected before App-token mint"
+    elif ! names_reason '::error::pr-author lacks maintain/admin permission to clear a hold'; then
+      fail "$permission actor rejected for $label before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
     else
       pass "$permission actor rejected for $label before App-token mint"
     fi
@@ -450,6 +473,8 @@ for old_title in 'chore: DO NOT MERGE QA' 'chore: QA' 'REDO NOT MERGE QA' 'DO NO
     export EVENT_OLD_TITLE_HELD="$old_held" EVENT_NEW_TITLE_HELD="$new_held"
     if run_preauthorize >"$tmp/out" 2>&1; then
       fail "non-clearing title edit was authorized: $old_title -> $new_title"
+    elif ! names_reason '::error::title edit did not change hold state'; then
+      fail "title edit without a hold-state transition is rejected before App-token mint: rejected for another reason: $(tail -1 "$tmp/out")"
     else
       pass "title edit without a hold-state transition is rejected before App-token mint"
     fi
@@ -503,12 +528,21 @@ elif grep -q 'AI review environment policy did not succeed' "$tmp/out" \
 else
   fail "failed App-key policy did not fail visibly before review dispatch"
 fi
-write_hold; printf '{"data":null,"errors":[{"message":"denied"}]}\n' >"$GRAPHQL_FILE"
-expect_fail "HTTP-200 GraphQL errors fail the hold closed"
+# The mutation still names the expected PR, so only the errors check can reject it (#1995).
+write_hold; printf '{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"id":"PR_id"}}},"errors":[{"message":"denied"}]}\n' >"$GRAPHQL_FILE"
+if run_arm >"$tmp/out" 2>&1; then
+  fail "HTTP-200 GraphQL errors fail the hold closed"
+elif grep -qF '::error::GitHub did not confirm auto-merge was disabled for the expected PR' "$tmp/out"; then
+  pass "HTTP-200 GraphQL errors fail the hold closed"
+else
+  fail "HTTP-200 GraphQL errors failed for another reason: $(tail -1 "$tmp/out")"
+fi
 write_hold; printf '{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"id":"wrong"}}}}\n' >"$GRAPHQL_FILE"
-expect_fail "a mutation response for another PR fails closed"
+expect_fail "a mutation response for another PR fails closed" \
+  '::error::GitHub did not confirm auto-merge was disabled for the expected PR'
 write_hold; printf '{"id":"PR_id","autoMergeRequest":{"enabledAt":"still-on"}}\n' >"$DISABLED_META_FILE"
-expect_fail "auto-merge remaining enabled after mutation fails closed"
+expect_fail "auto-merge remaining enabled after mutation fails closed" \
+  '::error::authoritative PR state still reports auto-merge enabled'
 
 write_terminal_hold() {
   : >"$CALLS"
@@ -539,6 +573,9 @@ fi
 sed '/echo "check_id=\$check_id"/d' "$tmp/arm.sh" >"$tmp/arm-no-early-check-id.sh"
 if app_id_mismatch_is_terminalized "$tmp/arm-no-early-check-id.sh"; then
   fail "removing the early check-ID export escaped the terminal-state mutation test"
+elif grep -q '^check_id=' "$GITHUB_OUTPUT" \
+  || ! names_reason '::error::created authorization check identity does not match the configured App and receipt'; then
+  fail "the early check-ID mutant was rejected for another reason: $(tail -1 "$tmp/out")"
 else
   pass "the terminal-state mutation test detects removal of the early check-ID export"
 fi
@@ -567,7 +604,14 @@ for malformed in truncated labels-not-array label-name-not-string title-not-stri
     label-name-not-string) jq '.labels=[{"name":{"value":"hold"}}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE" ;;
     title-not-string) jq '.title=42' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE" ;;
   esac
-  expect_fail "$malformed hold metadata fails closed before authorization"
+  # jq's own diagnostic for the field it could not read.
+  case "$malformed" in
+    truncated) malformed_reason='parse error' ;;
+    labels-not-array) malformed_reason='Cannot iterate over string' ;;
+    *) malformed_reason='explode input must be a string' ;;
+  esac
+  expect_fail "$malformed hold metadata fails closed before authorization" \
+  "$malformed_reason"
   ! grep -q 'check-runs\|workflow run' "$CALLS" \
     && pass "$malformed hold metadata cannot authorize or dispatch" \
     || fail "$malformed hold metadata reached authorization or dispatch"
@@ -581,7 +625,12 @@ for unreadable in empty null missing-hold-fields; do
     missing-hold-fields)
       jq 'del(.labels, .title, .isDraft)' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE" ;;
   esac
-  expect_fail "$unreadable PR metadata fails closed before authorization"
+  case "$unreadable" in
+    missing-hold-fields) unreadable_reason='Cannot iterate over null' ;;
+    *) unreadable_reason='::error::current PR head is unavailable' ;;
+  esac
+  expect_fail "$unreadable PR metadata fails closed before authorization" \
+  "$unreadable_reason"
   ! grep -q 'check-runs\|workflow run' "$CALLS" \
     && pass "$unreadable PR metadata cannot authorize or dispatch" \
     || fail "$unreadable PR metadata reached authorization or dispatch"
@@ -589,7 +638,8 @@ done
 
 write_terminal_hold
 export GH_VIEW_FAIL=true
-expect_fail "an arm metadata API failure fails closed"
+expect_fail "an arm metadata API failure fails closed" \
+  '::error::current PR metadata could not be read'
 unset GH_VIEW_FAIL
 ! grep -q 'check-runs\|workflow run' "$CALLS" \
   && pass "an arm metadata API failure cannot authorize or dispatch" \
@@ -619,24 +669,36 @@ else fail "hold removal did not reuse authorization: $(tail -1 "$tmp/out")"; fi
 
 write_repromotion
 jq '.external_id |= sub(":7:"; ":8:")' "$LATEST_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_FILE"
-expect_fail "re-promotion refuses an approved check whose external_id names another pull request (#1648)"
+expect_fail "re-promotion refuses an approved check whose external_id names another pull request (#1648)" \
+  '::error::the approved authorization check does not name an arm run for this exact pull request head; refusing re-promotion'
 ! grep -q 'workflow run ai-privileged-merge.yml' "$CALLS" \
   && pass "a foreign-identity approved check never dispatches privileged merge" \
   || fail "a foreign-identity approved check dispatched privileged merge"
 
 write_repromotion
 jq 'del(.external_id)' "$LATEST_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_FILE"
-expect_fail "re-promotion refuses an approved check that carries no arm identity (#1648)"
+expect_fail "re-promotion refuses an approved check that carries no arm identity (#1648)" \
+  '::error::the approved authorization check does not name an arm run for this exact pull request head; refusing re-promotion'
 ! grep -q 'workflow run ai-privileged-merge.yml' "$CALLS" \
   && pass "an identity-less approved check never dispatches privileged merge" \
   || fail "an identity-less approved check dispatched privileged merge"
 
 write_repromotion
 jq '.external_id |= sub("a{64}$"; "not-a-nonce")' "$LATEST_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_FILE"
-expect_fail "re-promotion refuses an approved check whose external_id carries a malformed nonce (#1648)"
+expect_fail "re-promotion refuses an approved check whose external_id carries a malformed nonce (#1648)" \
+  '::error::the approved authorization check does not name an arm run for this exact pull request head; refusing re-promotion'
 ! grep -q 'workflow run ai-privileged-merge.yml' "$CALLS" \
   && pass "a malformed-nonce approved check never dispatches privileged merge" \
   || fail "a malformed-nonce approved check dispatched privileged merge"
+
+for attempt in '' 0 x; do
+  write_repromotion
+  ARM_RUN_ATTEMPT_VALUE="$attempt" expect_fail "re-promotion refuses an arm run attempt of '$attempt'" \
+    "::error::the approved authorization's arm run attempt is unavailable or malformed; refusing re-promotion"
+  ! grep -q 'workflow run ai-privileged-merge.yml' "$CALLS" \
+    && pass "an arm run attempt of '$attempt' never dispatches privileged merge" \
+    || fail "an arm run attempt of '$attempt' dispatched privileged merge"
+done
 
 for release_case in hold-label normalized-label ready-for-review edited-title; do
   write_repromotion
@@ -660,6 +722,8 @@ if run_arm >"$tmp/out" 2>&1; then
   fail "triage actor was allowed to clear a hold label"
 elif grep -q 'commits/.*/check-runs\|workflow run' "$CALLS"; then
   fail "triage actor clearing a hold label reached receipt lookup or dispatch"
+elif ! names_reason '::error::hold removal lacks trusted actor authorization'; then
+  fail "triage actor cannot use hold-label removal for receipt promotion: rejected for another reason: $(tail -1 "$tmp/out")"
 else
   pass "triage actor cannot use hold-label removal for receipt promotion"
 fi
@@ -670,6 +734,8 @@ if run_arm >"$tmp/out" 2>&1; then
   fail "unauthorized ready-for-review actor was silently accepted"
 elif grep -q 'workflow run ai-privileged-merge.yml\|workflow run ai-review-merge.yml' "$CALLS"; then
   fail "unauthorized ready-for-review actor reached privileged dispatch"
+elif ! names_reason '::error::hold removal lacks trusted actor authorization'; then
+  fail "unauthorized ready-for-review actor cannot dispatch privileged work: rejected for another reason: $(tail -1 "$tmp/out")"
 else
   pass "unauthorized ready-for-review actor cannot dispatch privileged work"
 fi
@@ -692,7 +758,12 @@ for rejected in replay stale-head actor-mismatch; do
     stale-head) export EVENT_HEAD_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
     actor-mismatch) export REQUEST_ACTOR=other ;;
   esac
-  expect_fail "lifecycle delivery rejects $rejected"
+  case "$rejected" in
+    replay) rejected_reason='::error::local arm deliveries cannot be replayed by rerunning a workflow' ;;
+    *) rejected_reason='::error::local arm delivery source, repository, or actor is not trusted' ;;
+  esac
+  expect_fail "lifecycle delivery rejects $rejected" \
+  "$rejected_reason"
   if grep -q 'workflow run\|--method POST repos/Verjson/example/check-runs' "$CALLS"; then
     fail "rejected lifecycle delivery reached authorization or dispatch"
   else pass "rejected lifecycle delivery stops before authority"; fi
@@ -721,7 +792,8 @@ if ARM_SCRIPT="$tmp/arm-substituted.sh" run_arm >"$tmp/out" 2>&1 \
   pass "valid constant substitution is detected instead of matching the recovered receipt policy"
 else fail "constant substitution mutation escaped the exact-value assertion"; fi
 write_repromotion; export RECEIPT_COUNT=0
-expect_fail "expired receipt requires explicit admin recovery"
+expect_fail "expired receipt requires explicit admin recovery" \
+  '::error::the approved head'"'"'s arm receipt expired or is ambiguous'
 ! grep -q 'workflow run ai-review-merge.yml' "$CALLS" \
   && pass "expired receipt never automatically dispatches another paid review" \
   || fail "expired receipt dispatched paid review"
@@ -741,7 +813,8 @@ else fail "pending authorization was not handled spend-safely"; fi
 write_repromotion
 jq '.status="in_progress" | .conclusion=null' "$LATEST_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_FILE"
 export RECEIPT_COUNT=0
-expect_fail "unproven pending authorization requires admin recovery"
+expect_fail "unproven pending authorization requires admin recovery" \
+  '::error::the pending authorization cannot be tied to a live exact arm receipt'
 grep -q 'administrator must recover' "$CALLS" \
   && pass "unproven pending authorization emits recovery guidance" \
   || fail "unproven pending authorization guidance missing"
@@ -751,7 +824,8 @@ grep -q 'administrator must recover' "$CALLS" \
 
 write_repromotion
 jq '.status="in_progress" | .conclusion=null | .external_id |= sub(":7:"; ":8:")' "$LATEST_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_FILE"
-expect_fail "a pending check whose external_id names another pull request is not receipt-proven (#1648)"
+expect_fail "a pending check whose external_id names another pull request is not receipt-proven (#1648)" \
+  '::error::the pending authorization cannot be tied to a live exact arm receipt'
 grep -q 'administrator must recover' "$CALLS" && ! grep -q 'workflow run ai-review-merge.yml' "$CALLS" \
   && pass "a foreign-identity pending check routes to admin recovery without a paid review" \
   || fail "a foreign-identity pending check was not routed to admin recovery"
@@ -773,13 +847,15 @@ jq -nc --arg head "$head_sha" '{id:"PR_id",state:"OPEN",isDraft:false,title:"cha
 export EVENT_ACTION=labeled EVENT_LABEL=re-review REQUEST_ACTOR=maintainer ACTOR_PERMISSION=triage
 export EVENT_NAME=pull_request_target
 export REREVIEW_PROVIDER=openai REREVIEW_MODEL=gpt-5.6-luna REREVIEW_BUDGET_USD=1.00
-expect_fail "triage actor cannot authorize a paid re-review"
+expect_fail "triage actor cannot authorize a paid re-review" \
+  '::error::maintainer lacks maintain/admin permission for paid re-review'
 ! grep -q 'check-runs' "$CALLS" && pass "unauthorized actor fails before receipt or paid dispatch" || fail "unauthorized actor reached authorization creation"
 
 : >"$CALLS"
 jq '.labels=[]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"
 export ACTOR_PERMISSION=maintain
-expect_fail "withdrawn re-review label fails authoritative current-state validation"
+expect_fail "withdrawn re-review label fails authoritative current-state validation" \
+  '::error::re-review event does not match current PR labels'
 ! grep -q -- '--method POST repos/Verjson/example/check-runs\|workflow run ai-review-merge.yml' "$CALLS" \
   && pass "withdrawn re-review cannot create a receipt check or dispatch" \
   || fail "withdrawn re-review reached authorization or paid dispatch"
@@ -862,7 +938,8 @@ jq -nc --arg head "$head_sha" '{id:"PR_id",state:"OPEN",isDraft:false,title:"cha
 recovery_temp="$tmp/recovery"
 mkdir "$recovery_temp"
 export EVENT_NAME=pull_request_target EVENT_ACTION=labeled EVENT_LABEL=re-review REQUEST_ACTOR=maintainer ACTOR_PERMISSION=maintain GITHUB_RUN_ATTEMPT=2 RUNNER_TEMP="$recovery_temp"
-expect_fail "rerun cannot replay an explicit re-review delivery"
+expect_fail "rerun cannot replay an explicit re-review delivery" \
+  '::error::local arm deliveries cannot be replayed by rerunning a workflow'
 ! grep -q -- '--method POST repos/Verjson/example/check-runs' "$CALLS" \
   && pass "replayed delivery fails before authorization creation" \
   || fail "replayed delivery created authorization"
@@ -872,14 +949,17 @@ jq '.labels=[]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"
 repeated_recovery_temp="$tmp/repeated-recovery"
 mkdir "$repeated_recovery_temp"
 export GITHUB_RUN_ATTEMPT=3 RUNNER_TEMP="$repeated_recovery_temp"
-expect_fail "later rerun remains fail-closed after label consumption"
+expect_fail "later rerun remains fail-closed after label consumption" \
+  '::error::local arm deliveries cannot be replayed by rerunning a workflow'
 export GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$tmp"
 
 : >"$CALLS"; : >"$GITHUB_OUTPUT"
 jq '.labels=[{"name":"ai-review"}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"
 export EVENT_ACTION=labeled EVENT_LABEL=ai-review ACTOR_PERMISSION=triage PR_EDIT_FAIL=true
 export EVENT_NAME=pull_request_target
-expect_fail "unauthorized ai-review label fails even when cleanup cannot remove it"
+expect_fail "unauthorized ai-review label fails even when cleanup cannot remove it" \
+  '::error::unauthorized AI review label could not be removed; future events remain blocked' \
+  '::error::maintainer lacks maintain/admin permission for paid AI review'
 : >"$CALLS"
 export EVENT_NAME=pull_request_target EVENT_ACTION=synchronize EVENT_LABEL='' REQUEST_ACTOR=pusher
 sync_retained_temp="$tmp/sync-retained"; mkdir "$sync_retained_temp"; export RUNNER_TEMP="$sync_retained_temp"

@@ -1076,11 +1076,13 @@ fi
 mkdir -p "$tmp/aux-wrong"
 cp "$tmp/aux-acquire/package-lock.json" "$tmp/aux-wrong/package-lock.json"
 cp -R "$tmp/aux-acquire/transfer" "$tmp/aux-wrong/transfer"
-if run_install "$tmp/aux-wrong" 7001 3 attacker/other "$auxiliary_commit" .worker-schema/migrations >/dev/null 2>&1 \
-    || [ -e "$tmp/aux-wrong/npm.log" ]; then
+if run_install "$tmp/aux-wrong" 7001 3 attacker/other "$auxiliary_commit" .worker-schema/migrations \
+    >"$tmp/aux-wrong.out" 2>&1 || [ -e "$tmp/aux-wrong/npm.log" ]; then
   fail "a mismatched auxiliary repository reached npm"
-else
+elif grep -qFx '::error::secretless cache auxiliary source identity mismatch' "$tmp/aux-wrong.out"; then
   pass "a mismatched auxiliary repository fails before npm"
+else
+  fail "a mismatched auxiliary repository failed for another reason: $(cat "$tmp/aux-wrong.out")"
 fi
 
 mkdir -p "$tmp/earlier-attempt"
@@ -1094,20 +1096,29 @@ else
 fi
 
 for mutation in run future-attempt lock digest; do
-  fixture="$tmp/reject-$mutation"
+  fixture="$tmp/reject-$mutation" reason=
   mkdir -p "$fixture"
   cp "$tmp/acquire/package-lock.json" "$fixture/package-lock.json"
   cp -R "$tmp/acquire/transfer" "$fixture/transfer"
   case "$mutation" in
+    run|future-attempt)
+      reason='::error::secretless cache does not belong to this run or a completed earlier attempt' ;;&
     run) run_id=7002; run_attempt=3 ;;
     future-attempt) run_id=7001; run_attempt=2 ;;
-    lock) printf '\n' >> "$fixture/package-lock.json"; run_id=7001; run_attempt=3 ;;
-    digest) printf 'tamper\n' >> "$fixture/transfer/npm-private-cache.tar"; run_id=7001; run_attempt=3 ;;
+    lock) printf '\n' >> "$fixture/package-lock.json"; run_id=7001; run_attempt=3
+      reason='::error::secretless cache does not match this package lock' ;;
+    # Same size, different bytes: an appended byte would trip the size check
+    # first and leave the digest check unexercised.
+    digest) printf 'X' | dd of="$fixture/transfer/npm-private-cache.tar" bs=1 seek=0 conv=notrunc status=none
+      run_id=7001; run_attempt=3
+      reason='::error::secretless cache digest mismatch' ;;
   esac
-  if run_install "$fixture" "$run_id" "$run_attempt" >/dev/null 2>&1 || [ -e "$fixture/npm.log" ]; then
+  if run_install "$fixture" "$run_id" "$run_attempt" >"$fixture.out" 2>&1 || [ -e "$fixture/npm.log" ]; then
     fail "a transfer with a mismatched $mutation identity reached npm"
-  else
+  elif grep -qFx "$reason" "$fixture.out"; then
     pass "a transfer with a mismatched $mutation identity fails before npm"
+  else
+    fail "a transfer with a mismatched $mutation identity failed for another reason: $(cat "$fixture.out")"
   fi
 done
 
@@ -1117,10 +1128,12 @@ cp -R "$tmp/acquire/transfer" "$tmp/corrupt/transfer"
 printf 'not a tar archive\n' > "$tmp/corrupt/transfer/npm-private-cache.tar"
 if ! rebind_payload_manifest "$tmp/corrupt"; then
   fail "could not prepare the corrupt private payload fixture"
-elif run_install "$tmp/corrupt" >/dev/null 2>&1 || [ -e "$tmp/corrupt/npm.log" ]; then
+elif run_install "$tmp/corrupt" >"$tmp/corrupt.out" 2>&1 || [ -e "$tmp/corrupt/npm.log" ]; then
   fail "a corrupt private payload reached npm"
-else
+elif grep -q '^tarfile\.ReadError: ' "$tmp/corrupt.out"; then
   pass "a corrupt private payload fails before npm"
+else
+  fail "a corrupt private payload failed for another reason: $(cat "$tmp/corrupt.out")"
 fi
 
 mkdir -p "$tmp/traversal"

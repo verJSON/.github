@@ -48,15 +48,17 @@ class ChangelogTagVisibilityTests(unittest.TestCase):
     def test_missing_or_shallow_fetch_depth_fails_the_contract(self) -> None:
         for path in RUNTIME_WORKFLOWS:
             text = path.read_text(encoding="utf-8")
+            shallow = "consumer checkout does not fetch complete history and tags"
+            untagged = "consumer checkout does not explicitly fetch tags"
             attacks = (
-                text.replace("          fetch-depth: 0\n", "", 1),
-                text.replace("          fetch-depth: 0", "          fetch-depth: 1", 1),
-                text.replace("          fetch-tags: true\n", "", 1),
-                text.replace("          fetch-tags: true", "          fetch-tags: false", 1),
+                (text.replace("          fetch-depth: 0\n", "", 1), shallow),
+                (text.replace("          fetch-depth: 0", "          fetch-depth: 1", 1), shallow),
+                (text.replace("          fetch-tags: true\n", "", 1), untagged),
+                (text.replace("          fetch-tags: true", "          fetch-tags: false", 1), untagged),
             )
-            for index, attack in enumerate(attacks):
+            for index, (attack, reason) in enumerate(attacks):
                 with self.subTest(path=path.name, attack=index):
-                    with self.assertRaises(AssertionError):
+                    with self.assertRaisesRegex(AssertionError, "^" + re.escape(reason) + "$"):
                         validate_complete_tag_checkout(attack)
 
     def test_generators_route_both_caller_modes_to_reviewed_entrypoints(self) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 import stat
 import subprocess
+import traceback
 import types
 import unittest
 import warnings
@@ -101,6 +102,22 @@ class AcquirerBehavior(unittest.TestCase):
     def setUpClass(cls):
         cls.acquirer, cls.source, cls.supervisor_source, cls.supervisor = load_acquirer()
         cls.error = cls.acquirer["AcquisitionError"]
+
+    def assertRaisedBy(self, guard, function, *args):
+        """A bare AcquisitionError carries no message, so its reason is the guard that raised it."""
+        try:
+            function(*args)
+        except self.error as error:
+            # assertRaises drops the traceback, and the raising frame is the reason.
+            frame = traceback.extract_tb(error.__traceback__)[-1]
+        else:
+            self.fail("AcquisitionError not raised")
+        self.assertEqual(frame.filename, "<exact-sandbox-acquirer>")
+        lines = self.source.splitlines()
+        start = frame.lineno - 2
+        while not lines[start].lstrip().startswith("if "):
+            start -= 1
+        self.assertIn(guard, "\n".join(lines[start:frame.lineno - 1]))
 
     def packages(self, filename=None, *, duplicate=b"", fields=b""):
         filename = filename or f"pool/main/a/apparmor/{ARCHIVE_NAME}"
@@ -402,9 +419,23 @@ class AcquirerBehavior(unittest.TestCase):
             "ambiguous": self.packages(f"pool//main/a/apparmor/{ARCHIVE_NAME}"),
             "wrong-arch": valid.replace(b"Architecture: all", b"Architecture: amd64"),
         }
+        # The filename shape guard also refuses an absolute or traversing path, so
+        # each case names the guard that must reject it first.
+        record_shape = 'or not filename_raw.startswith(b"pool/")\n        or b".." in filename_raw.split(b"/")'
+        path_shape = 'or "%" in filename\n        or "//" in filename'
+        guards = {
+            "missing": "if any(name not in fields for name in required):",
+            "duplicate-field": "if name in fields:",
+            "malformed-size": 're.fullmatch(rb"[1-9][0-9]{0,8}", size_raw) is None',
+            "absolute": record_shape,
+            "traversal": record_shape,
+            "encoded": path_shape,
+            "ambiguous": path_shape,
+            "wrong-arch": "if not matches or len(set(matches)) != 1:",
+        }
         for name, payload in cases.items():
-            with self.subTest(name=name), self.assertRaises(self.error):
-                self.parse([payload])
+            with self.subTest(name=name):
+                self.assertRaisedBy(guards[name], self.parse, [payload])
         conflict = self.packages().replace(b"Size: 4096", b"Size: 4097")
         with self.assertRaises(self.error):
             self.parse([valid, conflict])
@@ -483,18 +514,21 @@ class AcquirerBehavior(unittest.TestCase):
             self.acquirer["os"] = fake_os(metadata())
             actual, _identity = self.acquirer["open_regular"]("/archive", executable=False, maximum=32)
             self.assertEqual(actual, content)
+            # The post-read identity check also refuses an oversized file, so each
+            # case names the pre-read metadata guard that must reject it first.
             unsafe = (
-                metadata(st_uid=1),
-                metadata(st_gid=1),
-                metadata(st_nlink=2),
-                metadata(st_mode=regular | 0o022),
-                metadata(st_mode=stat.S_IFLNK | 0o600),
-                metadata(st_size=33),
+                (metadata(st_uid=1), "or before.st_uid != 0"),
+                (metadata(st_gid=1), "or before.st_gid != 0"),
+                (metadata(st_nlink=2), "or before.st_nlink != 1"),
+                (metadata(st_mode=regular | 0o022), "or before.st_mode & 0o022"),
+                (metadata(st_mode=stat.S_IFLNK | 0o600), "not stat.S_ISREG(before.st_mode)"),
+                (metadata(st_size=33), "or before.st_size > maximum"),
             )
-            for value in unsafe:
-                with self.subTest(value=value), self.assertRaises(self.error):
+            for value, guard in unsafe:
+                with self.subTest(value=value):
                     self.acquirer["os"] = fake_os(value)
-                    self.acquirer["open_regular"]("/archive", executable=False, maximum=32)
+                    self.assertRaisedBy(
+                        guard, lambda: self.acquirer["open_regular"]("/archive", executable=False, maximum=32))
             with self.assertRaises(self.error):
                 self.acquirer["os"] = fake_os(metadata(), capability=True)
                 self.acquirer["open_regular"]("/archive", executable=False, maximum=32)
@@ -544,20 +578,26 @@ class AcquirerBehavior(unittest.TestCase):
                 self.acquirer["tar_command"] = original
 
         self.assertEqual(run(golden), PROFILE)
+        escaping = 'if name.startswith("/") or posixpath.normpath(name).startswith("../"):'
+        header = 'or header[0] != b"-rw-r--r--"\n        or header[1] != b"0/0"'
+        # Every case below that changes the extracted bytes also changes their
+        # length, so the declared-size guard rejects it before validate_profile
+        # reads the content: these pin the size guard, not profile content checks.
+        declared_size = "if not profile_bytes or len(profile_bytes) != declared_profile_size:"
         cases = (
-            (b"/" + PROFILE_MEMBER.encode() + b"\n", golden[1], PROFILE),
-            (b"../" + PROFILE_MEMBER.encode() + b"\n", golden[1], PROFILE),
-            (golden[0] + golden[0], golden[1], PROFILE),
-            (golden[0], golden[1] + golden[1], PROFILE),
-            (golden[0], golden[1].replace(b"-rw-r--r--", b"lrwxrwxrwx"), PROFILE),
-            (golden[0], golden[1].replace(b"0/0", b"1/0"), PROFILE),
-            (golden[0], golden[1].replace(str(len(PROFILE)).encode(), b"1", 1), PROFILE),
-            (golden[0], golden[1], PROFILE[:-1]),
-            (golden[0], golden[1], b"not a profile"),
+            ((b"/" + PROFILE_MEMBER.encode() + b"\n", golden[1], PROFILE), escaping),
+            ((b"../" + PROFILE_MEMBER.encode() + b"\n", golden[1], PROFILE), escaping),
+            ((golden[0] + golden[0], golden[1], PROFILE), "if aliases != [target]:"),
+            ((golden[0], golden[1] + golden[1], PROFILE), "if len(member_lines) != 1:"),
+            ((golden[0], golden[1].replace(b"-rw-r--r--", b"lrwxrwxrwx"), PROFILE), header),
+            ((golden[0], golden[1].replace(b"0/0", b"1/0"), PROFILE), header),
+            ((golden[0], golden[1].replace(str(len(PROFILE)).encode(), b"1", 1), PROFILE), declared_size),
+            ((golden[0], golden[1], PROFILE[:-1]), declared_size),  # one byte short of the declared size
+            ((golden[0], golden[1], b"not a profile"), declared_size),  # a different length, not a content check
         )
-        for outputs in cases:
-            with self.subTest(outputs=outputs[0][:24]), self.assertRaises((self.error, UnicodeDecodeError)):
-                run(outputs)
+        for outputs, guard in cases:
+            with self.subTest(outputs=outputs[0][:24]):
+                self.assertRaisedBy(guard, run, outputs)
 
     def test_staging_rejects_fsync_identity_and_unexpected_entries(self):
         calls = []
@@ -584,9 +624,11 @@ class AcquirerBehavior(unittest.TestCase):
             )
             self.acquirer["stage_profile"](PROFILE, (1, 10))
             self.assertEqual([call[0] for call in calls[:3]], ["write", "rename", "fsync"])
-            self.acquirer["write_root_file"] = lambda *args: (_ for _ in ()).throw(FileExistsError("collision"))
-            with self.assertRaises(FileExistsError):
+            collision = FileExistsError("collision")
+            self.acquirer["write_root_file"] = lambda *args: (_ for _ in ()).throw(collision)
+            with self.assertRaises(FileExistsError) as raised:
                 self.acquirer["stage_profile"](PROFILE, (1, 10))
+            self.assertIs(raised.exception, collision)
             self.acquirer["write_root_file"] = lambda path, data, mode: calls.append(("write", path, data, mode))
             fake_os.listdir = lambda path: ["bwrap-userns-restrict", "unexpected"]
             with self.assertRaises(self.error):
@@ -603,9 +645,11 @@ class AcquirerBehavior(unittest.TestCase):
                 (2, 10, stat.S_IFREG | 0o400, 0, 0, 1, len(PROFILE), 1, 1),
             )
             self.acquirer["stage_profile"](PROFILE, (1, 10))
-            fake_os.fsync = lambda descriptor: (_ for _ in ()).throw(OSError("fsync"))
-            with self.assertRaises(OSError):
+            fsync_failure = OSError("fsync")
+            fake_os.fsync = lambda descriptor: (_ for _ in ()).throw(fsync_failure)
+            with self.assertRaises(OSError) as raised:
                 self.acquirer["stage_profile"](PROFILE, (1, 10))
+            self.assertIs(raised.exception, fsync_failure)
         finally:
             self.acquirer.update(originals)
 
@@ -636,8 +680,9 @@ class AcquirerBehavior(unittest.TestCase):
             events.clear()
             self.acquirer["CURRENT_PHASE"] = "package-acquisition-key"
             self.acquirer["acquire"] = lambda: (_ for _ in ()).throw(self.error())
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as raised:
                 self.acquirer["main"]()
+            self.assertEqual(raised.exception.code, 1)
             self.assertEqual(
                 [event for event in events if event[0] == "cleanup"],
                 [("cleanup", self.acquirer["SESSION_ROOT"]), ("cleanup", self.acquirer["STAGE_ROOT"])],
@@ -650,8 +695,9 @@ class AcquirerBehavior(unittest.TestCase):
             self.acquirer["sys"] = types.SimpleNamespace(stderr=Sink())
             self.acquirer["acquire"] = lambda: None
             self.acquirer["cleanup_owned_root"] = lambda path: (_ for _ in ()).throw(self.error())
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as raised:
                 self.acquirer["main"]()
+            self.assertEqual(raised.exception.code, 1)
             self.assertIn(b"phase=package-profile-cleanup", self.acquirer["sys"].stderr.buffer.getvalue())
         finally:
             self.acquirer.update(original)
@@ -684,8 +730,9 @@ class AcquirerBehavior(unittest.TestCase):
                         raise RuntimeError("BARE_CLASSIFICATION_SECRET")
 
                     self.acquirer["acquire"] = fail_in_phase
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaises(SystemExit) as raised:
                         self.acquirer["main"]()
+                    self.assertEqual(raised.exception.code, 1)
                     self.assertEqual(
                         sink.buffer.getvalue(),
                         self.acquirer["ACQUISITION_DIAGNOSTICS"][phase],
@@ -700,8 +747,9 @@ class AcquirerBehavior(unittest.TestCase):
                 raise RuntimeError("BARE_UNKNOWN_SECRET")
 
             self.acquirer["acquire"] = fail_unknown_phase
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as raised:
                 self.acquirer["main"]()
+            self.assertEqual(raised.exception.code, 1)
             self.assertEqual(sink.buffer.getvalue(), self.acquirer["UNKNOWN_DIAGNOSTIC"])
             self.assertNotIn(b"BARE_UNKNOWN_SECRET", sink.buffer.getvalue())
         finally:

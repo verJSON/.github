@@ -7,9 +7,15 @@ if [ "$#" -ne 4 ] || [[ ! "$1" =~ ^[0123456789abcdef]{40}$ ]]; then
 fi
 
 ref="$1" package="$2" candidate="$3" profile="$4"
-[[ "$package" =~ ^(@[abcdefghijklmnopqrstuvwxyz0123456789._-]+/)?[abcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]
-[[ "$candidate" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+([+-][0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?$ ]]
-[[ "$profile" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789-]+$ ]]
+# Each value is quoted into the generated YAML, so each is validated first,
+# naming what was wrong but never echoing the rejected value.
+reject() { echo "$1" >&2; exit 1; }
+[[ "$package" =~ ^(@[abcdefghijklmnopqrstuvwxyz0123456789._-]+/)?[abcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] \
+  || reject "package must be an npm package name (lowercase, optionally @scope/-qualified)"
+[[ "$candidate" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+([+-][0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?$ ]] \
+  || reject "candidate must be an exact SemVer version"
+[[ "$profile" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789-]+$ ]] \
+  || reject "stack-profile must contain only lowercase letters, digits, and hyphens"
 
 cat <<EOF
 name: Renovate compatibility canary

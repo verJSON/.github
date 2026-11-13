@@ -69,7 +69,8 @@ jobs:
           sparse-checkout: |
             .github/actionlint.yaml
             scripts/ci-gate/hosted-selector-policy.py
-          # Exactly these two files. Cone mode would also put every file
+            scripts/runner_lane_catalog.py
+          # Exactly these three files. Cone mode would also put every file
           # directly in .github/, scripts/, and scripts/ci-gate/ on disk, and
           # ADR 0235's backlog digest binds what a checkout puts on disk.
           sparse-checkout-cone-mode: false

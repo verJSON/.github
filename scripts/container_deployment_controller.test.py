@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -730,12 +731,15 @@ class DeploymentPlannerTests(unittest.TestCase):
                     controller.build_plan(configuration(), candidate, "production")
 
     def test_rejects_invalid_or_oversized_raw_text_before_admission(self):
-        for raw in (None, 42, {}, "\ud800", "x" * (controller.MAX_MANIFEST_BYTES + 1),
-                    "é" * (controller.MAX_MANIFEST_BYTES // 2 + 1)):
+        limit = controller.MAX_MANIFEST_BYTES
+        unbounded = f"release manifest bytes must be UTF-8 text of at most {limit} bytes"
+        for raw, reason in ((None, unbounded), (42, unbounded), ({}, unbounded),
+                            ("\ud800", "release manifest bytes are not valid UTF-8 JSON"), ("x" * (limit + 1), unbounded),
+                            ("é" * (limit // 2 + 1), f"release manifest bytes exceed {limit} bytes")):
             with self.subTest(raw_type=type(raw).__name__):
                 candidate = evidence()
                 candidate["manifestBytes"] = raw
-                with self.assertRaises(controller.DeploymentError):
+                with self.assertRaisesRegex(controller.DeploymentError, "^" + re.escape(reason) + "$"):
                     controller.build_plan(configuration(), candidate, "production")
 
     def test_pretty_asset_requires_exact_bytes_and_matching_attestation(self):
@@ -1157,13 +1161,14 @@ class DeploymentExecutionTests(unittest.TestCase):
         plan = controller.build_plan(configuration(), evidence(), "production")
         crashing = FakeAdapter()
         persisted = []
+        cancellation = KeyboardInterrupt("simulated cancellation")
 
         def crash_during_observation(_seconds):
             crashing.calls.append(("observe",))
-            raise KeyboardInterrupt("simulated cancellation")
+            raise cancellation
 
         crashing.observe = crash_during_observation
-        with self.assertRaises(KeyboardInterrupt):
+        with self.assertRaises(KeyboardInterrupt) as interrupted:
             controller.execute_plan(
                 plan,
                 configuration(),
@@ -1173,6 +1178,7 @@ class DeploymentExecutionTests(unittest.TestCase):
                 max_hosts=1,
                 clock=FakeClock(),
             )
+        self.assertIs(interrupted.exception, cancellation)
 
         retained = persisted[-1]
         self.assertEqual("pending", retained["runners"][0]["observation"])

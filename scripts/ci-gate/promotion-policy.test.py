@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import traceback
 from copy import deepcopy
 from pathlib import Path
 
@@ -59,39 +60,61 @@ mutations = []
 for trigger in ("workflow_dispatch", "workflow_call"):
     changed = deepcopy(promote)
     del changed[True][trigger]["inputs"]["review_policy"]
-    mutations.append((review, changed, retry))
-changed = deepcopy(review); del changed["jobs"]["dispatch-merge"]["env"]["REVIEW_POLICY"]; mutations.append((changed, promote, retry))
-changed = deepcopy(retry); del changed["jobs"]["resolve"]["outputs"]["review_policy"]; mutations.append((review, promote, changed))
+    expected = 'assert dispatch["review_policy"]' if trigger == "workflow_dispatch" else 'assert called["review_policy"]'
+    mutations.append(((review, changed, retry), expected))
+changed = deepcopy(review); del changed["jobs"]["dispatch-merge"]["env"]["REVIEW_POLICY"]
+mutations.append(((changed, promote, retry), 'assert review_job["env"]["REVIEW_POLICY"]'))
+changed = deepcopy(retry); del changed["jobs"]["resolve"]["outputs"]["review_policy"]
+mutations.append(((review, promote, changed), 'assert outputs["review_policy"]'))
 changed = deepcopy(review)
 step = next(item for item in changed["jobs"]["dispatch-merge"]["steps"] if item.get("name") == "Dispatch trusted terminal promotion")
 step["run"] = step["run"].replace('-f review_policy="$REVIEW_POLICY"', f'-f review_policy="{valid_substitute}"')
-mutations.append((changed, promote, retry))
-changed = deepcopy(promote); changed["jobs"]["privileged_merge"]["env"]["REVIEW_POLICY"] = valid_substitute; mutations.append((review, changed, retry))
-changed = deepcopy(retry); changed["jobs"]["promote"]["with"]["review_policy"] = valid_substitute; mutations.append((review, promote, changed))
+mutations.append(((changed, promote, retry), "in review_dispatch"))
+changed = deepcopy(promote); changed["jobs"]["privileged_merge"]["env"]["REVIEW_POLICY"] = valid_substitute
+mutations.append(((review, changed, retry), 'assert job["env"]["REVIEW_POLICY"]'))
+changed = deepcopy(retry); changed["jobs"]["promote"]["with"]["review_policy"] = valid_substitute
+mutations.append(((review, promote, changed), 'assert retry_with["review_policy"]'))
 changed = deepcopy(retry)
 step = next(item for item in changed["jobs"]["resolve"]["steps"] if item.get("name") == "Resolve exact-head authorization")
 step["run"] = step["run"].replace(
     'review_policy="$(jq -er \'.review_policy | select(type == "string")\' "$receipt_dir/receipt.json")"',
     f'review_policy="{valid_substitute}"')
-mutations.append((review, promote, changed))
+mutations.append(((review, promote, changed), ".review_policy | select("))
 changed = deepcopy(retry)
 step = next(item for item in changed["jobs"]["resolve"]["steps"] if item.get("name") == "Resolve exact-head authorization")
 step["run"] = step["run"].replace('^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$', '.*')
-mutations.append((review, promote, changed))
+mutations.append(((review, promote, changed), "{1,2048}$' in retry_run"))
 changed = deepcopy(review)
 step = next(item for item in changed["jobs"]["complete-authorization"]["steps"] if item.get("name") == "Complete exact head authorization")
 step["run"] = step["run"].replace("ai-review-authorized:v1:${AUTHORIZATION_CHECK_ID}:${EXPECTED_AUTHORIZED_HEAD_SHA}:${REVIEW_AUTHORITY}", "human-path")
-mutations.append((changed, promote, retry))
+mutations.append(((changed, promote, retry), "assert authorization_marker in review_complete"))
 changed = deepcopy(retry)
 step = next(item for item in changed["jobs"]["resolve"]["steps"] if item.get("name") == "Resolve exact-head authorization")
 step["run"] = step["run"].replace("ai-review-authorized:v1:${check_id}:${HEAD_SHA}:ai-merge", "human-path")
-mutations.append((review, promote, changed))
-for docs in mutations:
+mutations.append(((review, promote, changed), ":${HEAD_SHA}:ai-merge' in retry_run"))
+
+
+
+def rejecting_assertion(docs):
+    """Return the source of the contract line that rejected docs.
+
+    A mutation must be caught by the guard it targets; an earlier, unrelated
+    assertion rejecting it first would prove nothing about that guard.
+    """
     try:
         require_contract(*docs)
-    except (AssertionError, KeyError):
-        continue
+    except (AssertionError, KeyError) as error:
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        if frame.name != "require_contract":
+            raise AssertionError(f"mutation failed outside the contract: {frame.line}") from error
+        return frame.line
     raise AssertionError("promotion policy mutation escaped contract")
+
+
+assert len(mutations) == 11
+for docs, expected in mutations:
+    rejected_by = rejecting_assertion(docs)
+    assert expected in rejected_by, f"mutation expected at {expected!r} was rejected by: {rejected_by}"
 
 assert '-f review_policy="$review_policy"' in rearm_text
 assert "ai-review-merge.yml" not in (root / ".github/workflows/ai-promotion-retry.yml").read_text()

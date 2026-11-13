@@ -279,9 +279,12 @@ class AdrNumberCollisionTest(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            env={**os.environ, "LC_ALL": "C"},
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--repo", result.stderr)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr.splitlines()[-1], "adr-number-collision.py: error: --repo must be 'owner/repo'")
 
     # 10. Argument validation rejects a non-positive --pr-number.
     def test_non_positive_pr_number_is_rejected(self):
@@ -290,9 +293,12 @@ class AdrNumberCollisionTest(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            env={**os.environ, "LC_ALL": "C"},
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--pr-number", result.stderr)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr.splitlines()[-1], "adr-number-collision.py: error: --pr-number must be a positive integer")
 
 if __name__ == "__main__":
     unittest.main()

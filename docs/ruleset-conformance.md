@@ -33,6 +33,43 @@ unbound context can be satisfied by a status published from any App that reuses
 its name, which is the provenance property ADR 0184's Gate A depends on. Both
 findings are reported together, so neither masks the other. See ADR0190.
 
+One context is declared to another App: `merge_admission_binding` binds
+`merge-admission` to the AI review App (ADR 0260 Decision 2). The audit fails when
+that context is unbound or bound to any other App, 15368 included, and refuses a
+policy that binds it to `required_check_producer_app_id`. The binding names the
+ruleset that requires it (`merge-admission-required`); the policy must carry that
+ruleset's reviewed bypass contract before the ruleset exists, and the contract must
+never list the AI review App (ARB-2031-2026-11-12 C6).
+
+### Merge-admission receipts (ARB-2031-2026-11-12 C10)
+
+The same run also reads the organization variable the binding names
+(`AI_REVIEW_APP_ID`) and compares it with the binding, in two phases:
+
+- **Before the ruleset exists** it fails unless the variable names the bound App,
+  and a conformant run prints
+  `merge-admission-receipt=pre-creation gates=creation … ruleset_state=absent`.
+  The ruleset is reported absent explicitly, never passed over.
+- **Once it exists, even disabled**, the ruleset must also require
+  `merge-admission`, bound to that App (unbound or 15368 fails, as above), and a
+  conformant run prints
+  `merge-admission-receipt=full gates=activation … ruleset_id=<id> enforcement=<state>`.
+  Two live rulesets with that name print no receipt.
+
+In either phase, a ruleset under any other name, a case variant included, that
+requires `merge-admission` fails the run and prints no receipt: the binding check
+accepts the context in any ruleset, so otherwise the receipt could report the named
+ruleset absent while another one enforces the context.
+
+A receipt is printed only on exit `0`. The pre-creation receipt gates creating the
+ruleset; the full receipt gates activating it, and only that. It checks no enrollment
+scope: not that the scope is the C3 canary (`repository_id` 1269388380), not that
+paused repositories are excluded, and not that each enrolled repository carries the
+generated caller. An enrollment edit therefore also needs the C8 scope check, which is
+not implemented yet; until it is, no receipt gates an enrollment edit. Neither receipt
+is reusable across a later change: run the audit again immediately before each step.
+The variable's value is compared, never printed.
+
 The program has no mutation path. It calls only paginated GitHub REST GETs and
 does not print API response bodies, credential data, secret values, or variable
 values. Exit `0` means the exact-token policy conforms, exit `1` is policy drift,
@@ -60,6 +97,34 @@ A ruleset may be live-disabled only through a `suspended` object (`reason`, `sin
 every other property, fails if it is live-active or if an undeclared ruleset is
 disabled, and prints a `SUSPENDED:` line on every run. See ADR 0210's 2026-10-22
 amendment.
+
+## Actions-paused drift
+
+`scripts/actions-paused-drift.py` is the fail-closed check ADR 0252 requires
+while any repository is `verjson-actions-state=paused`. Its only ruleset IDs are
+in `config/actions-paused-drift-policy.json`, whose `source` is that ADR. It
+reads every repository carrying the property; one with no value is outside the
+ADR and is skipped. It reports drift (exit `1`) when:
+
+- a `paused` repository has Actions enabled
+  (`repos/{owner}/{repo}/actions/permissions` `.enabled`);
+- an `enabled` repository's default branch is still governed by the baseline
+  ruleset 26466984, or a `paused` one's is not, judged from the rules that apply
+  to that branch (`repos/{owner}/{repo}/rules/branches/{branch}`), or a `paused`
+  one's branch lacks any of the baseline's declared rule types
+  (`pull_request`, `non_fast_forward`, `deletion`);
+- a declared paused-only relaxation is not `evaluate` while its repository is
+  `paused`, or not `active` while it is `enabled`.
+
+The table lists the twelve rulesets ADR 0252 relaxed. temporal-kit's
+`temporal-kit-type-surface-required` (21564092) is deliberately absent: it was
+already `evaluate` before ADR 0252 (last changed 2026-08-29), so it is not a
+paused-only relaxation and re-enabling the repository does not restore it.
+
+Any failed read, unexpected response shape, unknown property value, or declared
+relaxation that no longer targets its repository exits `2`; drift already found
+is printed before that diagnosis. It issues only GETs.
+Retire it with the exclusion, once no repository is `paused`.
 
 ## Credential boundary
 
