@@ -1104,19 +1104,29 @@ release_head_binding_step=$(cat <<'EOF'
               set -euo pipefail
               preview_dir="$(mktemp -d)"
               trap 'rm -rf -- "$preview_dir"' EXIT
-              gh repo clone "$1" "$preview_dir/source" -- --filter=blob:none --no-checkout
-              git -C "$preview_dir/source" fetch --quiet --no-tags origin "$2"
-              git -C "$preview_dir/source" checkout --quiet --detach "$2"
-              mkdir -p "$preview_dir/source/.changelog-contract/scripts"
-              gh api "repos/VerJSON/.github/contents/scripts/changelog.py?ref=$3" --jq .content |
+              repo_root="$(git rev-parse --show-toplevel)"
+              current_sha="$(git -C "$repo_root" rev-parse HEAD)"
+              if [ "$current_sha" != "$1" ]; then
+                printf 'Preview requires a full local checkout at %s; current checkout is %s.\n' "$1" "$current_sha" >&2
+                exit 2
+              fi
+              if [ "$(git -C "$repo_root" rev-parse --is-shallow-repository)" = true ]; then
+                echo "Preview requires complete history so prior release tags are available." >&2
+                exit 2
+              fi
+              if [ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]; then
+                echo "Preview requires a clean checkout of the dispatched commit." >&2
+                exit 2
+              fi
+              gh api "repos/VerJSON/.github/contents/scripts/changelog.py?ref=$2" --jq .content |
                 python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' \
-                  >"$preview_dir/source/.changelog-contract/scripts/changelog.py"
-              shift 3
-              python3 -I "$preview_dir/source/.changelog-contract/scripts/changelog.py" release-plan \
-                --repo-root "$preview_dir/source" "$@"
+                  >"$preview_dir/changelog.py"
+              shift 2
+              python3 -I "$preview_dir/changelog.py" release-plan \
+                --repo-root "$repo_root" "$@"
           PREVIEW_SCRIPT
               )"
-              preview_args=(bash -euo pipefail -c "$preview_script" _ "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$CONTRACT_REF" --prefix "$PREFIX" --version "$INPUT_VERSION")
+              preview_args=(bash -euo pipefail -c "$preview_script" _ "$GITHUB_SHA" "$CONTRACT_REF" --prefix "$PREFIX" --version "$INPUT_VERSION")
               [ -z "$COMPONENT" ] || preview_args+=(--component "$COMPONENT")
               while IFS= read -r fragment; do
                 [ -z "$fragment" ] || preview_args+=(--fragment "$fragment")
@@ -1137,7 +1147,7 @@ release_head_binding_step=$(cat <<'EOF'
               )
               printf -v dispatch_command '%q ' "${dispatch_args[@]}"
               echo "::error title=Release head required::Blank-version release dispatched at commit $GITHUB_SHA needs expected_head set to that exact default-branch SHA."
-              printf 'Preview this exact dispatched tree locally: %s\n' "${preview_command% }"
+              printf 'Preview locally (full, clean checkout at the dispatched SHA required): %s\n' "$preview_command"
               printf 'Re-dispatch from %s: %s\n' "$DEFAULT_BRANCH" "$dispatch_command"
               exit 1
             fi

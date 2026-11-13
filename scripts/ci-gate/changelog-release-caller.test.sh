@@ -236,14 +236,18 @@ else:
     if "GITHUB_WORKFLOW_REF" not in receipt_run or "printf -v dispatch_command" not in receipt_run:
         bad("the proposer guard does not print an exact workflow re-dispatch command")
     for preview_piece in (
-        'gh repo clone "$1"',
-        'fetch --quiet --no-tags origin "$2"',
-        'checkout --quiet --detach "$2"',
-        'contents/scripts/changelog.py?ref=$3',
-        '--repo-root "$preview_dir/source"',
+        'git -C "$repo_root" rev-parse HEAD',
+        'rev-parse --is-shallow-repository',
+        'status --porcelain --untracked-files=all',
+        'contents/scripts/changelog.py?ref=$2',
+        '>"$preview_dir/changelog.py"',
+        'python3 -I "$preview_dir/changelog.py"',
+        '--repo-root "$repo_root"',
     ):
         if preview_piece not in receipt_run:
             bad(f"the release-plan preview does not pin its source tree and contract: {preview_piece}")
+    if any(command in receipt_run for command in ("git clone", "git fetch", "git checkout")):
+        bad("the local preview must not introduce repository materialization into the workflow job")
     if "printf -v preview_command" not in receipt_run:
         bad("the proposer guard does not print a reproducible release-plan preview command")
     for dispatch_input in (
@@ -833,10 +837,10 @@ grep -qF "Re-dispatch from main: gh workflow run release.yml --repo VerJSON/exam
   && pass "the blank-version error prints an exact re-dispatch command" \
   || fail "the blank-version error omitted or changed its re-dispatch command: $(cat "$tmp/guard.out")"
 test_contract_ref="$(printf 'e%.0s' {1..40})"
-grep -qF "Preview this exact dispatched tree locally: bash -euo pipefail -c" "$tmp/guard.out" \
-  && grep -qF "VerJSON/example $expected_head $test_contract_ref --prefix v --version ''" "$tmp/guard.out" \
-  && grep -qF 'gh repo clone' "$tmp/guard.out" \
-  && pass "the blank-version preview checks out the dispatched tree and pinned contract" \
+grep -qF "Preview locally (full, clean checkout at the dispatched SHA required): bash -euo pipefail -c" "$tmp/guard.out" \
+  && grep -qF "$expected_head $test_contract_ref --prefix v --version ''" "$tmp/guard.out" \
+  && grep -qF 'git -C "$repo_root" rev-parse HEAD' "$tmp/guard.out" \
+  && pass "the blank-version preview verifies the dispatched tree and pinned contract" \
   || fail "the blank-version error omitted or changed its pinned local preview: $(cat "$tmp/guard.out")"
 custom_selector_digest="$(printf 'a%.0s' {1..64})"
 custom_fragments=$'NEXT/first.md\nNEXT/second.md'
@@ -847,7 +851,7 @@ expect_guard_rejection "the re-dispatch command preserves custom selection input
 grep -qF -- "Re-dispatch from main: gh workflow run release.yml --repo VerJSON/example --ref main -f version= -f prefix=schema-v -f component=python -f \$'fragments=NEXT/first.md\\nNEXT/second.md' -f selector_digest=$custom_selector_digest -f expected_head=$expected_head" "$tmp/guard.out" \
   && pass "the custom-selection re-dispatch retains every selector" \
   || fail "the custom-selection re-dispatch changed its selectors: $(cat "$tmp/guard.out")"
-grep -qF -- "VerJSON/example $expected_head $test_contract_ref --prefix schema-v --version '' --component python --fragment NEXT/first.md --fragment NEXT/second.md" "$tmp/guard.out" \
+grep -qF -- "$expected_head $test_contract_ref --prefix schema-v --version '' --component python --fragment NEXT/first.md --fragment NEXT/second.md" "$tmp/guard.out" \
   && pass "the custom-selection preview retains every selected fragment" \
   || fail "the custom-selection preview changed its selection: $(cat "$tmp/guard.out")"
 mutated_head_guard="$tmp/head-guard-mutated.sh"
