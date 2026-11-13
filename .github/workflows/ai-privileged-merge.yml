@@ -208,6 +208,8 @@ jobs:
           path: .gate-trust
           sparse-checkout: |
             scripts/ci-gate/closing-issue-visibility.py
+            scripts/ci-gate/independent-review-receipt.sh
+            scripts/ci-gate/terminal-merge.sh
             scripts/ci-gate/verify-arm-receipt.sh
             scripts/ci-gate/review-policy-envelope.py
           sparse-checkout-cone-mode: false
@@ -484,9 +486,7 @@ jobs:
           echo "Independent review receipt $review_id for exact head $EXPECTED_HEAD_SHA was terminally revalidated for $reviewer."
 
       - name: Hold autonomous terminal merge
-        run: |
-          echo "::error::Autonomous terminal merge is disabled pending non-bypass admission (#1945)."
-          exit 1
+        run: bash .gate-trust/scripts/ci-gate/terminal-merge.sh
 
   cleanup_arm_receipt:
     needs: privileged_merge

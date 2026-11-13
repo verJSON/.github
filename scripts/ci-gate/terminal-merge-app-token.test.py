@@ -18,14 +18,14 @@ def validate(document):
     holds = [step for step in steps if step.get('name') == 'Hold autonomous terminal merge']
     if len(holds) != 1 or set(holds[0]) != {'name', 'run'}:
         return False
-    if holds[0]['run'].strip() != ('echo "::error::Autonomous terminal merge is disabled pending non-bypass admission (#1945)."\nexit 1'):
+    if holds[0]['run'].strip() != 'bash .gate-trust/scripts/ci-gate/terminal-merge.sh':
         return False
     if job['outputs'].get('terminal_merge_succeeded') != 'false':
         return False
     serialized = yaml.safe_dump(steps)
     return not any(term in serialized for term in (
         'actions/create-github-app-token', 'MERGE_APP_PRIVATE_KEY',
-        'gh pr merge', 'merge-app-token', 'terminal-merge.sh',
+        'gh pr merge', 'merge-app-token',
     ))
 
 
@@ -49,10 +49,13 @@ def main():
         calls = pathlib.Path(tmp) / 'calls'
         gh.write_text(f'#!/bin/sh\nprintf called >> {calls}\n')
         gh.chmod(0o755)
+        trusted_helper = pathlib.Path(tmp) / '.gate-trust/scripts/ci-gate/terminal-merge.sh'
+        trusted_helper.parent.mkdir(parents=True)
+        trusted_helper.write_bytes(HELPER.read_bytes())
         hold = next(step['run'] for step in doc['jobs']['privileged_merge']['steps']
                     if step.get('name') == 'Hold autonomous terminal merge')
         for command in (['/bin/bash', str(HELPER)], ['/bin/bash', '-c', hold]):
-            result = subprocess.run(command, env={'PATH': tmp}, capture_output=True, text=True)
+            result = subprocess.run(command, cwd=tmp, env={'PATH': f'{tmp}:/usr/bin:/bin'}, capture_output=True, text=True)
             assert result.returncode != 0 and not calls.exists()
             assert 'disabled' in result.stdout + result.stderr
     print('ok - terminal merge and token mint fail closed')

@@ -6,5 +6,6 @@ impact: patch
 ---
 
 Remove the terminal merge token and hold autonomous promotion until a reviewed
-non-bypass admission path exists. Existing pinned callers require separate adoption.
+non-bypass admission path exists. Existing pinned callers require separate adoption;
+their merge key remains in the confinement audit.
 Part of #1945.

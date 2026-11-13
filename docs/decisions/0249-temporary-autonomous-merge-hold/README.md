@@ -16,7 +16,9 @@ identity remain unresolved.
 ## Decision
 
 Temporarily remove token minting and terminal merge from this canonical workflow;
-its terminal helper fails closed. A promotion reports failure and cannot report
+its terminal step invokes a fail-closed helper from the immutable verifier checkout
+without a merge credential. The legacy merge key remains in the confinement audit
+for previously pinned callers. A promotion reports failure and cannot report
 or clean up as a successful merge. Restore autonomous delivery only through a
 separately reviewed decision establishing non-bypass admission and its evidence.
 

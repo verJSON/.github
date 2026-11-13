@@ -37,7 +37,7 @@ step() {
 }
 
 contract_errors() {
-  local review="$1" privileged="$2" guard terminal checkout merge_step
+  local review="$1" privileged="$2" guard terminal checkout
   guard="$(job "$privileged" invalid_verjson_route)"
   terminal="$(job "$privileged" privileged_merge)"
   checkout="$(step "$privileged" privileged_merge 'Check out immutable arm verifier')"
@@ -57,6 +57,7 @@ contract_errors() {
   ! grep -qE 'merge-app-token|MERGE_APP_PRIVATE_KEY|actions/create-github-app-token|gh pr merge' <<<"$terminal" \
     || printf '%s\n' 'retired terminal job contains a merge credential or operation'
   grep -qF 'Hold autonomous terminal merge' <<<"$terminal" \
+    && grep -qF 'bash .gate-trust/scripts/ci-gate/terminal-merge.sh' <<<"$terminal" \
     && grep -qF 'exit 1' "$terminal_helper" \
     && ! grep -qF 'gh pr merge' "$terminal_helper" \
     || printf '%s\n' 'terminal merge hold is missing'
