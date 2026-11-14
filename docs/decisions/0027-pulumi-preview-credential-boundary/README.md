@@ -60,10 +60,11 @@ caller reproducing an event/secret guard correctly.
   able to update a branch in that repository can supply its code. Widening this
   admission set requires a new security review and an amendment or superseding
   ADR.
-- Credential-free validation can no longer consume private packages or private
-  Git dependencies. Such repositories must expose a public validation path; the
-  trusted preview job can still install private dependencies for the live
-  preview after admission.
+- The original credential-free validation path could not consume private
+  packages or private Git dependencies. [ADR 0263](../0263-pulumi-private-package-validation/README.md)
+  adds a bounded, scriptless acquisition path for approved `@verjson` npm
+  packages; caller install and validation commands remain credential-free.
+  Private Git dependencies remain outside that path.
 - Validation runner selection is not caller-controlled. Allowing a persistent or
   self-hosted runner would make ambient metadata credentials, agent sockets, and
   service-level configuration impossible for the workflow to revoke reliably.

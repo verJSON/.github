@@ -28,9 +28,40 @@ job_block() {
   ' "$wf"
 }
 
+step_block() {
+  awk -v step="$1" '
+    /^ *- name: / {
+      current = $0
+      sub(/^ *- name: /, "", current)
+      if (inside) exit
+      if (current == step) inside = 1
+    }
+    inside { print }
+  ' "$wf"
+}
+step_run() {
+  awk -v step="$1" '
+    /^ *- name: / {
+      current = $0
+      sub(/^ *- name: /, "", current)
+      if (inside) exit
+      if (current == step) inside = 1
+    }
+    inside && !capture && /^        run: \|$/ { capture = 1; next }
+    capture && /^      - / { exit }
+    capture && /^        [A-Za-z0-9_-]+:/ { exit }
+    capture { sub(/^          /, ""); print }
+  ' "$wf"
+}
 validate_job="$(job_block validate)"
 admission_job="$(job_block preview-admission)"
 preview_job="$(job_block preview)"
+private_validator_download_step="$(step_block 'Download pinned private-package lock validator')"
+private_lock_step="$(step_block 'Validate approved private npm package lock')"
+private_acquisition_step="$(step_block 'Acquire approved private npm package blobs')"
+validation_command_step="$(step_block 'Install + validate (credential-free gate)')"
+private_cleanup_step="$(step_block 'Remove private npm acquisition state')"
+private_event_run="$(step_run 'Admit private npm acquisition event')"
 
 # Validation is its own credential-free job. No caller-supplied command or
 # checkout may inherit write, OIDC, package, cloud, or Git credentials.
@@ -44,9 +75,71 @@ contains_literal "$validate_job" "github.repository_owner != 'Verjson'" \
   && pass "validation keeps a policy-fixed pool the caller cannot redirect" \
   || fail "validation lost its fixed organization-aware runner boundary"
 contains_literal "$validate_job" 'contents: read' \
-  && ! contains_pattern "$validate_job" 'pull-requests:|id-token:|packages:|contents: write|secrets\.' \
-  && pass "validation has only contents: read and no secret references" \
-  || fail "validation has permissions or secrets beyond contents: read"
+  && ! contains_pattern "$validate_job" 'pull-requests:|id-token:|packages:|contents: write' \
+  && pass "validation job has no write, OIDC, or package permissions" \
+  || fail "validation job has privileged permissions beyond contents: read"
+contains_literal "$private_acquisition_step" 'NODE_AUTH_TOKEN: ${{ secrets.node-auth-token }}' \
+  && contains_literal "$private_acquisition_step" "if: inputs.private-node-packages != ''" \
+  && contains_literal "$private_acquisition_step" 'npm cache add' \
+  && contains_literal "$private_acquisition_step" 'npm cache verify' \
+  && contains_literal "$private_acquisition_step" 'rm -rf -- "$NPM_CONFIG_CACHE/_cacache/index-v5"' \
+  && contains_literal "$private_acquisition_step" '"$NPM_CONFIG_CACHE/_logs"' \
+  && contains_literal "$private_acquisition_step" 'grep -R -a -qF -- "$NODE_AUTH_TOKEN"' \
+  && contains_literal "$private_acquisition_step" 'expected_content' \
+  && contains_literal "$private_acquisition_step" 'actual_content_count' \
+  && contains_literal "$private_acquisition_step" 'NPM_CONFIG_USERCONFIG' \
+  && ! contains_pattern "$private_acquisition_step" 'npm ci|INSTALL_COMMAND|VALIDATE_COMMAND' \
+  && contains_literal "$private_acquisition_step" '@verjson:registry=https://npm.pkg.github.com/' \
+  && contains_literal "$private_acquisition_step" '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' \
+  && contains_literal "$private_acquisition_step" 'NPM_CONFIG_GLOBALCONFIG: /dev/null' \
+  && ! contains_pattern "$private_acquisition_step" 'INSTALL_COMMAND|VALIDATE_COMMAND|gcp-wip|gcp-sa|pulumi-access-token' \
+  && pass "only fixed private blob acquisition receives the scoped npm token" \
+  || fail "private npm blob acquisition exposed a token to caller commands or other secrets"
+cache_verify_line="$(grep -nF 'npm cache verify --cache "$NPM_CONFIG_CACHE"' <<<"$private_acquisition_step" | cut -d: -f1)"
+cache_index_cleanup_line="$(grep -nF 'rm -rf -- "$NPM_CONFIG_CACHE/_cacache/index-v5"' <<<"$private_acquisition_step" | cut -d: -f1)"
+[[ "$cache_verify_line" =~ ^[0-9]+$ && "$cache_index_cleanup_line" =~ ^[0-9]+$ \
+  && "$cache_verify_line" -lt "$cache_index_cleanup_line" ]] \
+  && pass "private cache is verified before signed-redirect index removal" \
+  || fail "private cache index is not removed after cache verification"
+secret_ref_count="$(grep -oE 'secrets\.[A-Za-z0-9_-]+' <<<"$validate_job" | wc -l | tr -d '[:space:]')"
+[[ "$secret_ref_count" == 1 ]] \
+  && pass "private validation job references exactly one secret" \
+  || fail "private validation job references extra workflow secrets"
+contains_literal "$private_validator_download_step" 'JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}' \
+  && contains_literal "$private_validator_download_step" 'https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/pulumi_private_node_packages.py' \
+  && contains_literal "$private_lock_step" 'python3 -I "$RUNNER_TEMP/pulumi_private_node_packages.py"' \
+  && contains_literal "$private_lock_step" '> "$PRIVATE_CACHE_ENTRIES"' \
+  && contains_literal "$private_lock_step" 'find . -name .npmrc -not -path '\''./.git/*'\'' -print -quit' \
+  && contains_literal "$private_lock_step" 'rejects repository-controlled npm config' \
+  && pass "private package policy is fetched from the immutable workflow SHA and rejects npm config" \
+  || fail "private package lock validation is not pinned or rejects config incorrectly"
+step_line() {
+  awk -v step="      - name: $1" '$0 == step { print NR; exit }' "$wf"
+}
+download_line="$(step_line 'Download pinned private-package lock validator')"
+lock_line="$(step_line 'Validate approved private npm package lock')"
+event_line="$(step_line 'Admit private npm acquisition event')"
+acquire_line="$(step_line 'Acquire approved private npm package blobs')"
+if [[ "$download_line" =~ ^[0-9]+$ && "$lock_line" =~ ^[0-9]+$ && "$event_line" =~ ^[0-9]+$ && "$acquire_line" =~ ^[0-9]+$ ]] \
+  && [ "$download_line" -lt "$lock_line" ] \
+  && [ "$lock_line" -lt "$event_line" ] \
+  && [ "$event_line" -lt "$acquire_line" ]; then
+  pass "pinned policy and event admission precede credentialed package acquisition"
+else
+  fail "credentialed package acquisition runs before its policy or event checks"
+fi
+contains_literal "$validation_command_step" 'INSTALL_COMMAND: ${{ inputs.install-command }}' \
+  && contains_literal "$validation_command_step" 'VALIDATE_COMMAND: ${{ inputs.validate-command }}' \
+  && ! contains_pattern "$validation_command_step" 'secrets\.|NODE_AUTH_TOKEN:' \
+  && contains_literal "$validation_command_step" 'export NPM_CONFIG_PREFER_OFFLINE=true' \
+  && contains_literal "$validation_command_step" 'GITHUB_RUN_ID' \
+  && pass "caller install and validation run tokenless with verified private blobs preferred" \
+  || fail "caller commands lost their tokenless, prefer-offline package-install boundary"
+contains_literal "$private_cleanup_step" "if: always() && inputs.private-node-packages != ''" \
+  && contains_literal "$private_cleanup_step" 'rm -rf -- "$NPM_CONFIG_CACHE"' \
+  && contains_literal "$private_cleanup_step" 'rm -f -- "$NPM_CONFIG_USERCONFIG" "$PRIVATE_CACHE_ENTRIES"' \
+  && pass "private npm cache and temporary state are removed after validation" \
+  || fail "private npm acquisition state cleanup is missing or not unconditional"
 contains_literal "$validate_job" 'persist-credentials: false' \
   && pass "validation checkout does not persist GITHUB_TOKEN" \
   || fail "validation checkout persists credentials"
@@ -57,10 +150,38 @@ contains_literal "$validate_job" 'INSTALL_COMMAND: ${{ inputs.install-command }}
   || fail "caller install/validation commands crossed into the preview job"
 contains_literal "$validate_job" 'GIT_CONFIG_GLOBAL: /dev/null' \
   && contains_literal "$validate_job" 'NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pulumi-validation.npmrc' \
+  && contains_literal "$validate_job" 'NPM_CONFIG_GLOBALCONFIG: /dev/null' \
   && contains_literal "$validate_job" 'unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL' \
   && contains_literal "$validate_job" 'unset PULUMI_ACCESS_TOKEN VERJSON_GIT_TOKEN' \
   && pass "validation scrubs inherited Git, npm, OIDC, and cloud credential paths" \
   || fail "validation credential scrubbing is incomplete"
+
+run_private_event() { # <event> <head repository> <repository>
+  EVENT_NAME="$1" HEAD_REPOSITORY="$2" REPOSITORY="$3" \
+    bash -c "$private_event_run" >/dev/null 2>&1
+}
+check_private_event() { # <expected> <event> <head repository> <repository> <description>
+  local expected="$1" actual=false
+  if run_private_event "$2" "$3" "$4"; then actual=true; fi
+  if [ "$actual" = "$expected" ]; then
+    pass "$5"
+  else
+    fail "$5 (want $expected got $actual)"
+  fi
+}
+[ -n "$private_event_run" ] \
+  && pass "private npm acquisition event guard is present" \
+  || fail "private npm acquisition event guard is missing"
+check_private_event true pull_request verjson/infra Verjson/infra \
+  "private npm acquisition accepts same-repository pull requests case-insensitively"
+check_private_event false pull_request fork/infra Verjson/infra \
+  "private npm acquisition rejects fork pull requests"
+check_private_event true push '' Verjson/infra \
+  "private npm acquisition accepts pushes"
+check_private_event true workflow_dispatch '' Verjson/infra \
+  "private npm acquisition accepts explicit dispatch"
+check_private_event false pull_request_target verjson/infra Verjson/infra \
+  "private npm acquisition rejects pull_request_target"
 
 # Extract and execute the admission step's exact shell body.
 admission_run="$(awk '

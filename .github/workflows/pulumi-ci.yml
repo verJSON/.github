@@ -29,6 +29,8 @@ name: pulumi-ci (reusable)
 #       uses: Verjson/.github/.github/workflows/pulumi-ci.yml@main
 #       with:
 #         stacks: '["dev"]'
+#         private-node-packages: |
+#           @verjson/infra
 #         validate-command: |
 #           npm run build
 #           npm test
@@ -68,6 +70,14 @@ on:
         required: false
         type: string
         default: 'npm ci'
+      private-node-packages:
+        description: >-
+          Exact newline-separated @verjson package names in package-lock.json.
+          When set, the workflow uses a step-scoped token to cache only
+          integrity-verified private tarballs before caller code runs.
+        required: false
+        type: string
+        default: ''
       validate-command:
         description: >-
           Credential-free validation run after install (a compile/typecheck and,
@@ -114,8 +124,9 @@ on:
         required: false
       node-auth-token:
         description: >-
-          read:packages token used only by the admitted preview job's fixed
-          dependency install. It is never exposed to validation commands.
+          read:packages token used only by fixed private npm steps: the optional
+          scriptless validation-cache acquisition and the admitted preview
+          dependency install. Never exposed to caller install or validation commands.
         required: false
       git-token:
         description: >-
@@ -154,20 +165,199 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Download pinned private-package lock validator
+        if: inputs.private-node-packages != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]] || {
+            echo "::error::reusable Pulumi CI workflow SHA is invalid"
+            exit 1
+          }
+          curl --fail --silent --show-error --location \
+            "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/pulumi_private_node_packages.py" \
+            -o "$RUNNER_TEMP/pulumi_private_node_packages.py"
+
+      - name: Validate approved private npm package lock
+        if: inputs.private-node-packages != ''
+        env:
+          APPROVED_PRIVATE_NODE_PACKAGES: ${{ inputs.private-node-packages }}
+          PRIVATE_CACHE_ENTRIES: ${{ runner.temp }}/pulumi-private-entries-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [ ! -e "$PRIVATE_CACHE_ENTRIES" ] && [ ! -L "$PRIVATE_CACHE_ENTRIES" ] || {
+            echo "::error::reserved private package entry path already exists"
+            exit 1
+          }
+          project_config="$(find . -name .npmrc -not -path './.git/*' -print -quit)"
+          [ -z "$project_config" ] || {
+            echo "::error::private npm acquisition rejects repository-controlled npm config"
+            exit 1
+          }
+          python3 -I "$RUNNER_TEMP/pulumi_private_node_packages.py" > "$PRIVATE_CACHE_ENTRIES"
+
+      - name: Admit private npm acquisition event
+        if: inputs.private-node-packages != ''
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              head_repository_normalized="$(printf '%s' "$HEAD_REPOSITORY" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+              repository_normalized="$(printf '%s' "$REPOSITORY" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+              [ "$head_repository_normalized" = "$repository_normalized" ] || {
+                echo "::error::private npm acquisition requires a same-repository pull request"
+                exit 1
+              }
+              ;;
+            push|workflow_dispatch) ;;
+            *)
+              echo "::error::private npm acquisition accepts only same-repository pull requests, push, or workflow_dispatch"
+              exit 1
+              ;;
+          esac
+
       - name: Set up credential-free Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: ${{ inputs.node-version }}
 
+      - name: Acquire approved private npm package blobs
+        if: inputs.private-node-packages != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.node-auth-token }}
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/pulumi-private-npm-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pulumi-private-acquisition.npmrc
+          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          PRIVATE_CACHE_ENTRIES: ${{ runner.temp }}/pulumi-private-entries-${{ github.run_id }}-${{ github.run_attempt }}
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          umask 077
+          [ -n "$NODE_AUTH_TOKEN" ] || {
+            echo "::error::private npm acquisition requires node-auth-token with read:packages"
+            exit 1
+          }
+          [ -f "$PRIVATE_CACHE_ENTRIES" ] && [ ! -L "$PRIVATE_CACHE_ENTRIES" ] || {
+            echo "::error::validated private package entries are unavailable"
+            exit 1
+          }
+          [ ! -e "$NPM_CONFIG_CACHE" ] && [ ! -L "$NPM_CONFIG_CACHE" ] || {
+            echo "::error::private npm cache path already exists"
+            exit 1
+          }
+          [ ! -e "$NPM_CONFIG_USERCONFIG" ] && [ ! -L "$NPM_CONFIG_USERCONFIG" ] || {
+            echo "::error::private npm config path already exists"
+            exit 1
+          }
+          mkdir -m 700 "$NPM_CONFIG_CACHE"
+          cleanup_cache() {
+            local status=$?
+            if ! : > "$NPM_CONFIG_USERCONFIG"; then
+              echo "::error::could not clear private npm acquisition config"
+              status=1
+            fi
+            if [ "$status" -ne 0 ]; then
+              rm -rf -- "$NPM_CONFIG_CACHE"
+            fi
+            exit "$status"
+          }
+          trap cleanup_cache EXIT
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE GOOGLE_APPLICATION_CREDENTIALS
+          unset GH_TOKEN GITHUB_TOKEN NPM_TOKEN PULUMI_ACCESS_TOKEN VERJSON_GIT_TOKEN
+          # shellcheck disable=SC2016
+          printf '%s\n' \
+            'registry=https://registry.npmjs.org/' \
+            '@verjson:registry=https://npm.pkg.github.com/' \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' \
+            > "$NPM_CONFIG_USERCONFIG"
+          declare -A expected_content=()
+          while IFS=$'\t' read -r resolved digest_hex extra; do
+            normalized_resolved="${resolved,,}"
+            [ -z "$extra" ] && [[ "$normalized_resolved" =~ ^https://npm\.pkg\.github\.com/download/@verjson/[^/]+/[^/]+/[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._-]{0,255}$ ]] \
+              && [[ "$digest_hex" =~ ^[0123456789abcdef]{128}$ ]] || {
+                echo "::error::validated private package entry is invalid"
+                exit 1
+              }
+            npm_diagnostic="$NPM_CONFIG_CACHE/npm-cache-add.stderr"
+            if npm cache add "$resolved" --cache "$NPM_CONFIG_CACHE" --no-audit --no-fund 2> "$npm_diagnostic"; then
+              rm -f "$npm_diagnostic"
+            else
+              npm_status=$?
+              echo "::error::private package acquisition failed (npm exit $npm_status); npm stderr follows"
+              while IFS= read -r diagnostic_line; do
+                diagnostic_line="${diagnostic_line//${NODE_AUTH_TOKEN}/[REDACTED]}"
+                diagnostic_line="${diagnostic_line//$'\r'/}"
+                printf 'npm: %s\n' "$diagnostic_line"
+              done < <(tail -c 8192 "$npm_diagnostic" | tail -n 20)
+              rm -f "$npm_diagnostic"
+              exit 1
+            fi
+            content_path="$NPM_CONFIG_CACHE/_cacache/content-v2/sha512/${digest_hex:0:2}/${digest_hex:2:2}/${digest_hex:4}"
+            [ -f "$content_path" ] && [ ! -L "$content_path" ] \
+              && [ "$(sha512sum "$content_path" | cut -d' ' -f1)" = "$digest_hex" ] || {
+                echo "::error::npm did not populate the exact locked private package content"
+                exit 1
+              }
+            expected_content["$digest_hex"]=1
+          done < "$PRIVATE_CACHE_ENTRIES"
+          [ "${#expected_content[@]}" -gt 0 ] || {
+            echo "::error::private package entry list is empty"
+            exit 1
+          }
+          npm cache verify --cache "$NPM_CONFIG_CACHE"
+          actual_content_count=0
+          while IFS= read -r -d '' content_path; do
+            [ -f "$content_path" ] && [ ! -L "$content_path" ] || {
+              echo "::error::private npm cache contains an invalid content entry"
+              exit 1
+            }
+            content_digest="$(sha512sum "$content_path" | cut -d' ' -f1)"
+            [ -n "${expected_content[$content_digest]:-}" ] || {
+              echo "::error::npm populated content outside the approved private package set"
+              exit 1
+            }
+            actual_content_count=$((actual_content_count + 1))
+          done < <(find "$NPM_CONFIG_CACHE/_cacache/content-v2" -type f -print0)
+          [ "$actual_content_count" -eq "${#expected_content[@]}" ] || {
+            echo "::error::private package cache content does not match the lockfile"
+            exit 1
+          }
+          if grep -R -a -qF -- "$NODE_AUTH_TOKEN" "$NPM_CONFIG_CACHE/_cacache/content-v2"; then
+            echo "::error::the npm cache contains the acquisition credential"
+            exit 1
+          else
+            grep_status=$?
+            [ "$grep_status" -eq 1 ] || {
+              echo "::error::could not verify private npm cache contents"
+              exit 1
+            }
+          fi
+          rm -rf -- "$NPM_CONFIG_CACHE/_cacache/index-v5" "$NPM_CONFIG_CACHE/_cacache/tmp" "$NPM_CONFIG_CACHE/_logs"
+          [ ! -e "$NPM_CONFIG_CACHE/_cacache/index-v5" ] && [ ! -e "$NPM_CONFIG_CACHE/_logs" ] || {
+            echo "::error::private cache index containing signed redirect URLs was not removed"
+            exit 1
+          }
+
       - name: Install + validate (credential-free gate)
         env:
           INSTALL_COMMAND: ${{ inputs.install-command }}
           VALIDATE_COMMAND: ${{ inputs.validate-command }}
+          PRIVATE_NODE_PACKAGES: ${{ inputs.private-node-packages }}
           # Defense in depth against unexpected Git/npm credential state.
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
           NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pulumi-validation.npmrc
+          NPM_CONFIG_GLOBALCONFIG: /dev/null
         run: |
           set -euo pipefail
           : > "$NPM_CONFIG_USERCONFIG"
@@ -175,8 +365,22 @@ jobs:
           unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE GOOGLE_APPLICATION_CREDENTIALS
           unset GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN
           unset PULUMI_ACCESS_TOKEN VERJSON_GIT_TOKEN
+          if [ -n "$PRIVATE_NODE_PACKAGES" ]; then
+            export NPM_CONFIG_CACHE="$RUNNER_TEMP/pulumi-private-npm-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            export NPM_CONFIG_PREFER_OFFLINE=true
+          fi
           eval "$INSTALL_COMMAND"
           eval "$VALIDATE_COMMAND"
+
+      - name: Remove private npm acquisition state
+        if: always() && inputs.private-node-packages != ''
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/pulumi-private-npm-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/pulumi-private-acquisition.npmrc
+          PRIVATE_CACHE_ENTRIES: ${{ runner.temp }}/pulumi-private-entries-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          rm -rf -- "$NPM_CONFIG_CACHE"
+          rm -f -- "$NPM_CONFIG_USERCONFIG" "$PRIVATE_CACHE_ENTRIES" "$RUNNER_TEMP/pulumi_private_node_packages.py"
 
   preview-admission:
     needs: validate
