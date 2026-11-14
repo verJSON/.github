@@ -77,7 +77,7 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
-- [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open and natively blocking #1945, verified 2026-11-13 via `gh issue view` and the native dependency API.
+- [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open, tracked separately from #1945 after the 2026-11-13 ARB dependency review. Do not treat agent review evidence as authoritative until its identity criteria pass.
 
 - [#1875](https://github.com/VerJSON/.github/issues/1875) — ADR 0238's Playwright profile merged as #1938; privileged-helper and APT-cache integrity follow-up is in progress. Item 5 remains tracked under #1692, which natively blocks #1875. Verified open and blocked 2026-11-13 via `gh issue view` and native dependency metadata.
 
@@ -85,7 +85,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
 
-- [#1945](https://github.com/verJSON/.github/issues/1945) — The autonomous terminal helper is disabled pending non-bypass admission (#1956). [ADR 0260](docs/decisions/0260-native-merge-admission-through-a-producer-posted-check/README.md) and #2055 ship a producer-posted `merge-admission` check that no ruleset requires yet. Draft [ecosystem ADR 0014](https://github.com/VerJSON/verjson-docs/pull/34) now carries the queue proposal; #1946 retains its pointer and evidence. Native relationships show #1945 blocked by #1964 and blocking #1949. Verified open 2026-11-13 via `gh issue view` and the native dependency API.
+- [#1945](https://github.com/verJSON/.github/issues/1945) — The autonomous terminal helper remains fail-closed; ADR 0260 and #2055 ship the producer, but no live `merge-admission-required` ruleset exists. Draft [ecosystem ADR 0014](https://github.com/VerJSON/verjson-docs/pull/34) and #1946 retain the queue proposal and evidence. The issue now blocks #1861 and #1949; it is not blocked by #1964 after the 2026-11-13 ARB dependency review. The preserved #1861 branch remains unmerged; re-evaluate after rollout using native callers, live no-bypass ruleset readback, and positive/negative canaries. Verified 2026-11-14 with issue relationship GraphQL and live organization ruleset API.
 
 - [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
 
