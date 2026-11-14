@@ -37,7 +37,7 @@
         "fonts-freefont-ttf"
       ],
       "id": "playwright-chromium-1.63.0-ubuntu-24.04-amd64",
-      "packageManifestSha256": "cfa2e3744208988dc708404f1d6d2f5a9d0a56756b957af83ba4ebab33e50669",
+      "packageManifestSha256": "7aa0d327d5654dc3ad9f7e93b1cba39a51040a5b7d2060add06d8a20af2de965",
       "packages": [
         {
           "architecture": "all",
@@ -287,6 +287,14 @@
           "package": "libc6-dev",
           "sha256": "d81dd6dc9d515762cc93f338efa6219252acf3e2e87b5b89dd7dc517741e6eed",
           "size": 2124506,
+          "version": "2.39-0ubuntu8.12"
+        },
+        {
+          "architecture": "amd64",
+          "filename": "pool/main/g/glibc/libc6-i386_2.39-0ubuntu8.12_amd64.deb",
+          "package": "libc6-i386",
+          "sha256": "f3357fcee4a907404f5231381834cf31647326496d5bb4259338a717b3544c89",
+          "size": 2786812,
           "version": "2.39-0ubuntu8.12"
         },
         {
