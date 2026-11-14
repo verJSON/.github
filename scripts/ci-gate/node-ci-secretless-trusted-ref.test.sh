@@ -52,7 +52,7 @@ steps = build["steps"]
 checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in checkout["with"]["submodules"]
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in checkout["with"]["token"]
-assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in checkout["with"]["persist-credentials"]
+assert checkout["with"]["persist-credentials"] is False
 restore = next(step for step in steps if str(step.get("uses", "")).startswith("actions/cache/restore@"))
 install = next(step for step in steps if step.get("name") == "Install from verified secretless npm cache")
 rebuild = next(step for step in steps if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")

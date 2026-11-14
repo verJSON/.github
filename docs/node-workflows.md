@@ -572,6 +572,18 @@ Without `--levels` the output is the single `ci` job, so the required context st
 }
 ```
 
+`secrets` may also map a declared `node-ci.yml` secret to a differently named
+repository secret. This is required when the reusable input uses characters that
+repository secret names do not allow, such as the hyphen in `submodules-token`:
+
+```json
+"secrets": {"submodules-token": "SUBMODULES_TOKEN"}
+```
+
+The array form remains shorthand for same-name mappings. The generator validates
+the caller secret against `node-ci.yml` and rejects repository secret names that
+are invalid or use GitHub's reserved `GITHUB_` prefix.
+
 - **Order.** A level may only `needs` a level declared before it, so cycles cannot be
   written. Unrelated levels run in parallel.
 - **Edges.** `success` (the default) runs the level only when the prerequisite

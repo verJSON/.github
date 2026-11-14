@@ -139,6 +139,14 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(plan.build_artifact.consumers, ("test",))
         self.assertEqual(plan.build_artifact.paths, (".next",))
 
+    def test_build_artifact_authorization_plan_keeps_the_v1_secret_array(self):
+        plan = parse(self.artifact_document())
+
+        self.assertEqual(
+            json.loads(ci_levels._artifact_plan_json(plan))["secrets"],
+            ["NODE_AUTH_TOKEN"],
+        )
+
     def test_build_artifact_rejects_extra_fields_and_unsafe_roots(self):
         for request in (
             {"producer": "build", "consumers": ["test"], "paths": ["dist/*"]},
@@ -853,7 +861,36 @@ class ValidatorTests(unittest.TestCase):
 
     def test_secrets_must_be_declared_by_node_ci(self):
         self.assertEqual(codes(levels({"id": "a"}, secrets=["NOPE"])), ["unknown_secret"])
-        self.assertEqual(codes(levels({"id": "a"}, secrets=["submodules-token"])), [])
+        self.assertEqual(codes(levels({"id": "a"}, secrets=["submodules-token"])), ["bad_value"])
+
+    def test_repository_secret_aliases_render_under_the_declared_caller_secret(self):
+        document = levels({"id": "a"}, secrets={"submodules-token": "SUBMODULES_TOKEN"})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ci-levels.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            result = run_generator(SHA, "--levels", str(path))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        jobs = yaml.safe_load(result.stdout)["jobs"]
+
+        self.assertEqual(
+            jobs["a"]["secrets"],
+            {"submodules-token": "${{ secrets.SUBMODULES_TOKEN }}"},
+        )
+
+    def test_repository_secret_aliases_validate_both_names(self):
+        self.assertEqual(
+            codes(levels({"id": "a"}, secrets={"unknown-secret": "SUBMODULES_TOKEN"})),
+            ["unknown_secret"],
+        )
+        self.assertEqual(
+            codes(levels({"id": "a"}, secrets={"submodules-token": "SUBMODULES-TOKEN"})),
+            ["bad_value"],
+        )
+        self.assertEqual(
+            codes(levels({"id": "a"}, secrets={"submodules-token": "GITHUB_SUBMODULES_TOKEN"})),
+            ["bad_value"],
+        )
 
     def test_push_branches_that_look_like_yaml_scalars_stay_strings(self):
         plan = parse(levels({"id": "a"}, pushBranches=["null", "1.0"]))

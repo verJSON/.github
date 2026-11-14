@@ -1983,7 +1983,8 @@ jobs:
           fetch-depth: 2
           submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}
           token: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && github.token || secrets.submodules-token || github.token }}
-          persist-credentials: ${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) }}
+          # Submodule checkout uses this token only during checkout; later install scripts must not read it from .git/config.
+          persist-credentials: false
       - name: Disclose shared workspace isolation assumption
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         shell: bash

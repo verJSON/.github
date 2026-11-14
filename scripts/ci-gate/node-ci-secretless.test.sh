@@ -2,7 +2,7 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-workflow="$root/.github/workflows/node-ci.yml"
+workflow="${NODE_CI_WORKFLOW:-$root/.github/workflows/node-ci.yml}"
 failures=0
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -71,7 +71,8 @@ assert checkout["with"]["persist-credentials"] is False
 
 build_steps = build["steps"]
 build_checkout = next(step for step in build_steps if str(step.get("uses", "")).startswith("actions/checkout@"))
-assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in build_checkout["with"]["persist-credentials"]
+assert build_checkout["with"]["persist-credentials"] is False
+assert "secrets.submodules-token" in build_checkout["with"]["token"]
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in build_checkout["with"]["submodules"]
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in build_checkout["with"]["token"]
 root_install = next(step for step in build_steps if step.get("run") == "npm ci" and "working-directory" not in step)
