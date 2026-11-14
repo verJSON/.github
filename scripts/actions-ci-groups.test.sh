@@ -2237,10 +2237,10 @@ expected = shards | {
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
     # #1972: in-process checker + lean probe fixtures. Local core ~64s, probes
-    # ~15s/~12s; budgets are about 2x with headroom for hosted variance.
+    # ~15s/~12s; floor is 90s (multiples of 30 in 90..600).
     "platform\tRUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 120,
-    "platform\tRUNNER_ISOLATION_TEST_PART=probes-r8-r10 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 60,
-    "platform\tRUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 60,
+    "platform\tRUNNER_ISOLATION_TEST_PART=probes-r8-r10 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 90,
+    "platform\tRUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 90,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
     "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
     # The release-caller contract part that carried this case took 23-32s over 11
