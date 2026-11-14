@@ -769,13 +769,47 @@ def _trusted_command_failure_reason(stage: str, output: bytes, error_output: byt
         or b"unable to acquire the dpkg frontend lock" in combined
     ):
         return "package manager lock unavailable"
+    package_roles = {
+        "fontconfig": "font cache",
+        "libc-bin": "C library cache",
+        "libc6": "C runtime",
+        "libglib2.0-0t64": "GLib runtime",
+        "libglib2.0-bin": "GLib schema registry",
+        "libglib2.0-data": "GLib data",
+        "locales": "locale database",
+        "shared-mime-info": "MIME database",
+    }
+    lines = combined.splitlines()
     for phase, marker in (
         ("pre-installation", b"pre-installation script"),
         ("post-installation", b"post-installation script"),
         ("pre-removal", b"prerm script"),
         ("post-removal", b"postrm script"),
     ):
-        if marker in combined and b"script subprocess returned" in combined:
+        for line_index, error_line in enumerate(lines):
+            if not error_line.startswith(b"dpkg: error processing package "):
+                continue
+            detail_lines = [error_line]
+            for continuation in lines[line_index + 1 :]:
+                if continuation.startswith(b"dpkg: error processing package "):
+                    break
+                if not continuation.startswith((b" ", b"\t")):
+                    break
+                detail_lines.append(continuation)
+            error_detail = b" ".join(detail_lines)
+            if marker not in error_detail or b"script subprocess returned" not in error_detail:
+                continue
+            package_match = re.match(
+                rb"dpkg: error processing package ([a-z0-9][a-z0-9+.-]*)",
+                error_line,
+            )
+            package_role = (
+                package_roles.get(package_match.group(1).decode("ascii"))
+                if package_match is not None
+                else None
+            )
+            if package_role is not None:
+                return f"{package_role} {phase} script failed"
             return f"dpkg package {phase} script failed"
     if b"trigger subprocess returned" in combined and b"error" in combined:
         return "dpkg package trigger failed"
