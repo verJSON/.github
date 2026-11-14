@@ -10,8 +10,10 @@ message, because one "violation" exit cannot tell which rule tripped.
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -19,9 +21,11 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "public-pr-runner-isolation.py")
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 
 failures = 0
 
@@ -34,6 +38,17 @@ def fail(label: str) -> None:
     global failures
     failures += 1
     print(f"FAIL - {label}")
+
+
+def load_checker():
+    spec = importlib.util.spec_from_file_location("public_pr_runner_isolation", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Loaded once up front so every expect() can call main() in-process (#1972).
+CHECKER = load_checker()
 
 
 # actions-ci runs the core and two probe shards. Unset (or `all`) runs
@@ -52,12 +67,50 @@ PROBE_PARTS = {
     ),
 }
 TEST_PARTS = ("core", *PROBE_PARTS)
+# Assignments probe shards must not replay: each rebuilds the live release
+# suite or runs the checker while laying out fixtures (#1972). Cheap
+# snapshots and backlog mirrors stay so dependent assigns still resolve.
+PROBE_SKIP_ASSIGN_NAMES = {
+    "VERIFY",
+    "VERIFY_FILES",
+    "VERIFY_ROW",
+    "VERIFY_LABEL",
+    "HOOK",
+    "SHOW_LINE",
+    "SHOW_LOGICAL",
+    "OWN_HOOK",
+    "REWORK",
+    "REWORK_PENDING",
+    "REWORK_LABEL",
+    "CHAIN",
+}
 # The two selector conditions, exactly as ast.unparse renders them; only these
 # two `if` statements are left out of a part (round 14).
 SELECTOR_CONDITIONS = (
     "TEST_PART not in ('all', *TEST_PARTS)",
     "TEST_PART != 'all' and __name__ == '__main__'",
 )
+
+
+def _assign_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for target in getattr(node, "targets", getattr(node, "target", None) and [node.target] or []):
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            names.update(
+                elt.id for elt in target.elts if isinstance(elt, ast.Name)
+            )
+    return names
+
+
+def probe_replays_definition(node: ast.AST) -> bool:
+    """Shared imports and helpers, not the live release fixture builds."""
+    if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
+        return True
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return not (_assign_names(node) & PROBE_SKIP_ASSIGN_NAMES)
+    return False
 
 
 def run_part(part: str) -> int:
@@ -77,9 +130,9 @@ def run_part(part: str) -> int:
             continue  # the selector itself
         selected_begin, selected_end = shard_ranges.get(part, (0, 0))
         inside_selected_shard = selected_begin < node.lineno < selected_end
+        shared = isinstance(node, definitions) and not inside_probes and probe_replays_definition(node)
         if (part == "core" and not inside_probes) or (
-            part != "core"
-            and (inside_selected_shard or (isinstance(node, definitions) and not inside_probes))
+            part != "core" and (inside_selected_shard or shared)
         ):
             selected.append(node)
     if sys.argv[1:] == ["--partition-plan"]:
@@ -106,21 +159,37 @@ class Link(str):
     """A fixture entry laid out as a symbolic link to this target."""
 
 
-def run_checker(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
-    """Lay out a repository: bare names are workflows (or lists) in
-    .github/workflows; names with a slash are repository paths; a Link
-    value is a symbolic link."""
+def clear_checker_caches() -> None:
+    """Drop path-keyed caches so a prior fixture cannot pass a later one."""
+    for cached in (
+        CHECKER.tracked_paths,
+        CHECKER.tracked_modes,
+        CHECKER.tracked_bytes,
+        CHECKER.tree_digest,
+    ):
+        cached.cache_clear()
+
+
+def layout_workflows(root: str, workflows: dict[str, str]) -> str:
+    """Lay out a repository: bare names are workflows in .github/workflows;
+    names with a slash are repository paths; a Link value is a symlink."""
+    directory = os.path.join(root, ".github", "workflows")
+    os.makedirs(directory)
+    for name, body in workflows.items():
+        target = os.path.join(root, name) if "/" in name else os.path.join(directory, name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if isinstance(body, Link):
+            os.symlink(str(body), target)
+            continue
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(textwrap.dedent(body))
+    return directory
+
+
+def run_checker_subprocess(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
+    """Subprocess entry for argv/parse and exit-code contract coverage."""
     with tempfile.TemporaryDirectory() as root:
-        directory = os.path.join(root, ".github", "workflows")
-        os.makedirs(directory)
-        for name, body in workflows.items():
-            target = os.path.join(root, name) if "/" in name else os.path.join(directory, name)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            if isinstance(body, Link):
-                os.symlink(str(body), target)
-                continue
-            with open(target, "w", encoding="utf-8") as handle:
-                handle.write(textwrap.dedent(body))
+        directory = layout_workflows(root, workflows)
         arguments = tuple(argument.replace("{dir}", directory) for argument in arguments)
         completed = subprocess.run(
             [sys.executable, SCRIPT, *arguments, directory],
@@ -128,6 +197,64 @@ def run_checker(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
             text=True,
         )
     return completed.returncode, completed.stdout + completed.stderr
+
+
+def run_checker(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
+    """Call the checker in-process: loading the 4k-line module once dominates (#1972)."""
+    with tempfile.TemporaryDirectory() as root:
+        directory = layout_workflows(root, workflows)
+        arguments = tuple(argument.replace("{dir}", directory) for argument in arguments)
+        clear_checker_caches()
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                code = CHECKER.main([*arguments, directory])
+        except SystemExit as stop:
+            code = int(stop.code or 0)
+        except Exception:
+            code = 1
+            buffer.write(traceback.format_exc())
+    return code, buffer.getvalue()
+
+
+# Keep a few subprocess cases so argv parsing and the real __main__ exit
+# codes stay covered after the in-process default (#1972).
+_SUBPROCESS_CLEAN = {
+    "ci.yml": """
+        on: pull_request
+        jobs:
+          test:
+            runs-on: ubuntu-24.04
+            steps:
+              - run: 'true'
+    """,
+}
+_code, _output = run_checker_subprocess(_SUBPROCESS_CLEAN)
+if _code == 0 and "clean" in _output:
+    ok("subprocess checker exits 0 on a clean pull_request tree")
+else:
+    fail(f"subprocess checker clean path (got {_code}: {_output.strip()})")
+_code, _output = run_checker_subprocess(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              test:
+                runs-on: [self-hosted, general]
+                steps:
+                  - run: 'true'
+        """,
+    }
+)
+if _code == 1 and "VIOLATION" in _output:
+    ok("subprocess checker exits 1 on a pull_request persistent-runner violation")
+else:
+    fail(f"subprocess checker violation path (got {_code}: {_output.strip()})")
+_code, _output = run_checker_subprocess(_SUBPROCESS_CLEAN, "--pending", "/no/such/pending.tsv")
+if _code == 2 and "UNDETERMINED" in _output:
+    ok("subprocess checker exits 2 when a pending list cannot be read")
+else:
+    fail(f"subprocess checker undetermined path (got {_code}: {_output.strip()})")
 
 
 def expect(
@@ -2946,16 +3073,6 @@ SNAPSHOT_RELAY_BACKLOG = {
 }
 
 
-def load_checker():
-    spec = importlib.util.spec_from_file_location("public_pr_runner_isolation", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-CHECKER = load_checker()
-
-
 expect({"dispatch.yml": """
 on:
   workflow_dispatch:
@@ -3539,12 +3656,68 @@ else:
 # bytes a sparse checkout puts on disk nor the programs a full-checkout job
 # runs. These fixtures copy the live rework-reconcile job and script.
 # ---------------------------------------------------------------------------
-REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
-
-
 def live(path: str) -> str:
     with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
         return handle.read()
+
+
+def install_lean_verify_fixture() -> None:
+    """Probe shards share a stub release.yml verify key, not the live suite (#1972)."""
+    global VERIFY, HOOK, VERIFY_ROW, LIVE_CHANGELOG
+    lean_pin = "0123456789abcdef0123456789abcdef01234567"
+    # Keep the three refusal kinds RELAY_BACKLOG freezes for release.yml verify.
+    lean_release = f"""
+# Generated by verJSON/.github scripts/gen-changelog-caller.sh release-node {lean_pin} --only-package-dir .
+name: Release
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: [self-hosted, general]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.sha }}}}
+      - uses: actions/checkout@v4
+        with:
+          repository: verJSON/.github
+          ref: {lean_pin}
+          path: .changelog-contract
+      - name: Opaque head pipe (relay-head)
+        env:
+          EXPECTED_HEAD: ${{{{ inputs.expected_head }}}}
+          INPUT_VERSION: ${{{{ inputs.version }}}}
+        run: echo "$GITHUB_SHA" | bash -c "cat >/dev/null"
+      - name: Run release verification
+        env:
+          NODE_AUTH_TOKEN: ''
+        run: |
+          if [ -x scripts/release-verify.sh ]; then
+            bash scripts/release-verify.sh
+          fi
+  snapshot:
+    needs: verify
+    runs-on: [self-hosted, general]
+    steps:
+      - run: 'true'
+  publish:
+    needs: snapshot
+    runs-on: [self-hosted, general]
+    steps:
+      - run: 'true'
+"""
+    VERIFY = {
+        "release.yml": lean_release,
+        "scripts/release-verify.sh": "#!/usr/bin/env bash\nset -euo pipefail\necho lean-verify\n",
+        "scripts/changelog.py": "print('lean-changelog')\n",
+        "./package.json": json.dumps({"name": "lean-verify", "scripts": {"test": "echo ok"}}),
+    }
+    HOOK = VERIFY["scripts/release-verify.sh"]
+    VERIFY_ROW = "".join(
+        backlog_row(VERIFY, "release.yml [workflow_dispatch]", job)
+        for job in ("verify", "snapshot", "publish")
+    )
+    LIVE_CHANGELOG = live("scripts/changelog.py")
 
 
 REWORK = {
@@ -4001,8 +4174,10 @@ expect_bound('echo "runs scripts/zz-a.sh"\nbash scripts/zz-sub.sh\n',
               "scripts/zz-b.sh": "echo b\n"},
              "scripts/zz-b.sh", "a program first met as a data token is still followed")
 # A chain deeper than the cap still runs something: refused, never truncated.
-CHAIN = {f"scripts/c{level}.sh": f"bash scripts/c{level + 1}.sh\n" for level in range(1, 6)}
-CHAIN["scripts/c6.sh"] = "echo end\n"
+CHAIN = {
+    **{f"scripts/c{level}.sh": f"bash scripts/c{level + 1}.sh\n" for level in range(1, 6)},
+    "scripts/c6.sh": "echo end\n",
+}
 expect_verify_refused(verify_with("bash scripts/c1.sh\n", CHAIN),
                       "a program chain nested beyond the depth cap refuses as unresolved",
                       ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "nested beyond"))
@@ -4114,6 +4289,11 @@ expect(verify_with("npm pack --ignore-scripts\n", {"./package.json": with_script
 
 # >>> runner-isolation probes part begins
 # >>> runner-isolation probes r8-r10 begins
+# Probe cases only need the frozen release.yml verify key and a stub hook.
+# Rebuilding the live release suite on every probe call was ~68% of local
+# time (#1972). Live-binding cases above keep LIVE_VERIFY semantics.
+install_lean_verify_fixture()
+
 # Round-8 finding 6: a program reached through a symbolic link binds the link
 # and its target's bytes and is followed into the target; a link out of the
 # tree, or a broken one, is a program the row cannot bind.
@@ -4307,10 +4487,29 @@ expect_verify_refused(
 
 # Round-10 PM decision: changelog.py's git_file() vector is a frozen data read
 # (its bytes go back to the caller and are parsed, never run), tolerated on its
-# exact line bytes, once, in changelog.py, for verify only.
+# exact line bytes, once, in changelog.py, for verify only. These cases need
+# the live changelog and release suite; the lean probe VERIFY is not enough.
 DATA_READ = '        ["git", "show", f"{revision}:{path}"],'
-CHANGELOG = VERIFY["scripts/changelog.py"]
+CHANGELOG = LIVE_CHANGELOG
 assert CHANGELOG.count(DATA_READ + "\n") == 1, "the fixture's changelog.py must hold the frozen data read"
+LIVE_VERIFY = {"release.yml": live(".github/workflows/release.yml"), **{path: live(path) for path in (
+    "scripts/release-verify.sh",
+    "scripts/changelog.py",
+    "scripts/render-next.sh",
+    "scripts/gen-adr-index.sh",
+    "scripts/adr-relative-links.test.py",
+    "scripts/doc-fragment-names.test.sh",
+    "scripts/doc-fragment-names.sh",
+    "scripts/ci-gate/contract-tools-package.test.js",
+    "bin/render-next.js",
+    "bin/gen-adr-index.js",
+    "scripts/gen-changelog-caller.sh",
+    "./package.json",
+)}}
+LIVE_VERIFY_ROW = "".join(
+    backlog_row(LIVE_VERIFY, "release.yml [workflow_dispatch]", job)
+    for job in ("verify", "snapshot", "publish")
+)
 SECOND_READ = ('\n\ndef second_read(revision, path):\n    return subprocess.run(\n' + DATA_READ +
                '\n        stdout=subprocess.PIPE,\n    )\n')
 for label, files in (
@@ -4321,12 +4520,13 @@ for label, files in (
     ("an edit to the data-read vector's bytes",
      {"scripts/changelog.py": CHANGELOG.replace(DATA_READ, DATA_READ.replace('"show", f', '"show",  f'), 1)}),
 ):
-    expect_verify_refused({**VERIFY, "pending.tsv": VERIFY_ROW, **files}, f"verify refuses {label}",
+    expect_verify_refused({**LIVE_VERIFY, "pending.tsv": LIVE_VERIFY_ROW, **files}, f"verify refuses {label}",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "materializes tracked content"))
 expect_verify_refused(
-    verify_with("python3 scripts/zz-spawn.py\n",
-                {"scripts/zz-spawn.py": "import subprocess\n\ndef read(revision, path):\n    return subprocess.run(\n"
-                                        + DATA_READ + "\n    )\n"}),
+    {**LIVE_VERIFY, "pending.tsv": LIVE_VERIFY_ROW,
+     "scripts/release-verify.sh": LIVE_VERIFY["scripts/release-verify.sh"] + "python3 scripts/zz-spawn.py\n",
+     "scripts/zz-spawn.py": "import subprocess\n\ndef read(revision, path):\n    return subprocess.run(\n"
+                            + DATA_READ + "\n    )\n"},
     "verify refuses the data-read vector in a program other than changelog.py",
     ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "materializes tracked content"))
 with tempfile.TemporaryDirectory() as root:
@@ -4376,6 +4576,7 @@ expect_bound("python3 scripts/zz-spawn.py\n",
 
 # <<< runner-isolation probes r8-r10 ends
 # >>> runner-isolation probes r11-r14 begins
+install_lean_verify_fixture()
 # Round-11 blocker: every Python call is classified by its imported name, so
 # an alias (`from subprocess import getoutput as g`, `import os as o`, a
 # loader imported by name) is read exactly like the original.
