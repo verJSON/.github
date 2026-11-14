@@ -1499,7 +1499,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             ),
             (
                 "dpkg: error processing package libc6:amd64 (--configure):\n"
-                " installed libc6 package post-installation script subprocess returned an "
+                " installed libc6 package post-installation script subprocess returned "
                 "error exit status 139\nSub-process /usr/bin/dpkg returned an error code (1)",
                 "C runtime post-installation script failed (exit status 139)",
             ),

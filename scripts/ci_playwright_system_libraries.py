@@ -800,7 +800,7 @@ def _trusted_command_failure_reason(stage: str, output: bytes, error_output: byt
             if marker not in error_detail or b"script subprocess returned" not in error_detail:
                 continue
             exit_status_match = re.search(
-                rb"script subprocess returned an error exit status ([0-9]{1,3})(?:\D|$)",
+                rb"script subprocess returned (?:an )?error exit status ([0-9]{1,3})(?:\D|$)",
                 error_detail,
             )
             exit_status = (
