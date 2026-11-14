@@ -223,8 +223,9 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         self.assertFalse({'settings', 'plugins', 'plugin_marketplaces'} & set(STEPS['claude']['with']))
 
     def assert_config_directory_refused(self, result, config_dir):
-        # The exclusive mkdir is the guard; an earlier failure would also exit nonzero.
-        self.assertIn(f"cannot create directory '{config_dir}': File exists", result.stderr)
+        # Match the path and EEXIST outcome without depending on coreutils wording.
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stderr, rf"{re.escape(str(config_dir))}.*File exists")
 
     def test_isolation_refuses_a_config_directory_that_already_exists(self):
         config_dir = self.claude_config_dir()

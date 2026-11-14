@@ -63,6 +63,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
 
         self.assertEqual(profile["packages"]["libc-bin"]["version"], "2.39-0ubuntu8.12")
         self.assertEqual(profile["packages"]["libc6"]["version"], "2.39-0ubuntu8.12")
+        self.assertEqual(profile["packages"]["libc6-dev"]["version"], "2.39-0ubuntu8.12")
         self.assertEqual(
             profile["packages"]["libglib2.0-0t64"]["version"],
             "2.80.0-6ubuntu3.10",
@@ -126,6 +127,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
         profile = playwright_profile.resolve_profile(PROFILE_ID)
         plan = (
             "Inst libc-bin (2.39-0ubuntu8.12 Ubuntu:24.04/noble-security)\n"
+            "Inst libc6-dev (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates)\n"
             "Inst libglib2.0-data (2.80.0-6ubuntu3.10 Ubuntu:24.04/noble-updates)\n"
         )
 
@@ -135,6 +137,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             planned,
             {
                 ("libc-bin", "amd64"): "2.39-0ubuntu8.12",
+                ("libc6-dev", "amd64"): "2.39-0ubuntu8.12",
                 ("libglib2.0-data", "all"): "2.80.0-6ubuntu3.10",
             },
         )

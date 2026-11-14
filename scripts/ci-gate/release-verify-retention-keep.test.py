@@ -129,9 +129,12 @@ def run_verify_step(step, variables, ambient=None, locale=None):
         root = Path(temporary)
         scripts = root / "scripts"
         scripts.mkdir()
-        # The hook IS /usr/bin/env, so its output is exactly what `env -i`
-        # handed it; a shell hook would add its own PWD and blur the boundary.
-        (scripts / "release-verify.sh").symlink_to("/usr/bin/env")
+        # Print exactly the clean environment from run_clean. A wrapper avoids
+        # multicall coreutils rejecting /usr/bin/env under this hook's alias.
+        (scripts / "release-verify.sh").write_text(
+            "#!/bin/sh\nunset PWD\nexec /usr/bin/env\n"
+        )
+        (scripts / "release-verify.sh").chmod(0o755)
         runner_temp = root / "runner-temp"
         runner_temp.mkdir()
         environment = {
