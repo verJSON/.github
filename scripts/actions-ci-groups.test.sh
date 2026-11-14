@@ -29,6 +29,10 @@ assert exclusive_commands == {
     "platform\t@exclusive @budget=120 python3 scripts/ci-gate/conformance/conformance.test.py",
     "platform\t@exclusive @budget=120 bash scripts/required-checks-audit.test.sh",
     "merge-gate\t@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh",
+    (
+        "changelog-release-2\t@exclusive @budget=600 "
+        "CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh"
+    ),
 }
 jobs = document["jobs"]
 assert document[True]["pull_request"]["types"] == [
@@ -1471,7 +1475,7 @@ merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	@budget=90 bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 changelog-release-1	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-2	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-2	@exclusive @budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-3	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-4	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-1	@budget=120 CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh

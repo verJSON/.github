@@ -30,8 +30,8 @@ from functools import wraps
 
 PROFILE_ID = "playwright-chromium-1.63.0-ubuntu-24.04-amd64"
 PLAYWRIGHT_VERSION = "1.63.0"
-EXPECTED_CATALOG_SHA256 = "2c4a7d73cbbd86e72b6830156fa4bc4c852bc5a6f0bfab387fc26b511c015715"
-EXPECTED_MANIFEST_SHA256 = "e20854d12666e7db8cc947158056de7b49a272d45628c9faa9d8e491b5fb8d87"
+EXPECTED_CATALOG_SHA256 = "217c9fa6b8159e0bb448da6981ffa64f744281980e0feaa5d0459fe2cc7452fd"
+EXPECTED_MANIFEST_SHA256 = "1cf85f2c587af5f8e56d02155c76c665c92ec354e0ea9a82d6b64391d2b41b95"
 STATE_SCHEMA_VERSION = 1
 MAX_PACKAGE_COUNT = 256
 MAX_PACKAGE_BYTES = 128 * 1024 * 1024
@@ -620,7 +620,9 @@ def parse_install_plan(plan_output: str, profile: dict[str, Any]) -> dict[tuple[
         record = profile["packages"].get(package)
         architecture = match.group("architecture") or (record["architecture"] if record else "")
         if record is None or architecture != record["architecture"] or version != record["version"]:
-            raise PlaywrightProfileError("Playwright apt plan selected an unpinned package")
+            raise PlaywrightProfileError(
+                f"Playwright apt plan selected an unpinned package: {package}={version}"
+            )
         _validate_plan_architecture_annotation(match.group("details"), architecture)
         key = (package, architecture)
         if key in planned:
@@ -724,6 +726,147 @@ def _child_setup(parent_pid: int, inherited_mask: set[signal.Signals]) -> None:
     signal.pthread_sigmask(signal.SIG_SETMASK, inherited_mask)
 
 
+def _trusted_command_stage(argv: tuple[str, ...] | list[str]) -> str:
+    if argv and Path(argv[0]).name == "unshare" and "/usr/bin/apt-get" in argv:
+        apt_get_index = argv.index("/usr/bin/apt-get")
+        apt_arguments = argv[apt_get_index + 1 :]
+        if "--no-download" in apt_arguments:
+            return "isolated offline APT installation"
+        if "--download-only" in apt_arguments:
+            return "isolated APT archive download"
+        if "--simulate" in apt_arguments:
+            return "isolated APT plan simulation"
+        return "isolated APT installation"
+    if argv and Path(argv[0]).name == "apt-get":
+        if "update" in argv:
+            return "APT index update"
+        if "--simulate" in argv:
+            return "APT plan simulation"
+        if "--download-only" in argv:
+            return "APT archive download"
+        if "download" in argv:
+            return "APT package archive download"
+        if "--no-download" in argv:
+            return "offline APT installation"
+        if "indextargets" in argv:
+            return "APT index inspection"
+        return "APT package command"
+    if argv and Path(argv[0]).name == "dpkg-query":
+        return "dpkg package-state query"
+    if argv and Path(argv[0]).name == "dpkg-deb":
+        return "APT archive identity check"
+    if argv and Path(argv[0]).name == "gpgv":
+        return "Ubuntu archive signature verification"
+    return "trusted package command"
+
+
+def _trusted_command_failure_reason(stage: str, output: bytes, error_output: bytes) -> str:
+    combined = (output + b"\n" + error_output).lower()
+    if b"no space left on device" in combined:
+        return "disk space exhausted"
+    if (
+        b"could not get lock" in combined
+        or b"unable to acquire the dpkg frontend lock" in combined
+    ):
+        return "package manager lock unavailable"
+    package_roles = {
+        "fontconfig": "font cache",
+        "libc-bin": "C library cache",
+        "libc6": "C runtime",
+        "libglib2.0-0t64": "GLib runtime",
+        "libglib2.0-bin": "GLib schema registry",
+        "libglib2.0-data": "GLib data",
+        "locales": "locale database",
+        "shared-mime-info": "MIME database",
+    }
+    lines = combined.splitlines()
+    for phase, marker in (
+        ("pre-installation", b"pre-installation script"),
+        ("post-installation", b"post-installation script"),
+        ("pre-removal", b"prerm script"),
+        ("post-removal", b"postrm script"),
+    ):
+        for line_index, error_line in enumerate(lines):
+            if not error_line.startswith(b"dpkg: error processing package "):
+                continue
+            detail_lines = [error_line]
+            for continuation in lines[line_index + 1 :]:
+                if continuation.startswith(b"dpkg: error processing package "):
+                    break
+                if not continuation.startswith((b" ", b"\t")):
+                    break
+                detail_lines.append(continuation)
+            error_detail = b" ".join(detail_lines)
+            if marker not in error_detail or b"script subprocess returned" not in error_detail:
+                continue
+            exit_status_match = re.search(
+                rb"script subprocess returned (?:an )?error exit status ([0-9]{1,3})(?:\D|$)",
+                error_detail,
+            )
+            exit_status = (
+                int(exit_status_match.group(1))
+                if exit_status_match is not None
+                else None
+            )
+            status_suffix = (
+                f" (exit status {exit_status})"
+                if exit_status is not None and exit_status <= 255
+                else ""
+            )
+            package_match = re.match(
+                rb"dpkg: error processing package ([a-z0-9][a-z0-9+.-]*)",
+                error_line,
+            )
+            package_role = (
+                package_roles.get(package_match.group(1).decode("ascii"))
+                if package_match is not None
+                else None
+            )
+            if package_role is not None:
+                return f"{package_role} {phase} script failed{status_suffix}"
+            return f"dpkg package {phase} script failed{status_suffix}"
+    if b"trigger subprocess returned" in combined and b"error" in combined:
+        return "dpkg package trigger failed"
+    if b"trying to overwrite" in combined:
+        return "dpkg package file conflict"
+    if (
+        b"unable to locate package" in combined
+        or b"couldn't find any package" in combined
+        or b"no installation candidate" in combined
+        or b"not available, but is referred to by another package" in combined
+        or b"unmet dependencies" in combined
+        or b"dependency problems prevent configuration" in combined
+        or b"held broken packages" in combined
+    ):
+        return "APT package resolution failed"
+    if (
+        b"sub-process /usr/bin/dpkg returned an error code" in combined
+        or b"errors were encountered while processing" in combined
+    ):
+        return "dpkg package processing failed"
+    if b"unable to fetch some archives" in combined or b"internal error, no file name for" in combined:
+        return "APT archive unavailable"
+    if b"unable to fetch" in combined or b"failed to fetch" in combined:
+        if "index update" in stage:
+            return "APT index fetch failed"
+        if "archive" in stage or "offline" in stage:
+            return "APT archive unavailable"
+        return "APT fetch failed"
+    return ""
+
+
+def _trusted_command_failure_message(
+    argv: tuple[str, ...] | list[str],
+    exit_code: int,
+    output: bytes = b"",
+    error_output: bytes = b"",
+) -> str:
+    stage = _trusted_command_stage(argv)
+    reason = _trusted_command_failure_reason(stage, output, error_output)
+    detail = f"; reason: {reason}" if reason else ""
+    return f"trusted package command failed during {stage} (exit code {exit_code}{detail})"
+
+
 def _run_supervised(
     argv: tuple[str, ...] | list[str],
     *,
@@ -795,7 +938,9 @@ def _run_supervised(
         if len(output) > maximum or len(error_output) > maximum:
             raise PlaywrightProfileError("trusted package command exceeded its output limit")
         if process.returncode != 0:
-            raise PlaywrightProfileError("trusted package command failed")
+            raise PlaywrightProfileError(
+                _trusted_command_failure_message(argv, process.returncode, output, error_output)
+            )
         return output, error_output, process.returncode
     except subprocess.TimeoutExpired as error:
         _terminate_process_group(process)
@@ -1399,7 +1544,7 @@ def _run_dpkg_install_in_namespace(
             *apt_argv,
         ),
         timeout=timeout,
-        env=env,
+        env={**env, "SYSTEMD_OFFLINE": "1"},
         maximum=4 * 1024 * 1024,
     )
 
@@ -1711,7 +1856,33 @@ def _validate_archive_lock(path: Path) -> None:
         raise PlaywrightProfileError("APT archive lock has an unsafe file identity")
 
 
+def _seal_archive_cache(paths: dict[str, Path]) -> None:
+    archive_dir = paths["archives"]
+    directories = (paths["cache"], archive_dir, archive_dir / "partial")
+    for directory in directories:
+        try:
+            metadata = os.lstat(directory)
+        except OSError as error:
+            raise PlaywrightProfileError("APT archive cache directory has an unsafe identity") from error
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise PlaywrightProfileError("APT archive cache directory has an unsafe identity")
+        os.chown(directory, 0, 0, follow_symlinks=False)
+
+    def seal_entries(directory: Path) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                os.chown(entry.path, 0, 0, follow_symlinks=False)
+                if entry.is_dir(follow_symlinks=False):
+                    seal_entries(Path(entry.path))
+
+    try:
+        seal_entries(archive_dir)
+    except OSError as error:
+        raise PlaywrightProfileError("APT archive cache could not be sealed root-owned") from error
+
+
 def _validate_archive_cache(paths: dict[str, Path], planned: dict[tuple[str, str], str], profile: dict[str, Any]) -> None:
+    _seal_archive_cache(paths)
     archive_dir = paths["archives"]
     expected: dict[str, tuple[str, dict[str, Any]]] = {}
     total_bytes = 0

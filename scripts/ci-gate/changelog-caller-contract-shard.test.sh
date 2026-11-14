@@ -353,7 +353,9 @@ if max(loads) - min(loads) > 1:
 manifest_text = open(manifest, encoding="utf-8").read().splitlines()
 caller_rows = [line for line in manifest_text if "scripts/ci-gate/changelog-caller-contract.test.sh" in line]
 expected = {
-    f"changelog-release-{shard_id}\t@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id} "
+f"changelog-release-{shard_id}\t"
+f"{'@exclusive ' if shard_id == 2 else ''}@budget=600 "
+f"CHANGELOG_CALLER_CONTRACT_SHARD={shard_id} "
     "bash scripts/ci-gate/changelog-caller-contract.test.sh"
     for shard_id in range(1, width + 1)
 } | {

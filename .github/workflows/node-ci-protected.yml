@@ -2535,6 +2535,7 @@ jobs:
             --compatibility-ranges "$POSTGRES_COMPATIBILITY_RANGES" \
             --secretless-mode "$POSTGRES_SECRETLESS_MODE"
       - name: Validate Playwright system-library profile request
+        id: validate-playwright-profile
         if: needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != ''
         env:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
@@ -2547,6 +2548,10 @@ jobs:
           [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
           mkdir -p "$RUNNER_TEMP/config"
           curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_playwright_system_libraries.py" -o "$RUNNER_TEMP/ci_playwright_system_libraries.py"
+          helper_sha256="$(sha256sum -- "$RUNNER_TEMP/ci_playwright_system_libraries.py")"
+          helper_sha256="${helper_sha256%% *}"
+          [[ "$helper_sha256" =~ ^[0123456789abcdef]{64}$ ]]
+          echo "helper-sha256=$helper_sha256" >> "$GITHUB_OUTPUT"
           curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-playwright-system-libraries.json" -o "$RUNNER_TEMP/config/ci-playwright-system-libraries.json"
           python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" validate \
             --profile "$PLAYWRIGHT_PROFILE" \
@@ -6895,11 +6900,29 @@ jobs:
         if: needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
           PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          PLAYWRIGHT_HELPER_SHA256: ${{ steps.validate-playwright-profile.outputs.helper-sha256 }}
           PLAYWRIGHT_STATE_FILE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
+          [[ "$PLAYWRIGHT_HELPER_SHA256" =~ ^[0123456789abcdef]{64}$ ]]
+          helper_copy_dir=""
+          cleanup_helper_copy() {
+            if [[ -n "$helper_copy_dir" ]]; then
+              sudo /usr/bin/rm -f -- "$helper_copy_dir/ci_playwright_system_libraries.py"
+              sudo /usr/bin/rmdir -- "$helper_copy_dir"
+            fi
+          }
+          trap cleanup_helper_copy EXIT
+          helper_copy_dir="$(sudo /usr/bin/mktemp -d /run/verjson-playwright-helper.XXXXXX)"
+          helper_copy="$helper_copy_dir/ci_playwright_system_libraries.py"
+          sudo /usr/bin/install -o root -g root -m 0500 -- "$RUNNER_TEMP/ci_playwright_system_libraries.py" "$helper_copy"
+          helper_copy_sha256="$(sudo /usr/bin/sha256sum -- "$helper_copy")"
+          [[ "${helper_copy_sha256%% *}" == "$PLAYWRIGHT_HELPER_SHA256" ]] || {
+            echo "::error::trusted Playwright helper changed before privileged use" >&2
+            exit 1
+          }
           sudo /usr/bin/env -i \
             PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             HOME=/nonexistent \
@@ -6907,7 +6930,7 @@ jobs:
             LC_ALL=C \
             APT_CONFIG=/dev/null \
             VERJSON_CI_SECRETLESS_MODE=true \
-            /usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" provision \
+            /usr/bin/python3 -I "$helper_copy" provision \
               --profile "$PLAYWRIGHT_PROFILE" \
               --state-file "$PLAYWRIGHT_STATE_FILE" \
               --runner-environment "$RUNNER_ENVIRONMENT" \
@@ -8791,6 +8814,7 @@ jobs:
       - name: Remove Playwright system-library receipt
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != ''
         env:
+          PLAYWRIGHT_HELPER_SHA256: ${{ steps.validate-playwright-profile.outputs.helper-sha256 }}
           PLAYWRIGHT_STATE_FILE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
           PLAYWRIGHT_STATE_IDENTITY: ${{ steps.provision-playwright-profile.outputs.receipt_identity }}
         run: |
@@ -8801,13 +8825,30 @@ jobs:
               echo "::error::Playwright receipt identity is unavailable; refusing cleanup" >&2
               exit 1
             }
+            [[ "$PLAYWRIGHT_HELPER_SHA256" =~ ^[0123456789abcdef]{64}$ ]]
+            helper_copy_dir=""
+            cleanup_helper_copy() {
+              if [[ -n "$helper_copy_dir" ]]; then
+                sudo /usr/bin/rm -f -- "$helper_copy_dir/ci_playwright_system_libraries.py"
+                sudo /usr/bin/rmdir -- "$helper_copy_dir"
+              fi
+            }
+            trap cleanup_helper_copy EXIT
+            helper_copy_dir="$(sudo /usr/bin/mktemp -d /run/verjson-playwright-helper.XXXXXX)"
+            helper_copy="$helper_copy_dir/ci_playwright_system_libraries.py"
+            sudo /usr/bin/install -o root -g root -m 0500 -- "$RUNNER_TEMP/ci_playwright_system_libraries.py" "$helper_copy"
+            helper_copy_sha256="$(sudo /usr/bin/sha256sum -- "$helper_copy")"
+            [[ "${helper_copy_sha256%% *}" == "$PLAYWRIGHT_HELPER_SHA256" ]] || {
+              echo "::error::trusted Playwright helper changed before privileged use" >&2
+              exit 1
+            }
             sudo /usr/bin/env -i \
               PATH=/usr/sbin:/usr/bin:/sbin:/bin \
               HOME=/nonexistent \
               DEBIAN_FRONTEND=noninteractive \
               LC_ALL=C \
               APT_CONFIG=/dev/null \
-              /usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" cleanup \
+              /usr/bin/python3 -I "$helper_copy" cleanup \
                 --state-file "$PLAYWRIGHT_STATE_FILE" \
                 --expected-identity "$PLAYWRIGHT_STATE_IDENTITY"
           fi

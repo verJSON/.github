@@ -37,7 +37,7 @@
         "fonts-freefont-ttf"
       ],
       "id": "playwright-chromium-1.63.0-ubuntu-24.04-amd64",
-      "packageManifestSha256": "e20854d12666e7db8cc947158056de7b49a272d45628c9faa9d8e491b5fb8d87",
+      "packageManifestSha256": "1cf85f2c587af5f8e56d02155c76c665c92ec354e0ea9a82d6b64391d2b41b95",
       "packages": [
         {
           "architecture": "all",
@@ -257,11 +257,45 @@
         },
         {
           "architecture": "amd64",
-          "filename": "pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb",
+          "filename": "pool/main/g/glibc/libc-bin_2.39-0ubuntu8.12_amd64.deb",
+          "package": "libc-bin",
+          "sha256": "22f0393621e72ed1b53d228ee332180269182b5445761c7d7b74f5cba75a1dd6",
+          "size": 681714,
+          "version": "2.39-0ubuntu8.12"
+        },
+        {
+          "architecture": "amd64",
+          "filename": "pool/main/g/glibc/libc-dev-bin_2.39-0ubuntu8.12_amd64.deb",
+          "package": "libc-dev-bin",
+          "sha256": "74ac21dab2a0a6524a2cf9de623adf1bb1f7d9b672e6b0f70adec0c40452bae3",
+          "size": 20450,
+          "version": "2.39-0ubuntu8.12"
+        },
+
+        {
+          "architecture": "amd64",
+          "filename": "pool/main/g/glibc/libc6_2.39-0ubuntu8.12_amd64.deb",
           "package": "libc6",
-          "sha256": "ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be",
-          "size": 3264314,
-          "version": "2.39-0ubuntu8.9"
+          "sha256": "d821b41fc59cb4978ecd53bc83e5c964ac15d305c8d2ac4c8a35aebe55010fb9",
+          "size": 3264258,
+          "version": "2.39-0ubuntu8.12"
+        },
+
+        {
+          "architecture": "amd64",
+          "filename": "pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.12_amd64.deb",
+          "package": "libc6-dev",
+          "sha256": "d81dd6dc9d515762cc93f338efa6219252acf3e2e87b5b89dd7dc517741e6eed",
+          "size": 2124506,
+          "version": "2.39-0ubuntu8.12"
+        },
+        {
+          "architecture": "amd64",
+          "filename": "pool/main/g/glibc/libc6-i386_2.39-0ubuntu8.12_amd64.deb",
+          "package": "libc6-i386",
+          "sha256": "f3357fcee4a907404f5231381834cf31647326496d5bb4259338a717b3544c89",
+          "size": 2786812,
+          "version": "2.39-0ubuntu8.12"
         },
         {
           "architecture": "amd64",
@@ -457,11 +491,19 @@
         },
         {
           "architecture": "amd64",
-          "filename": "pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.9_amd64.deb",
+          "filename": "pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.10_amd64.deb",
           "package": "libglib2.0-0t64",
-          "sha256": "a66ef54888a18e20b55dd3988177f6029caa81dc16198c043a715500b62cf06f",
-          "size": 1547468,
-          "version": "2.80.0-6ubuntu3.9"
+          "sha256": "ff1b650f655b36dfe202fdbae6bb02b363c7257b6dd23e4f95ab61f716190df3",
+          "size": 1547558,
+          "version": "2.80.0-6ubuntu3.10"
+        },
+        {
+          "architecture": "all",
+          "filename": "pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu3.10_all.deb",
+          "package": "libglib2.0-data",
+          "sha256": "f196e280e4286f6dfc5ddaaf8c09cc6e8502e0de77619385e3fde19ea2739122",
+          "size": 50240,
+          "version": "2.80.0-6ubuntu3.10"
         },
         {
           "architecture": "amd64",
@@ -1102,6 +1144,14 @@
           "sha256": "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
           "size": 299490,
           "version": "1.5.5+dfsg2-2build1"
+        },
+        {
+          "architecture": "all",
+          "filename": "pool/main/g/glibc/locales_2.39-0ubuntu8.12_all.deb",
+          "package": "locales",
+          "sha256": "0047f997c3799818514d1d08fece7cf2614a61e5505678bcf0c9558587a85d1d",
+          "size": 4231592,
+          "version": "2.39-0ubuntu8.12"
         },
         {
           "architecture": "all",
