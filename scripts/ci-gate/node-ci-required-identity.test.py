@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "186737dddc0f0012518d0e69cc94e386eb1d4e7ca4077095acce5a0bc4d1fad0"
+LEGACY_SHA256 = "c4d10ad74b508ef772f2bdb935db405ed59652c14bf0ca239d273c34fc815f7b"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):

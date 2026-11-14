@@ -47,6 +47,8 @@ _BRANCH = re.compile(r"^(?!HEAD$)(?!.*((^|/)\.|\.\.|//|\.lock(/|$)|[./]$))[A-Za-
 _YAML_SCALAR_IDS = frozenset({"null", "true", "false", "yes", "no", "on", "off", "y", "n"})
 MAX_DOCUMENT_BYTES = 1 << 20  # characters
 _SECRET = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+_REPOSITORY_SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+MAX_SECRETS = 16
 
 TOP_FIELDS = {"version", "levels", "secrets", "pushBranches", "buildArtifact"}
 LEVEL_FIELDS = {"id", "needs", "failFast", "events", "branches", "inputs"}
@@ -140,7 +142,7 @@ class BuildArtifact:
 @dataclass(frozen=True)
 class Plan:
     levels: tuple[Level, ...]
-    secrets: tuple[str, ...]
+    secrets: tuple[tuple[str, str], ...]
     push_branches: tuple[str, ...]
     explicit: bool
     build_artifact: BuildArtifact | None = None
@@ -194,6 +196,60 @@ def _string_list(
     if len(value) > limit:
         errors.append(PlanError("too_many", path, f"at most {limit} entries"))
     return tuple(items)
+
+
+def _valid_repository_secret_name(name: str) -> bool:
+    return bool(_REPOSITORY_SECRET.fullmatch(name)) and not name.upper().startswith("GITHUB_")
+
+
+def _parse_secrets(
+    value: Any, known_secrets: frozenset[str], errors: list[PlanError]
+) -> tuple[tuple[str, str], ...]:
+    if isinstance(value, list):
+        caller_names = _string_list(value, "$.secrets", _SECRET, MAX_SECRETS, errors) or ()
+        mappings = [(name, name) for name in caller_names]
+        paths = [(f"$.secrets[{index}]", name) for index, name in enumerate(caller_names)]
+    elif isinstance(value, dict):
+        if len(value) > MAX_SECRETS:
+            errors.append(PlanError("too_many", "$.secrets", f"at most {MAX_SECRETS} entries"))
+        mappings = []
+        paths = []
+        for caller_name, repository_name in value.items():
+            path = f"$.secrets.{caller_name}"
+            if not isinstance(caller_name, str) or not _SECRET.fullmatch(caller_name):
+                errors.append(
+                    PlanError("bad_value", "$.secrets", "caller secret names must be valid node-ci.yml secret identifiers")
+                )
+                continue
+            if not isinstance(repository_name, str) or not _valid_repository_secret_name(repository_name):
+                errors.append(
+                    PlanError(
+                        "bad_value",
+                        path,
+                        "repository secret names must use letters, numbers, and underscores, must not start with a number or GITHUB_",
+                    )
+                )
+                continue
+            mappings.append((caller_name, repository_name))
+            paths.append((path, caller_name))
+    else:
+        errors.append(
+            PlanError("bad_type", "$.secrets", "expected an array or an object mapping caller secrets to repository secrets")
+        )
+        return ()
+
+    for path, caller_name in paths:
+        if caller_name not in known_secrets:
+            errors.append(PlanError("unknown_secret", path, f"node-ci.yml declares no secret {caller_name!r}"))
+        elif not _valid_repository_secret_name(caller_name) and isinstance(value, list):
+            errors.append(
+                PlanError(
+                    "bad_value",
+                    path,
+                    "same-name repository secret is invalid; map this caller secret to a valid repository secret name",
+                )
+            )
+    return tuple(mappings)
 
 
 def _matches_declared_type(item: Any, declared: str) -> bool:
@@ -446,10 +502,7 @@ def _parse_levels(text: str, known_inputs: dict[str, str], known_secrets: frozen
         errors.append(PlanError("empty_work", "$.levels", "declare at least one level"))
     if len(raw_levels) > MAX_LEVELS:
         errors.append(PlanError("too_many", "$.levels", f"at most {MAX_LEVELS} levels"))
-    secrets = _string_list(document.get("secrets", []), "$.secrets", _SECRET, 16, errors) or ()
-    for index, name in enumerate(secrets):
-        if name not in known_secrets:
-            errors.append(PlanError("unknown_secret", f"$.secrets[{index}]", f"node-ci.yml declares no secret {name!r}"))
+    secrets = _parse_secrets(document.get("secrets", []), known_secrets, errors)
     push_branches = _string_list(document.get("pushBranches", ["main"]), "$.pushBranches", _BRANCH, 32, errors) or ()
     if "pushBranches" in document and not push_branches:
         errors.append(PlanError("empty_work", "$.pushBranches", "omit pushBranches or list at least one branch"))
@@ -481,8 +534,14 @@ def _parse_levels(text: str, known_inputs: dict[str, str], known_secrets: frozen
         if level is not None and level.id not in preceding:
             preceding[level.id] = level
     if build_artifact is not None:
-        if secrets != ("NODE_AUTH_TOKEN",):
-            errors.append(PlanError("build_artifact_secrets", "$.secrets", "buildArtifact requires exactly [\"NODE_AUTH_TOKEN\"]"))
+        if dict(secrets) != {"NODE_AUTH_TOKEN": "NODE_AUTH_TOKEN"}:
+            errors.append(
+                PlanError(
+                    "build_artifact_secrets",
+                    "$.secrets",
+                    "buildArtifact requires only NODE_AUTH_TOKEN mapped to itself",
+                )
+            )
         for reserved in sorted(BUILD_ARTIFACT_JOBS):
             if reserved in declared:
                 errors.append(PlanError("reserved_job_id", "$.levels", f"{reserved!r} is reserved when buildArtifact is declared"))
@@ -569,7 +628,10 @@ def _render_level(level: Level, plan: Plan, sha: str) -> list[str]:
     ]
     if plan.secrets:
         lines.append("    secrets:")
-        lines += [f"      {name}: ${{{{ secrets.{name} }}}}" for name in plan.secrets]
+        lines += [
+            f"      {caller_name}: ${{{{ secrets.{repository_name} }}}}"
+            for caller_name, repository_name in plan.secrets
+        ]
     return lines
 
 
@@ -578,7 +640,9 @@ def _artifact_plan_json(plan: Plan) -> str:
         {
             "version": SCHEMA_VERSION,
             "pushBranches": list(plan.push_branches),
-            "secrets": list(plan.secrets),
+            # buildArtifact only permits NODE_AUTH_TOKEN mapped to itself; keep
+            # its v1 authorization-plan wire format consumed by ci_build_artifacts.py.
+            "secrets": [caller_name for caller_name, _repository_name in plan.secrets],
             "levels": [
                 {
                     "id": level.id,

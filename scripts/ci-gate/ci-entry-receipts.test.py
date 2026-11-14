@@ -84,7 +84,7 @@ class LevelFailFastParsingTests(unittest.TestCase):
                 plan.levels[0],
                 ci_levels.Level("consumer", (), None, None, (), True),
             ),
-            secrets=("NODE_AUTH_TOKEN",),
+            secrets=(("NODE_AUTH_TOKEN", "NODE_AUTH_TOKEN"),),
             push_branches=("main",),
             explicit=True,
             build_artifact=ci_levels.BuildArtifact("unit", ("consumer",), ("dist",)),

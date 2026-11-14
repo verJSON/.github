@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0264](0264-node-ci-submodule-token-lifetime/README.md) | 2026-11-14 | Node CI submodule credentials end at checkout |
 | [0263](0263-pulumi-private-package-validation/README.md) | 2026-11-13 | Pulumi private packages use scriptless, step-scoped acquisition |
 | [0262](0262-recover-deleted-protected-type-surface-baseline/README.md) | 2026-11-13 | Recover a deleted protected type-surface baseline through a declaration-only PR |
 | [0261](0261-generated-container-candidate-callers-defer-drafts/README.md) | 2026-11-12 | Generated container-candidate callers skip drafts and cancel only on new commits |
