@@ -584,6 +584,23 @@ The array form remains shorthand for same-name mappings. The generator validates
 the caller secret against `node-ci.yml` and rejects repository secret names that
 are invalid or use GitHub's reserved `GITHUB_` prefix.
 
+When a `ci-levels.json` caller should use its per-run GitHub token to read
+internal packages, set the fixed `package-token` option instead of mapping
+`NODE_AUTH_TOKEN` in the `secrets` object:
+
+```json
+"package-token": "github-token"
+```
+
+This automatically supplies `NODE_AUTH_TOKEN` from `${{ secrets.GITHUB_TOKEN }}`
+to every generated `node-ci.yml` call and keeps the caller's `packages: read`
+permission. Every ordinary level must opt into `secretless-pr` or
+`secretless-trusted-ref`, so the token stays inside isolated dependency
+acquisition; the default credentialed install path rejects this option.
+`buildArtifact` supplies those isolated modes automatically and keeps its v1
+plan shape. The option accepts only `github-token`; it does not make `GITHUB_*`
+names available in the general secret map or allow caller supplied expressions.
+
 - **Order.** A level may only `needs` a level declared before it, so cycles cannot be
   written. Unrelated levels run in parallel.
 - **Edges.** `success` (the default) runs the level only when the prerequisite

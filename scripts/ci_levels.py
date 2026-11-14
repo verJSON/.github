@@ -50,7 +50,7 @@ _SECRET = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 _REPOSITORY_SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 MAX_SECRETS = 16
 
-TOP_FIELDS = {"version", "levels", "secrets", "pushBranches", "buildArtifact"}
+TOP_FIELDS = {"version", "levels", "secrets", "package-token", "pushBranches", "buildArtifact"}
 LEVEL_FIELDS = {"id", "needs", "failFast", "events", "branches", "inputs"}
 NEED_FIELDS = {"level", "condition"}
 BUILD_ARTIFACT_FIELDS = {"producer", "consumers", "paths"}
@@ -502,7 +502,44 @@ def _parse_levels(text: str, known_inputs: dict[str, str], known_secrets: frozen
         errors.append(PlanError("empty_work", "$.levels", "declare at least one level"))
     if len(raw_levels) > MAX_LEVELS:
         errors.append(PlanError("too_many", "$.levels", f"at most {MAX_LEVELS} levels"))
-    secrets = _parse_secrets(document.get("secrets", []), known_secrets, errors)
+    raw_secrets = document.get("secrets", [])
+    secrets = _parse_secrets(raw_secrets, known_secrets, errors)
+    package_token = None
+    if "package-token" in document:
+        package_token = document["package-token"]
+        if package_token != "github-token":
+            errors.append(
+                PlanError("bad_value", "$.package-token", "expected the fixed value 'github-token'")
+            )
+            package_token = None
+        elif "NODE_AUTH_TOKEN" not in known_secrets:
+            errors.append(
+                PlanError(
+                    "unknown_secret",
+                    "$.package-token",
+                    "node-ci.yml declares no 'NODE_AUTH_TOKEN' secret",
+                )
+            )
+        elif isinstance(raw_secrets, dict) and "NODE_AUTH_TOKEN" in raw_secrets:
+            errors.append(
+                PlanError(
+                    "package_token_conflict",
+                    "$.secrets.NODE_AUTH_TOKEN",
+                    "package-token selects the NODE_AUTH_TOKEN source; do not map it separately",
+                )
+            )
+        else:
+            selected_secrets = []
+            token_selected = False
+            for caller_name, source_name in secrets:
+                if caller_name == "NODE_AUTH_TOKEN":
+                    selected_secrets.append((caller_name, "GITHUB_TOKEN"))
+                    token_selected = True
+                else:
+                    selected_secrets.append((caller_name, source_name))
+            if not token_selected:
+                selected_secrets.append(("NODE_AUTH_TOKEN", "GITHUB_TOKEN"))
+            secrets = tuple(selected_secrets)
     push_branches = _string_list(document.get("pushBranches", ["main"]), "$.pushBranches", _BRANCH, 32, errors) or ()
     if "pushBranches" in document and not push_branches:
         errors.append(PlanError("empty_work", "$.pushBranches", "omit pushBranches or list at least one branch"))
@@ -533,13 +570,30 @@ def _parse_levels(text: str, known_inputs: dict[str, str], known_secrets: frozen
         level = _parse_level(raw, f"$.levels[{index}]", preceding, declared, known_inputs, errors)
         if level is not None and level.id not in preceding:
             preceding[level.id] = level
+    if package_token == "github-token" and build_artifact is None:
+        for index, level in enumerate(preceding.values()):
+            level_inputs = dict(level.inputs)
+            if not (
+                level_inputs.get("secretless-pr") is True
+                or level_inputs.get("secretless-trusted-ref") is True
+            ):
+                errors.append(
+                    PlanError(
+                        "package_token_requires_secretless",
+                        f"$.levels[{index}].inputs",
+                        "package-token requires secretless-pr or secretless-trusted-ref on every level",
+                    )
+                )
     if build_artifact is not None:
-        if dict(secrets) != {"NODE_AUTH_TOKEN": "NODE_AUTH_TOKEN"}:
+        expected_secrets = {
+            "NODE_AUTH_TOKEN": "GITHUB_TOKEN" if package_token == "github-token" else "NODE_AUTH_TOKEN"
+        }
+        if dict(secrets) != expected_secrets:
             errors.append(
                 PlanError(
                     "build_artifact_secrets",
                     "$.secrets",
-                    "buildArtifact requires only NODE_AUTH_TOKEN mapped to itself",
+                    "buildArtifact requires only NODE_AUTH_TOKEN from the selected package-token source",
                 )
             )
         for reserved in sorted(BUILD_ARTIFACT_JOBS):
@@ -685,7 +739,7 @@ def _render_role_job(
     needs: tuple[str, ...] = (),
     condition: str | None = None,
     with_values: tuple[tuple[str, str], ...] = (),
-    secrets: tuple[str, ...] = (),
+    secrets: tuple[tuple[str, str], ...] = (),
 ) -> list[str]:
     lines = [f"  {job_id}:"]
     if needs:
@@ -704,7 +758,10 @@ def _render_role_job(
         lines.append(f"      {key}: {value}")
     if secrets:
         lines.append("    secrets:")
-        lines += [f"      {name}: ${{{{ secrets.{name} }}}}" for name in secrets]
+        lines += [
+            f"      {caller_name}: ${{{{ secrets.{source_name} }}}}"
+            for caller_name, source_name in secrets
+        ]
     return lines
 
 
@@ -786,7 +843,8 @@ def _render_artifact_level(level: Level, plan: Plan, sha: str) -> list[str]:
         participant_count=participant_count,
         authorization_plan_json=_artifact_plan_json(plan),
     )
-    lines += [f"    secrets:\n      NODE_AUTH_TOKEN: ${{{{ secrets.NODE_AUTH_TOKEN }}}}"]
+    package_secret = dict(plan.secrets)["NODE_AUTH_TOKEN"]
+    lines += [f"    secrets:\n      NODE_AUTH_TOKEN: ${{{{ secrets.{package_secret} }}}}"]
     return lines
 
 
@@ -1021,7 +1079,7 @@ def _render_artifact_jobs(plan: Plan, sha: str) -> list[list[str]]:
         needs=producer_needs,
         condition=producer_condition,
         with_values=tuple(producer_inputs),
-        secrets=("NODE_AUTH_TOKEN",),
+        secrets=plan.secrets,
     )
     return [mode_gate, preflight, producer]
 

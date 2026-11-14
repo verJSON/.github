@@ -147,6 +147,23 @@ class BuildArtifactSchemaTests(unittest.TestCase):
             ["NODE_AUTH_TOKEN"],
         )
 
+    def test_build_artifact_uses_the_selected_github_package_token(self):
+        plan = parse(self.artifact_document(**{"package-token": "github-token"}))
+        workflow = yaml.safe_load(ci_levels.render_caller(plan, SHA, ""))
+        self.assertEqual(
+            json.loads(ci_levels._artifact_plan_json(plan))["secrets"],
+            ["NODE_AUTH_TOKEN"],
+        )
+        token_jobs = [
+            job
+            for job in workflow["jobs"].values()
+            if job.get("secrets", {}).get("NODE_AUTH_TOKEN") is not None
+        ]
+        self.assertGreater(len(token_jobs), 0)
+        self.assertTrue(
+            all(job["secrets"]["NODE_AUTH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}" for job in token_jobs)
+        )
+
     def test_build_artifact_rejects_extra_fields_and_unsafe_roots(self):
         for request in (
             {"producer": "build", "consumers": ["test"], "paths": ["dist/*"]},
@@ -889,6 +906,82 @@ class ValidatorTests(unittest.TestCase):
         )
         self.assertEqual(
             codes(levels({"id": "a"}, secrets={"submodules-token": "GITHUB_SUBMODULES_TOKEN"})),
+            ["bad_value"],
+        )
+        self.assertEqual(
+            codes(levels({"id": "a"}, secrets={"submodules-token": "GITHUB_TOKEN"})),
+            ["bad_value"],
+        )
+
+    def test_github_package_token_requires_secretless_execution(self):
+        self.assertEqual(
+            codes(levels({"id": "a"}, **{"package-token": "github-token"})),
+            ["package_token_requires_secretless"],
+        )
+
+    def test_github_package_token_is_an_explicit_fixed_source(self):
+        document = levels(
+            {
+                "id": "a",
+                "events": ["pull_request"],
+                "inputs": {"secretless-pr": True},
+            },
+            **{"package-token": "github-token"},
+        )
+        plan = parse(document)
+        workflow = yaml.safe_load(ci_levels.render_caller(plan, SHA, ""))
+        job = workflow["jobs"]["a"]
+        self.assertEqual(
+            job["secrets"],
+            {"NODE_AUTH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"},
+        )
+        self.assertEqual(job["permissions"]["packages"], "read")
+
+    def test_github_package_token_combines_with_other_secret_aliases(self):
+        document = levels(
+            {
+                "id": "a",
+                "events": ["pull_request"],
+                "inputs": {"secretless-pr": True},
+            },
+            secrets={"submodules-token": "SUBMODULES_TOKEN"},
+            **{"package-token": "github-token"},
+        )
+        workflow = yaml.safe_load(ci_levels.render_caller(parse(document), SHA, ""))
+        self.assertEqual(
+            workflow["jobs"]["a"]["secrets"],
+            {
+                "NODE_AUTH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+                "submodules-token": "${{ secrets.SUBMODULES_TOKEN }}",
+            },
+        )
+
+    def test_github_package_token_rejects_ambiguous_or_arbitrary_sources(self):
+        self.assertEqual(
+            codes(
+                levels(
+                    {
+                        "id": "a",
+                        "events": ["pull_request"],
+                        "inputs": {"secretless-pr": True},
+                    },
+                    secrets={"NODE_AUTH_TOKEN": "ORG_PACKAGE_TOKEN"},
+                    **{"package-token": "github-token"},
+                )
+            ),
+            ["package_token_conflict"],
+        )
+        self.assertEqual(
+            codes(
+                levels(
+                    {
+                        "id": "a",
+                        "events": ["push"],
+                        "inputs": {"secretless-trusted-ref": True},
+                    },
+                    **{"package-token": "${{ secrets.NODE_AUTH_TOKEN }}"},
+                )
+            ),
             ["bad_value"],
         )
 
