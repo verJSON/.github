@@ -726,6 +726,37 @@ def _child_setup(parent_pid: int, inherited_mask: set[signal.Signals]) -> None:
     signal.pthread_sigmask(signal.SIG_SETMASK, inherited_mask)
 
 
+def _trusted_command_stage(argv: tuple[str, ...] | list[str]) -> str:
+    if argv and Path(argv[0]).name == "unshare" and "/usr/bin/apt-get" in argv:
+        return "isolated APT installation"
+    if argv and Path(argv[0]).name == "apt-get":
+        if "update" in argv:
+            return "APT index update"
+        if "--simulate" in argv:
+            return "APT plan simulation"
+        if "--download-only" in argv:
+            return "APT archive download"
+        if "download" in argv:
+            return "APT package archive download"
+        if "--no-download" in argv:
+            return "offline APT installation"
+        if "indextargets" in argv:
+            return "APT index inspection"
+        return "APT package command"
+    if argv and Path(argv[0]).name == "dpkg-query":
+        return "dpkg package-state query"
+    if argv and Path(argv[0]).name == "dpkg-deb":
+        return "APT archive identity check"
+    if argv and Path(argv[0]).name == "gpgv":
+        return "Ubuntu archive signature verification"
+    return "trusted package command"
+
+
+def _trusted_command_failure_message(argv: tuple[str, ...] | list[str], exit_code: int) -> str:
+    stage = _trusted_command_stage(argv)
+    return f"trusted package command failed during {stage} (exit code {exit_code})"
+
+
 def _run_supervised(
     argv: tuple[str, ...] | list[str],
     *,
@@ -797,7 +828,7 @@ def _run_supervised(
         if len(output) > maximum or len(error_output) > maximum:
             raise PlaywrightProfileError("trusted package command exceeded its output limit")
         if process.returncode != 0:
-            raise PlaywrightProfileError("trusted package command failed")
+            raise PlaywrightProfileError(_trusted_command_failure_message(argv, process.returncode))
         return output, error_output, process.returncode
     except subprocess.TimeoutExpired as error:
         _terminate_process_group(process)

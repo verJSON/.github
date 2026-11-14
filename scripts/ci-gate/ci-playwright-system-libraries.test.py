@@ -1408,6 +1408,27 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertTrue(stopped, f"descendant process {child_pid} remained live after timeout")
 
+    def test_trusted_command_failure_reports_only_safe_stage_and_exit_code(self) -> None:
+        cases = (
+            (("/usr/bin/apt-get", "update"), "APT index update"),
+            (("/usr/bin/apt-get", "--simulate", "install", "private-package=1.2.3"), "APT plan simulation"),
+            (("/usr/bin/apt-get", "--download-only", "install", "private-package=1.2.3"), "APT archive download"),
+            (("/usr/bin/apt-get", "download", "private-package=1.2.3"), "APT package archive download"),
+            (("/usr/bin/apt-get", "--no-download", "install", "private-package=1.2.3"), "offline APT installation"),
+            (("unshare", "--mount", "/usr/bin/apt-get", "install", "private-package=1.2.3"), "isolated APT installation"),
+        )
+
+        for argv, stage in cases:
+            with self.subTest(stage=stage):
+                message = playwright_profile._trusted_command_failure_message(argv, 42)
+
+                self.assertEqual(
+                    message,
+                    f"trusted package command failed during {stage} (exit code 42)",
+                )
+                self.assertNotIn("private-package", message)
+                self.assertNotIn("1.2.3", message)
+
     def test_process_that_exits_during_group_scan_is_not_a_live_member(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             proc = Path(directory)
