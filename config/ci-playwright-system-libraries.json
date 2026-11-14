@@ -37,7 +37,7 @@
         "fonts-freefont-ttf"
       ],
       "id": "playwright-chromium-1.63.0-ubuntu-24.04-amd64",
-      "packageManifestSha256": "7aa0d327d5654dc3ad9f7e93b1cba39a51040a5b7d2060add06d8a20af2de965",
+      "packageManifestSha256": "1cf85f2c587af5f8e56d02155c76c665c92ec354e0ea9a82d6b64391d2b41b95",
       "packages": [
         {
           "architecture": "all",
@@ -1144,6 +1144,14 @@
           "sha256": "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
           "size": 299490,
           "version": "1.5.5+dfsg2-2build1"
+        },
+        {
+          "architecture": "all",
+          "filename": "pool/main/g/glibc/locales_2.39-0ubuntu8.12_all.deb",
+          "package": "locales",
+          "sha256": "0047f997c3799818514d1d08fece7cf2614a61e5505678bcf0c9558587a85d1d",
+          "size": 4231592,
+          "version": "2.39-0ubuntu8.12"
         },
         {
           "architecture": "all",

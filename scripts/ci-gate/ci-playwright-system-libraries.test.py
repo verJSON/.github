@@ -76,6 +76,13 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             profile["packages"]["libc6-i386"]["sha256"],
             "f3357fcee4a907404f5231381834cf31647326496d5bb4259338a717b3544c89",
         )
+        self.assertEqual(profile["packages"]["locales"]["version"], "2.39-0ubuntu8.12")
+        self.assertEqual(profile["packages"]["locales"]["architecture"], "all")
+        self.assertEqual(profile["packages"]["locales"]["size"], 4231592)
+        self.assertEqual(
+            profile["packages"]["locales"]["sha256"],
+            "0047f997c3799818514d1d08fece7cf2614a61e5505678bcf0c9558587a85d1d",
+        )
         self.assertEqual(
             profile["packages"]["libglib2.0-0t64"]["version"],
             "2.80.0-6ubuntu3.10",
@@ -142,6 +149,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             "Inst libc-dev-bin (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates)\n"
             "Inst libc6-dev (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates)\n"
             "Inst libc6-i386 (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates)\n"
+            "Inst locales (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates)\n"
             "Inst libglib2.0-data (2.80.0-6ubuntu3.10 Ubuntu:24.04/noble-updates)\n"
         )
 
@@ -154,6 +162,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 ("libc-dev-bin", "amd64"): "2.39-0ubuntu8.12",
                 ("libc6-dev", "amd64"): "2.39-0ubuntu8.12",
                 ("libc6-i386", "amd64"): "2.39-0ubuntu8.12",
+                ("locales", "all"): "2.39-0ubuntu8.12",
                 ("libglib2.0-data", "all"): "2.80.0-6ubuntu3.10",
             },
         )
