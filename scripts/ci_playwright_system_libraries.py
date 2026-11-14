@@ -1544,7 +1544,7 @@ def _run_dpkg_install_in_namespace(
             *apt_argv,
         ),
         timeout=timeout,
-        env=env,
+        env={**env, "SYSTEMD_OFFLINE": "1"},
         maximum=4 * 1024 * 1024,
     )
 

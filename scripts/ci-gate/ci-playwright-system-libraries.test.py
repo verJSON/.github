@@ -1042,6 +1042,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                     timeout=600,
                 )
         namespace_argv = run.call_args.args[0]
+        self.assertEqual(run.call_args.kwargs["env"], {**env, "SYSTEMD_OFFLINE": "1"})
         for flag in (
             "/usr/bin/unshare",
             "--mount",
