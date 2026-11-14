@@ -728,6 +728,14 @@ def _child_setup(parent_pid: int, inherited_mask: set[signal.Signals]) -> None:
 
 def _trusted_command_stage(argv: tuple[str, ...] | list[str]) -> str:
     if argv and Path(argv[0]).name == "unshare" and "/usr/bin/apt-get" in argv:
+        apt_get_index = argv.index("/usr/bin/apt-get")
+        apt_arguments = argv[apt_get_index + 1 :]
+        if "--no-download" in apt_arguments:
+            return "isolated offline APT installation"
+        if "--download-only" in apt_arguments:
+            return "isolated APT archive download"
+        if "--simulate" in apt_arguments:
+            return "isolated APT plan simulation"
         return "isolated APT installation"
     if argv and Path(argv[0]).name == "apt-get":
         if "update" in argv:
@@ -752,9 +760,51 @@ def _trusted_command_stage(argv: tuple[str, ...] | list[str]) -> str:
     return "trusted package command"
 
 
-def _trusted_command_failure_message(argv: tuple[str, ...] | list[str], exit_code: int) -> str:
+def _trusted_command_failure_reason(stage: str, output: bytes, error_output: bytes) -> str:
+    combined = (output + b"\n" + error_output).lower()
+    if b"no space left on device" in combined:
+        return "disk space exhausted"
+    if (
+        b"could not get lock" in combined
+        or b"unable to acquire the dpkg frontend lock" in combined
+    ):
+        return "package manager lock unavailable"
+    if (
+        b"sub-process /usr/bin/dpkg returned an error code" in combined
+        or b"errors were encountered while processing" in combined
+    ):
+        return "dpkg package processing failed"
+    if b"unable to fetch some archives" in combined or b"internal error, no file name for" in combined:
+        return "APT archive unavailable"
+    if b"unable to fetch" in combined or b"failed to fetch" in combined:
+        if "index update" in stage:
+            return "APT index fetch failed"
+        if "archive" in stage or "offline" in stage:
+            return "APT archive unavailable"
+        return "APT fetch failed"
+    if (
+        b"unable to locate package" in combined
+        or b"couldn't find any package" in combined
+        or b"no installation candidate" in combined
+        or b"not available, but is referred to by another package" in combined
+        or b"unmet dependencies" in combined
+        or b"dependency problems prevent configuration" in combined
+        or b"held broken packages" in combined
+    ):
+        return "APT package resolution failed"
+    return ""
+
+
+def _trusted_command_failure_message(
+    argv: tuple[str, ...] | list[str],
+    exit_code: int,
+    output: bytes = b"",
+    error_output: bytes = b"",
+) -> str:
     stage = _trusted_command_stage(argv)
-    return f"trusted package command failed during {stage} (exit code {exit_code})"
+    reason = _trusted_command_failure_reason(stage, output, error_output)
+    detail = f"; reason: {reason}" if reason else ""
+    return f"trusted package command failed during {stage} (exit code {exit_code}{detail})"
 
 
 def _run_supervised(
@@ -828,7 +878,9 @@ def _run_supervised(
         if len(output) > maximum or len(error_output) > maximum:
             raise PlaywrightProfileError("trusted package command exceeded its output limit")
         if process.returncode != 0:
-            raise PlaywrightProfileError(_trusted_command_failure_message(argv, process.returncode))
+            raise PlaywrightProfileError(
+                _trusted_command_failure_message(argv, process.returncode, output, error_output)
+            )
         return output, error_output, process.returncode
     except subprocess.TimeoutExpired as error:
         _terminate_process_group(process)

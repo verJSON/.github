@@ -1415,7 +1415,10 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
             (("/usr/bin/apt-get", "--download-only", "install", "private-package=1.2.3"), "APT archive download"),
             (("/usr/bin/apt-get", "download", "private-package=1.2.3"), "APT package archive download"),
             (("/usr/bin/apt-get", "--no-download", "install", "private-package=1.2.3"), "offline APT installation"),
-            (("unshare", "--mount", "/usr/bin/apt-get", "install", "private-package=1.2.3"), "isolated APT installation"),
+            (
+                ("unshare", "--mount", "/usr/bin/apt-get", "--no-download", "install", "private-package=1.2.3"),
+                "isolated offline APT installation",
+            ),
         )
 
         for argv, stage in cases:
@@ -1428,6 +1431,86 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 )
                 self.assertNotIn("private-package", message)
                 self.assertNotIn("1.2.3", message)
+
+    def test_trusted_command_failure_reports_only_allowlisted_reason(self) -> None:
+        cases = (
+            (
+                "E: Unable to fetch some archives after private-package=1.2.3",
+                "APT archive unavailable",
+            ),
+            (
+                "Sub-process /usr/bin/dpkg returned an error code (1) for private-package=1.2.3",
+                "dpkg package processing failed",
+            ),
+            (
+                "E: Could not get lock /private/path/private-package=1.2.3",
+                "package manager lock unavailable",
+            ),
+            (
+                "dpkg: error: No space left on device while writing private-package=1.2.3",
+                "disk space exhausted",
+            ),
+            (
+                "E: Unable to locate package private-package=1.2.3",
+                "APT package resolution failed",
+            ),
+            ("E: Unmet dependencies. Try 'apt --fix-broken install'", "APT package resolution failed"),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            fake_apt = Path(directory) / "apt-get"
+            for output, reason in cases:
+                with self.subTest(reason=reason):
+                    fake_apt.write_text(
+                        f"#!{sys.executable}\n"
+                        "import sys\n"
+                        f"sys.stderr.write({output!r})\n"
+                        "sys.exit(100)\n",
+                        encoding="utf-8",
+                    )
+                    fake_apt.chmod(0o755)
+
+                    with self.assertRaises(playwright_profile.PlaywrightProfileError) as context:
+                        playwright_profile._run(
+                            (
+                                str(fake_apt),
+                                "--simulate",
+                                "install",
+                                "private-package=1.2.3",
+                            ),
+                            timeout=10,
+                        )
+
+                    self.assertEqual(
+                        str(context.exception),
+                        "trusted package command failed during APT plan simulation "
+                        f"(exit code 100; reason: {reason})",
+                    )
+                    self.assertNotIn("private-package", str(context.exception))
+                    self.assertNotIn("1.2.3", str(context.exception))
+
+    def test_index_fetch_failure_is_not_reported_as_an_archive_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fake_apt = Path(directory) / "apt-get"
+            fake_apt.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "sys.stderr.write("
+                "'W: Failed to fetch https://private.invalid/InRelease')\n"
+                "sys.exit(100)\n",
+                encoding="utf-8",
+            )
+            fake_apt.chmod(0o755)
+
+            with self.assertRaises(playwright_profile.PlaywrightProfileError) as context:
+                playwright_profile._run((str(fake_apt), "update"), timeout=10)
+
+            self.assertEqual(
+                str(context.exception),
+                "trusted package command failed during APT index update "
+                "(exit code 100; reason: APT index fetch failed)",
+            )
+            self.assertNotIn("private.invalid", str(context.exception))
 
     def test_process_that_exits_during_group_scan_is_not_a_live_member(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
