@@ -799,6 +799,20 @@ def _trusted_command_failure_reason(stage: str, output: bytes, error_output: byt
             error_detail = b" ".join(detail_lines)
             if marker not in error_detail or b"script subprocess returned" not in error_detail:
                 continue
+            exit_status_match = re.search(
+                rb"script subprocess returned an error exit status ([0-9]{1,3})(?:\D|$)",
+                error_detail,
+            )
+            exit_status = (
+                int(exit_status_match.group(1))
+                if exit_status_match is not None
+                else None
+            )
+            status_suffix = (
+                f" (exit status {exit_status})"
+                if exit_status is not None and exit_status <= 255
+                else ""
+            )
             package_match = re.match(
                 rb"dpkg: error processing package ([a-z0-9][a-z0-9+.-]*)",
                 error_line,
@@ -809,8 +823,8 @@ def _trusted_command_failure_reason(stage: str, output: bytes, error_output: byt
                 else None
             )
             if package_role is not None:
-                return f"{package_role} {phase} script failed"
-            return f"dpkg package {phase} script failed"
+                return f"{package_role} {phase} script failed{status_suffix}"
+            return f"dpkg package {phase} script failed{status_suffix}"
     if b"trigger subprocess returned" in combined and b"error" in combined:
         return "dpkg package trigger failed"
     if b"trying to overwrite" in combined:

@@ -1447,14 +1447,14 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 "private-package package post-installation script subprocess returned an "
                 "error exit status 1\ndpkg: dependency problems prevent configuration of "
                 "private-package:amd64\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "dpkg package post-installation script failed",
+                "dpkg package post-installation script failed (exit status 1)",
             ),
             (
                 "maintainer output: dpkg: error processing package locales (--configure)\n"
                 "dpkg: error processing package private-package (--configure): installed "
                 "private-package package post-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "dpkg package post-installation script failed",
+                "dpkg package post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package locales (--configure): dependency problems "
@@ -1462,19 +1462,19 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 "dpkg: error processing package private-package (--configure): installed "
                 "private-package package post-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "dpkg package post-installation script failed",
+                "dpkg package post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package locales (--configure): installed locales "
                 "package post-installation script subprocess returned an error exit status "
                 "1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "locale database post-installation script failed",
+                "locale database post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package locales (--configure):\n"
                 " installed locales package post-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "locale database post-installation script failed",
+                "locale database post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package locales (--configure):\n"
@@ -1483,55 +1483,61 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 " installed private-package package post-installation script subprocess "
                 "returned an error exit status 1\n"
                 "Sub-process /usr/bin/dpkg returned an error code (1)",
-                "dpkg package post-installation script failed",
+                "dpkg package post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package libc-bin (--configure): installed libc-bin "
                 "package post-installation script subprocess returned an error exit status "
                 "1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "C library cache post-installation script failed",
+                "C library cache post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package libc6:amd64 (--configure): installed libc6 "
                 "package post-installation script subprocess returned an error exit status "
                 "1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "C runtime post-installation script failed",
+                "C runtime post-installation script failed (exit status 1)",
+            ),
+            (
+                "dpkg: error processing package libc6:amd64 (--configure):\n"
+                " installed libc6 package post-installation script subprocess returned an "
+                "error exit status 139\nSub-process /usr/bin/dpkg returned an error code (1)",
+                "C runtime post-installation script failed (exit status 139)",
             ),
             (
                 "dpkg: error processing package fontconfig (--configure): installed fontconfig "
                 "package post-installation script subprocess returned an error exit status "
                 "1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "font cache post-installation script failed",
+                "font cache post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package libglib2.0-0t64 (--configure): installed "
                 "libglib2.0-0t64 package post-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "GLib runtime post-installation script failed",
+                "GLib runtime post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package libglib2.0-bin (--configure): installed "
                 "libglib2.0-bin package post-installation script subprocess returned an error "
                 "exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "GLib schema registry post-installation script failed",
+                "GLib schema registry post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package libglib2.0-data (--configure): installed "
                 "libglib2.0-data package post-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "GLib data post-installation script failed",
+                "GLib data post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package shared-mime-info (--configure): installed "
                 "shared-mime-info package post-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "MIME database post-installation script failed",
+                "MIME database post-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package private-package (--unpack): installed "
                 "private-package package pre-installation script subprocess returned an "
                 "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
-                "dpkg package pre-installation script failed",
+                "dpkg package pre-installation script failed (exit status 1)",
             ),
             (
                 "dpkg: error processing package private-package (--configure): trigger "
