@@ -1443,6 +1443,30 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 "dpkg package processing failed",
             ),
             (
+                "dpkg: error processing package private-package (--configure): installed "
+                "private-package package post-installation script subprocess returned an "
+                "error exit status 1\ndpkg: dependency problems prevent configuration of "
+                "private-package:amd64\nSub-process /usr/bin/dpkg returned an error code (1)",
+                "dpkg package post-installation script failed",
+            ),
+            (
+                "dpkg: error processing package private-package (--unpack): installed "
+                "private-package package pre-installation script subprocess returned an "
+                "error exit status 1\nSub-process /usr/bin/dpkg returned an error code (1)",
+                "dpkg package pre-installation script failed",
+            ),
+            (
+                "dpkg: error processing package private-package (--configure): trigger "
+                "subprocess returned an error exit status 1\nSub-process /usr/bin/dpkg "
+                "returned an error code (1)",
+                "dpkg package trigger failed",
+            ),
+            (
+                "dpkg: dependency problems prevent configuration of private-package:amd64\n"
+                "Sub-process /usr/bin/dpkg returned an error code (1)",
+                "APT package resolution failed",
+            ),
+            (
                 "E: Could not get lock /private/path/private-package=1.2.3",
                 "package manager lock unavailable",
             ),

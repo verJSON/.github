@@ -769,6 +769,28 @@ def _trusted_command_failure_reason(stage: str, output: bytes, error_output: byt
         or b"unable to acquire the dpkg frontend lock" in combined
     ):
         return "package manager lock unavailable"
+    for phase, marker in (
+        ("pre-installation", b"pre-installation script"),
+        ("post-installation", b"post-installation script"),
+        ("pre-removal", b"prerm script"),
+        ("post-removal", b"postrm script"),
+    ):
+        if marker in combined and b"script subprocess returned" in combined:
+            return f"dpkg package {phase} script failed"
+    if b"trigger subprocess returned" in combined and b"error" in combined:
+        return "dpkg package trigger failed"
+    if b"trying to overwrite" in combined:
+        return "dpkg package file conflict"
+    if (
+        b"unable to locate package" in combined
+        or b"couldn't find any package" in combined
+        or b"no installation candidate" in combined
+        or b"not available, but is referred to by another package" in combined
+        or b"unmet dependencies" in combined
+        or b"dependency problems prevent configuration" in combined
+        or b"held broken packages" in combined
+    ):
+        return "APT package resolution failed"
     if (
         b"sub-process /usr/bin/dpkg returned an error code" in combined
         or b"errors were encountered while processing" in combined
@@ -782,16 +804,6 @@ def _trusted_command_failure_reason(stage: str, output: bytes, error_output: byt
         if "archive" in stage or "offline" in stage:
             return "APT archive unavailable"
         return "APT fetch failed"
-    if (
-        b"unable to locate package" in combined
-        or b"couldn't find any package" in combined
-        or b"no installation candidate" in combined
-        or b"not available, but is referred to by another package" in combined
-        or b"unmet dependencies" in combined
-        or b"dependency problems prevent configuration" in combined
-        or b"held broken packages" in combined
-    ):
-        return "APT package resolution failed"
     return ""
 
 
