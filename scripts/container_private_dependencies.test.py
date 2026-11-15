@@ -160,5 +160,73 @@ class PrivateDependencyTests(unittest.TestCase):
         with self.assertRaises(contract.DependencyError):
             contract.build_plan(candidate, ["@verjson/pg"])
 
+SHA = "a" * 40
+
+
+def gitlink_lock():
+    candidate = lock()
+    candidate["packages"]["node_modules/@verjson/xops-schema"] = {
+        "resolved": "xops-schema",
+        "link": True,
+    }
+    candidate["packages"]["xops-schema"] = {
+        "name": "@verjson/xops-schema",
+        "version": "1.0.0",
+    }
+    return candidate
+
+
+def gitlink_manifest():
+    return {"dependencies": {"@verjson/xops-schema": "file:xops-schema"}}
+
+
+class GitlinkFileDependencyTests(unittest.TestCase):
+    def test_unproven_file_link_target_is_still_rejected(self):
+        with self.assertRaisesRegex(contract.DependencyError, "exact resolved URL and integrity"):
+            contract.build_plan(gitlink_lock(), ["@verjson/pg"])
+
+    def test_pinned_gitlink_replaces_resolved_url_and_integrity(self):
+        plan = contract.build_plan(
+            gitlink_lock(),
+            ["@verjson/pg"],
+            {"xops-schema": SHA},
+            gitlink_manifest(),
+        )
+        self.assertEqual([item["url"] for item in plan if item["private"]], [
+            "https://npm.pkg.github.com/download/@verjson/pg/1.2.3/hash",
+        ])
+        self.assertNotIn("xops-schema", [item["url"] for item in plan])
+
+    def test_rejects_file_links_that_are_not_pinned_gitlinks(self):
+        cases = [
+            ({}, gitlink_manifest(), "links outside a pinned git submodule"),
+            ({"../xops-schema": SHA}, gitlink_manifest(), "normalized relative path"),
+            ({"xops-schema": "A" * 40}, gitlink_manifest(), "not pinned to a commit"),
+            ({"xops-schema": SHA}, {"dependencies": {"@verjson/xops-schema": "1.0.0"}}, "file:xops-schema"),
+            ({"xops-schema": SHA}, {"dependencies": {"@verjson/xops-schema": "file:./xops-schema"}}, "file:xops-schema"),
+        ]
+        for proof, manifest, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(contract.DependencyError, message):
+                contract.build_plan(gitlink_lock(), ["@verjson/pg"], proof, manifest)
+
+    def test_rejects_a_download_url_or_git_dependency_on_the_linked_package(self):
+        candidate = gitlink_lock()
+        candidate["packages"]["xops-schema"]["resolved"] = "git+https://github.com/Verjson/xops-schema.git"
+        with self.assertRaisesRegex(contract.DependencyError, "cannot carry a download"):
+            contract.build_plan(candidate, ["@verjson/pg"], {"xops-schema": SHA}, gitlink_manifest())
+        candidate = gitlink_lock()
+        candidate["packages"]["node_modules/@verjson/xops-schema"]["resolved"] = (
+            "https://github.com/Verjson/xops-schema.git"
+        )
+        with self.assertRaisesRegex(contract.DependencyError, "links outside a pinned git submodule"):
+            contract.build_plan(candidate, ["@verjson/pg"], {"xops-schema": SHA}, gitlink_manifest())
+
+    def test_rejects_a_link_whose_package_entry_is_missing(self):
+        candidate = gitlink_lock()
+        del candidate["packages"]["xops-schema"]
+        with self.assertRaisesRegex(contract.DependencyError, "no pinned package entry"):
+            contract.build_plan(candidate, ["@verjson/pg"], {"xops-schema": SHA}, gitlink_manifest())
+
+
 if __name__ == "__main__":
     unittest.main()
