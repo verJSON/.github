@@ -456,10 +456,27 @@ def tamper(content: bytes) -> bytes:
     return content + b"# hand edited\n"
 
 
+def ensure_revision(revision: str) -> None:
+    """Make `revision` readable under a shallow actions-ci checkout (#2003)."""
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+        cwd=ROOT,
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        return
+    subprocess.run(
+        ["python3", str(ROOT / "scripts" / "shared_checkout_fetch.py"), "ensure-commit", str(ROOT), revision],
+        check=True,
+        capture_output=True,
+    )
+
+
 def run_generator(revision: str | None, script: str, args: list[str]) -> bytes:
     """Generator bytes at `revision`, or the working tree when revision is None."""
     if revision is None:
         return subprocess.run(["bash", str(ROOT / "scripts" / script), *args], check=True, capture_output=True).stdout
+    ensure_revision(revision)
     source = subprocess.run(["git", "show", f"{revision}:scripts/{script}"], check=True, capture_output=True, cwd=ROOT).stdout
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / script
