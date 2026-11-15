@@ -47,12 +47,15 @@ grep -qE '^      config-file:$' <<<"$workflow_call" \
 # runner-routing-policy.test.sh pins across all the reusable workflows.
 #
 # Public pull_request and pull_request_target callers must take the literal
-# hosted branch before caller inputs or organization runner variables. The
-# focused runner-policy contract pins the original suffix for private/trusted
-# events.
+# hosted branch before caller inputs or organization runner variables. A
+# public non-pull-request target, including workflow_call, takes the untrusted
+# lane with a hosted tail and does not read CI_RUNNER_FASTLANE. The focused
+# runner-policy contract pins private and unresolved visibility.
 grep -qF "    runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((" "$wf" \
-  && pass "public PR callers select hosted before the bounded runner mapping" \
-  || fail "runs-on does not route public PR callers to hosted first"
+  && grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" "$wf" \
+  && ! grep -qF 'vars.CI_RUNNER_FASTLANE' "$wf" \
+  && pass "public PR callers select hosted first, and other public targets take the untrusted hosted tail" \
+  || fail "runs-on does not keep public actionlint off the persistent fast lane"
 
 uses_lines="$(grep -E '^[[:space:]]+- uses:' "$wf" || true)"
 [ -n "$uses_lines" ] \

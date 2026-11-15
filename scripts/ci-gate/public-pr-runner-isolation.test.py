@@ -3021,9 +3021,9 @@ for label, dockerfile in (
 # tolerates, that is not here fails. Never add to it. When a job leaves the
 # backlog, remove it from the checker, the pending list, and here in the same
 # change, so a removed key cannot quietly return. The five pull_request keys
-# frozen alongside it have already left (finding 6).
+# frozen alongside it have already left (finding 6). actionlint.yml's
+# workflow_call job left on 2026-11-15 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
-    ('actionlint.yml [workflow_call]', 'actionlint'): frozenset({'relay-head'}),
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),

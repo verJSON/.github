@@ -1135,13 +1135,17 @@ assert_route "$dispatch_workflow" gate Verjson/verjson-authn '' true \
   "gate — a caller generated before #405 still overrides the overflow lane" \
   '' '["self-hosted","general"]' '["ubuntu-24.04"]'
 
-# ADR 0050. actionlint is a short, secretless CPU job, so on a PUBLIC target it
-# takes the fast lane instead of contending for the fixed self-hosted pool with
-# the merge-gate poll loops it can starve. Four polarities, because every
-# interesting failure here is in a fallback rather than the happy path.
+# ADR 0050, narrowed 2026-11-15 (Part of #1831). actionlint is a short,
+# secretless CPU job. CI_RUNNER_FASTLANE now names the persistent general pool,
+# so a public target — including workflow_call whose caller event is not a
+# public pull request — takes the untrusted lane with a hosted tail and does
+# not read the fast lane or CI_LANE_FALLBACK. Private targets stay on the
+# trusted lane. Unresolved visibility still prefers the untrusted lane and may
+# use CI_LANE_FALLBACK only when that lane is unset.
 assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
-  '["self-hosted","d"]' '["self-hosted","u"]' '["ubuntu-24.04"]' \
-  "actionlint — a public Verjson repo takes the fast lane (ADR 0050)" '["ubuntu-24.04"]'
+  '["self-hosted","d"]' '["ubuntu-24.04"]' '["ubuntu-24.04"]' \
+  "actionlint — a public Verjson repo takes the untrusted hosted tail, not the persistent fast lane" \
+  '["self-hosted","general"]'
 
 assert_route "$workflows/actionlint.yml" actionlint Verjson/verjson-authn '' true \
   '["self-hosted","d"]' '["self-hosted","u"]' '["self-hosted","d"]' \
@@ -1159,8 +1163,9 @@ assert_route "$workflows/actionlint.yml" actionlint Acme/widgets '' true \
   "actionlint — external callers retain hosted portability" '["ubuntu-24.04"]'
 
 assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
-  '["self-hosted","d"]' '["self-hosted","u"]' '["self-hosted","u"]' \
-  "actionlint — an unset fast lane degrades to CI_RUNNER_UNTRUSTED" ''
+  '["self-hosted","d"]' '' '["ubuntu-24.04"]' \
+  "actionlint — a public repo with an unset untrusted lane takes the hosted tail, not the fast lane or fallback" \
+  '["self-hosted","general"]'
 
 # ADR 0235 public PR events use the literal hosted runner before any
 # caller-selected or lane-variable selector; private calls retain their lane.
@@ -1185,8 +1190,10 @@ EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verj
 # regression cannot return through a rewrite that keeps the tests passing.
 grep -qF "github.event.repository.visibility == 'public'" "$workflows/actionlint.yml" \
   && ! grep -qF 'github.event.repository.private == false' "$workflows/actionlint.yml" \
-  && pass "actionlint routes public on the visibility STRING, not the coercible private boolean" \
-  || fail "actionlint uses the fail-open 'private == false' form (ADR 0050)"
+  && ! grep -qF 'vars.CI_RUNNER_FASTLANE' "$workflows/actionlint.yml" \
+  && grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" "$workflows/actionlint.yml" \
+  && pass "actionlint routes public on the visibility STRING to the untrusted hosted tail, not the fast lane" \
+  || fail "actionlint public routing drifted back to the fast lane or the fail-open 'private == false' form (ADR 0050)"
 
 # Every job that carries the policy, across every reusable workflow. A job
 # missing from this list is caught by the no-owner-wide-route sweep below.

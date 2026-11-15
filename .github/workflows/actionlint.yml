@@ -6,8 +6,10 @@ name: actionlint
 # free. Local pull_request/push behavior from #80 is preserved; workflow_call
 # exposes the same implementation to consumers (#153).
 #
-# Verjson validation uses the general self-hosted lane. Reusable calls outside
-# Verjson retain a portable GitHub-hosted default.
+# Public Verjson targets, including workflow_call, take the untrusted lane with
+# a hosted tail and do not read CI_RUNNER_FASTLANE. Private Verjson targets stay
+# on the trusted lane. Reusable calls outside Verjson retain a portable
+# GitHub-hosted default.
 
 on:
   pull_request:
@@ -37,7 +39,7 @@ permissions:
 
 jobs:
   actionlint:
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((github.repository_owner != 'Verjson' || inputs.github-hosted-runner) && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((github.repository_owner != 'Verjson' || inputs.github-hosted-runner) && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     env:
       ACTIONLINT_VERSION: 1.7.7
       # From actionlint_1.7.7_checksums.txt on the upstream GitHub Release.

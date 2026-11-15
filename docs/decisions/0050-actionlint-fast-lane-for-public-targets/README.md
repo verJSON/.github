@@ -109,3 +109,17 @@ erase the persistent-runner exemption by accident.
 - `actionlint-reusable.test.sh` pins the whole `runs-on` line literally, so this
   expression is now asserted in two suites. That is deliberate duplication: one
   checks meaning, the other checks the exact bounded mapping.
+
+## Amendment (2026-11-15, #1831) — public targets leave the persistent fast lane
+
+`CI_RUNNER_FASTLANE` now names the persistent general pool (ADR 0235). A public
+target of `actionlint`, including a `workflow_call` whose caller event is not a
+public pull request, selected that variable and could run on the pool.
+
+Public visibility now selects
+`fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`. That branch does not
+read `CI_RUNNER_FASTLANE` or `CI_LANE_FALLBACK`. Private targets stay on
+`CI_LANE_TRUSTED`. Unresolved visibility still prefers the untrusted lane and
+may use `CI_LANE_FALLBACK` only when that lane is unset. The predicate remains
+`visibility == 'public'`; `private == false` stays absent. The 2026-08-03 title
+records the original fast-lane decision; this amendment is the public route.
