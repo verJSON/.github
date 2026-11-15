@@ -77,11 +77,15 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#2124](https://github.com/verJSON/.github/issues/2124) — DeepSeek pre-token HTTP resilience landed in [#2125](https://github.com/verJSON/.github/pull/2125) (`d7a635b2`). Remains open until a live review run shows the transport advisory / `suppress_automatic_fallback` behavior (this agent-instruction refresh is the canary vehicle). Verified open 2026-11-15 via `gh issue view` after reopening past the premature `Fixes` autoclose.
+
+- [#2120](https://github.com/verJSON/.github/issues/2120) — Org handoff annotation + Renovate preset landed ([#2123](https://github.com/verJSON/.github/pull/2123), renovate-config#62). Remains open until a canary adopter (e.g. verjson-cli) bumps its changelog caller pin so `needs-changelog-context` appears on a Renovate PR. Verified open 2026-11-15 via `gh issue view`.
+
 - [#1869](https://github.com/VerJSON/.github/issues/1869) — Canonical node-ci cost levers for trunk-based three-tier flow (build-once ArtifactSet, remaining sandbox profiles). Compatibility-lane helper extraction landed in [#2103](https://github.com/verJSON/.github/pull/2103) / [#2106](https://github.com/verJSON/.github/pull/2106); owner-gated build-once ArtifactSet still open. Verified 2026-11-15 via `gh issue view` and merged PR state.
 
 - [#1905](https://github.com/VerJSON/.github/issues/1905) — F-1R + #2059 are on main; no further `.github` race fix. Remains open for F-1R fleet regeneration; natively blocked by #1933 (Gate A). Actions-disabled adopter enablement continues under #1985 (this issue blocks that one in the native graph). Verified 2026-11-15 via issue comments and native dependency API.
 
-- [#1831](https://github.com/VerJSON/.github/issues/1831) — Public/relay jobs still on the persistent runner backlog in `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` (ADR 0235). Open; actionlint ephemeral-lane slice in flight. Verified 2026-11-15 via pending TSV + `gh issue view`.
+- [#1831](https://github.com/VerJSON/.github/issues/1831) — Public/relay jobs still on the persistent runner backlog in `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` (ADR 0235). [#2121](https://github.com/verJSON/.github/pull/2121) moved public actionlint onto the ephemeral lane; other relay-backlog rows remain (63 lines in the pending TSV on main). Verified 2026-11-15 via pending TSV + `gh issue view` / `gh pr view 2121`.
 
 - [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open, tracked separately from #1945 after the 2026-11-13 ARB dependency review. Do not treat agent review evidence as authoritative until its identity criteria pass.
 
