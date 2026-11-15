@@ -810,7 +810,7 @@ def target_arm_cohort(
     )
 
 
-def require_reviewed_cohort(contract: dict, cohort: list[str], name: str) -> None:
+def cohort_mismatch_message(contract: dict, cohort: list[str], name: str) -> str | None:
     reviewed = contract["arm_property_migration"]["repositories"]
     reviewed_identities = {repository_identity(repository) for repository in reviewed}
     cohort_identities = {repository_identity(repository) for repository in cohort}
@@ -823,10 +823,17 @@ def require_reviewed_cohort(contract: dict, cohort: list[str], name: str) -> Non
         repository for repository in reviewed
         if repository_identity(repository) not in cohort_identities
     )
-    require(
-        not unreviewed and not absent,
-        f"{name} differs from the reviewed migration set: unreviewed={unreviewed} absent={absent}",
+    if not unreviewed and not absent:
+        return None
+    return (
+        f"{name} differs from the reviewed migration set: "
+        f"unreviewed={unreviewed} absent={absent}"
     )
+
+
+def require_reviewed_cohort(contract: dict, cohort: list[str], name: str) -> None:
+    message = cohort_mismatch_message(contract, cohort, name)
+    require(message is None, message or "")
 
 
 def verify_target_arm_cohort(
@@ -844,7 +851,7 @@ def verify_deterministic_ci(
     repositories: list[dict],
     candidates: dict[int, dict],
     selector: str,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
     declarations = {}
     for declaration in contract["deterministic_rulesets"]:
         ruleset_id = declaration["id"]
@@ -883,12 +890,33 @@ def verify_deterministic_ci(
             missing.append(full_name)
     require(covered, "no repository carries the active arm selector; the arm would govern nothing")
     covered = sorted(covered)
+    # The target selector is the migration image. It stays a hard stop: rendering
+    # the property cutover while the cohort is wrong would enroll the wrong set.
+    # The legacy selector is what ruleset 20722935 enforces today. Its cohort
+    # mismatch used to return before the admission-caller probe, so a repository
+    # that had just received `verjson-core-checks=enforced` was already
+    # merge-blocked by a missing default-branch `ai-review-merge.yml` while the
+    # audit named only the unreviewed repository (#1401).
+    mismatch = None
     if selector == "target":
         verify_target_arm_cohort(contract, properties_by_repository)
     else:
-        require_reviewed_cohort(contract, covered, "legacy arm cohort")
-    concise_missing("armed default branches without canonical deterministic required CI", sorted(missing))
-    return covered
+        mismatch = cohort_mismatch_message(contract, covered, "legacy arm cohort")
+    if missing:
+        # Still fail-fast, and still not an AuditFindings report: a missing
+        # deterministic stack is a prerequisite, not one more adopter class.
+        # The admission caller is named in the same error when it is also absent.
+        parts = [concise_findings(
+            "armed default branches without canonical deterministic required CI",
+            sorted(missing),
+        )]
+        if mismatch:
+            parts.insert(0, mismatch)
+        blockers = admission_caller_blockers(contract, read, repositories, covered)
+        if blockers:
+            parts.append(concise_findings(ADMISSION_CALLER_FINDING, blockers))
+        raise AuditError("\n".join(parts))
+    return covered, mismatch
 
 
 def verify_no_repository_shadowing(contract: dict, read, repositories: list[dict]) -> None:
@@ -1014,6 +1042,57 @@ def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> boo
     return environment_custody
 
 
+ADMISSION_CALLER_FINDING = (
+    "armed adopters that cannot satisfy the arm: the admission caller is absent or undispatchable"
+)
+
+
+def admission_blockers_for_repository(
+    contract: dict, read, full_name: str, present: set
+) -> list[str]:
+    """Admission callers the arm cannot dispatch for one armed repository.
+
+    `present` is that repository's default-branch workflow listing. Absence and
+    a non-active Actions state fail the required arm the same way. The workflow
+    file is not parsed.
+    """
+    blocked = []
+    for caller in contract["adopter_conformance"]["caller_workflows"]["admission"]:
+        if caller not in present:
+            blocked.append(f"{full_name}:{caller}")
+            continue
+        pages = read(
+            f"repos/{full_name}/actions/workflows/{caller.rsplit('/', 1)[-1]}",
+            allow_missing=True,
+        )
+        state = pages[0].get("state") if pages and isinstance(pages[0], dict) else "unregistered"
+        if state != "active":
+            blocked.append(f"{full_name}:{caller}:{state}")
+    return blocked
+
+
+def admission_caller_blockers(
+    contract: dict, read, repositories: list[dict], covered: list[str]
+) -> list[str]:
+    """Default-branch admission callers missing from armed repositories (#1401)."""
+    default_branches = {
+        repository["full_name"]: repository.get("default_branch") for repository in repositories
+    }
+    blocked = []
+    for full_name in covered:
+        branch = default_branches.get(full_name)
+        require(isinstance(branch, str) and branch, f"{full_name} reports no default branch")
+        reference = urllib.parse.quote(branch, safe="/")
+        entries = paginated_items(
+            read,
+            f"repos/{full_name}/contents/.github/workflows?ref={reference}",
+            allow_missing=True,
+        )
+        present = {entry.get("path") for entry in entries if entry.get("type") == "file"}
+        blocked.extend(admission_blockers_for_repository(contract, read, full_name, present))
+    return sorted(blocked)
+
+
 def adopter_conformance_classes(
     contract: dict, read, repositories: list[dict], covered: list[str], environment_custody: bool
 ) -> list[tuple[str, list[str]]]:
@@ -1064,23 +1143,12 @@ def adopter_conformance_classes(
             for caller in conformance["caller_workflows"]["completeness"]
             if caller not in present
         )
-        for caller in conformance["caller_workflows"]["admission"]:
-            if caller not in present:
-                blocked.append(f"{full_name}:{caller}")
-                continue
-            # Present is not dispatchable. `gate-rearm.yml` dispatches the review
-            # lane into the adopter, and GitHub refuses to start a workflow
-            # disabled manually or for inactivity — the arm then fails for the
-            # same reason as an absent caller. The state is read from the Actions
-            # API, so no adopter-controlled workflow text becomes an input here;
-            # the file name comes from this contract.
-            pages = read(
-                f"repos/{full_name}/actions/workflows/{caller.rsplit('/', 1)[-1]}",
-                allow_missing=True,
-            )
-            state = pages[0].get("state") if pages and isinstance(pages[0], dict) else "unregistered"
-            if state != "active":
-                blocked.append(f"{full_name}:{caller}:{state}")
+        # Present is not dispatchable. `gate-rearm.yml` dispatches the review
+        # lane into the adopter, and GitHub refuses to start a workflow
+        # disabled manually or for inactivity — the arm then fails for the
+        # same reason as an absent caller. The state is read from the Actions
+        # API, so no adopter-controlled workflow text becomes an input here.
+        blocked.extend(admission_blockers_for_repository(contract, read, full_name, present))
         label = f"{full_name}:{environment}"
         pages = read(f"repos/{full_name}/environments/{environment}", allow_missing=True)
         if not pages:
@@ -1135,10 +1203,7 @@ def adopter_conformance_classes(
     # statement that it was evaluated and nothing is left in it, which is what
     # lets ADR 0189 read a shrinking recorded item set as an improvement.
     return [
-        (
-            "armed adopters that cannot satisfy the arm: the admission caller is absent or undispatchable",
-            sorted(blocked),
-        ),
+        (ADMISSION_CALLER_FINDING, sorted(blocked)),
         ("armed adopters with an incomplete generated adopter caller set", sorted(findings)),
         ("armed adopters without a conforming review environment", sorted(environment_findings)),
         (f"armed {environment} environments that lack {private_key}", sorted(key_findings["missing"])),
@@ -1321,7 +1386,9 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
         require(isinstance(full_name, str) and full_name, "organization repository has no full_name")
         require(full_name not in governed, f"duplicate organization repository {full_name}")
         governed[full_name] = bool(repository.get("private"))
-    covered = verify_deterministic_ci(contract, read, repositories, candidates, selector)
+    covered, cohort_mismatch = verify_deterministic_ci(
+        contract, read, repositories, candidates, selector
+    )
     verify_no_repository_shadowing(contract, read, repositories)
     # The App credential only has to reach where the arm actually runs. Demanding
     # organization-wide reach for a rule that governs a subset is what made the
@@ -1332,6 +1399,11 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # standing finding would never reach the report at all.
     classes = adopter_conformance_classes(contract, read, repositories, covered, environment_custody)
     findings = [suspension_finding(contract)] if state == "suspended" else []
+    # After the suspension line, so a suspended ruleset is still never read as
+    # a ready rollout. The mismatch stays a finding; it no longer discards the
+    # admission-caller class computed above (#1401, ADR 0206).
+    if cohort_mismatch:
+        findings.append(cohort_mismatch)
     findings += [concise_findings(name, items) for name, items in classes if items]
     findings += replacement_workflow_findings(contract, read)
     report = {
@@ -1467,7 +1539,11 @@ def main() -> int:
         # payload, and a failed render must leave it empty.
         if isinstance(error, AuditFindings) and not any(vars(args).values()):
             print(json.dumps(error.report, sort_keys=True, separators=(",", ":")))
-        findings = error.findings if isinstance(error, AuditFindings) else (str(error),)
+        # A fail-fast AuditError may name the admission caller on a following
+        # line. Each line is its own finding so the adjudicator fingerprints it.
+        findings = error.findings if isinstance(error, AuditFindings) else tuple(
+            line for line in str(error).splitlines() if line
+        )
         for finding in findings:
             print(f"ERROR: {FINDING_CODE}: {finding}", file=sys.stderr)
         return 1

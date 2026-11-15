@@ -249,3 +249,29 @@ has no admission caller `.github/workflows/ai-review-merge.yml`, so the arm cann
 authorize its pull requests, and 24 generated adopter callers were missing across 20 armed
 repositories (23 across 19 once verjson-payments#248 added its label re-arm caller). `config/audit-expected-findings.json` re-records that finding under #1810, which tracks
 the per-repository regeneration; regenerating the callers is what removes the entry.
+
+## 2026-11-15 amendment: a legacy cohort mismatch must not hide a missing admission caller
+
+**Status:** Accepted; [#1401](https://github.com/Verjson/.github/issues/1401). Consumer
+caller installation remains with repository owners under
+[#1810](https://github.com/Verjson/.github/issues/1810).
+
+Ruleset `20722935` still selects `verjson-core-checks=enforced`. Assigning that property
+arms the repository before the reviewed migration list is updated, and the arm reads
+`.github/workflows/ai-review-merge.yml` from the default branch. The legacy cohort check
+used to raise as soon as the live set differed, which is what kept `verjson-editor`'s
+missing admission caller invisible until the cohort was edited and the audit was run
+again. By then the ruleset was already failing pull requests.
+
+The legacy cohort mismatch remains a finding. The migration list is still exact, and a
+mismatch still fails the audit. It is reported with the adopter classes, not instead of
+them, so a repository the legacy selector arms whose default branch lacks the admission
+caller, or whose caller is not `active`, is named in the same run. A deterministic-CI
+gap remains a fail-fast prerequisite and is not an `AuditFindings` report; when that gap
+and a missing admission caller are both present, the error names both, on separate
+adjudicator lines. The target-selector cohort check stays a hard stop, because rendering
+the property cutover against the wrong set would enroll the wrong repositories.
+
+This amendment does not install callers, assign properties, or rotate the ruleset.
+Regenerating the consumer caller set under #1810 is what removes that drift. #1401 stays
+open until that owner work is done.
