@@ -12,6 +12,9 @@ name: pulumi-ci (reusable)
 #      (ADR 0239). Same-repository is NOT reviewed code: without that environment a
 #      PR runs the credential-free validation gate only. Fork PRs, unknown events,
 #      and missing-secret runs fail closed to validation.
+#      When the caller sets `credential-environment`, that trusted-ref preview binds
+#      the named environment and reads `PULUMI_ACCESS_TOKEN` from it. Validation
+#      never binds that environment and never receives the token.
 #
 # Lifted from viager-infra's preview.yml so infra repos stop reinventing the
 # credential-gating dance; Node + the @verjson registry come from the org
@@ -39,6 +42,19 @@ name: pulumi-ci (reusable)
 #         gcp-wip: ${{ secrets.GCP_WIP }}
 #         gcp-sa: ${{ secrets.GCP_SA }}
 #         pulumi-access-token: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+#
+# Hold `PULUMI_ACCESS_TOKEN` as a secret of a caller environment whose custom
+# deployment branch policy names only `main` (no tag rule, no wildcard). Do not
+# also store that token as a repository or organization secret. Pass the named
+# grant; an empty `credential-environment` keeps the mapped alias above.
+#
+#       with:
+#         credential-environment: pulumi-preview
+#       secrets:
+#         gcp-wip: ${{ secrets.GCP_WIP }}
+#         gcp-sa: ${{ secrets.GCP_SA }}
+#         PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+#         NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
 on:
   workflow_call:
@@ -110,7 +126,22 @@ on:
           creates unprotected environments on first use). Empty (default) means
           such PRs get the credential-free validation gate only. This input is an
           approval gate, not secret scoping: reusable-workflow secret aliases are
-          caller-mapped. Fork PRs and other events are never admitted by it.
+          caller-mapped. Secret scoping is `credential-environment`. Fork PRs and
+          other events are never admitted by it.
+        required: false
+        type: string
+        default: ''
+      credential-environment:
+        description: >-
+          Name of a caller-owned GitHub environment that holds
+          `PULUMI_ACCESS_TOKEN` (and, optionally, the preview job's package
+          token `NODE_AUTH_TOKEN`) under a custom deployment branch policy that
+          names only `main`. When set, a push or workflow_dispatch on the
+          default branch runs preview in that environment and reads those
+          secrets there. Pull requests never bind it. Empty (default) leaves
+          the mapped `pulumi-access-token` path unchanged. Pass the named grant
+          of `PULUMI_ACCESS_TOKEN`; do not also store the token as a repository
+          secret.
         required: false
         type: string
         default: ''
@@ -141,7 +172,23 @@ on:
         description: GCP service account email for Workload-Identity auth.
         required: false
       pulumi-access-token:
-        description: Pulumi backend token. Live preview is skipped when empty.
+        description: >-
+          Mapped Pulumi backend token used when `credential-environment` is empty.
+          Live preview is skipped when this and `credential-environment` are both
+          empty. Not the storage boundary for an environment-scoped token.
+        required: false
+      PULUMI_ACCESS_TOKEN:
+        description: >-
+          Environment-scoped Pulumi token. The caller passes the named grant
+          `PULUMI_ACCESS_TOKEN`. Only the preview job on a default-branch
+          trusted ref reads it, and only while that job is bound to
+          `credential-environment`. Validation never reads it.
+        required: false
+      NODE_AUTH_TOKEN:
+        description: >-
+          Environment-scoped package token for the preview job's fixed install.
+          The caller passes the named grant `NODE_AUTH_TOKEN`. Validation keeps
+          the explicit `node-auth-token` grant and never reads this secret.
         required: false
 
 jobs:
@@ -404,6 +451,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PREVIEW_ENVIRONMENT: ${{ inputs.preview-environment }}
+          CREDENTIAL_ENVIRONMENT: ${{ inputs.credential-environment }}
           HAS_GCP_WIP: ${{ secrets.gcp-wip != '' }}
           HAS_GCP_SA: ${{ secrets.gcp-sa != '' }}
           HAS_PULUMI_TOKEN: ${{ secrets.pulumi-access-token != '' }}
@@ -444,12 +492,27 @@ jobs:
               ;;
           esac
 
+          # A trusted ref may take the Pulumi token from the caller-named
+          # environment instead of the mapped alias. The name is caller data, so
+          # it uses the same charset as preview-environment. Admission never
+          # reads the token. Pull requests still need the mapped token; they do
+          # not bind this environment.
+          credential_environment_ready=false
+          if [ -n "${CREDENTIAL_ENVIRONMENT:-}" ] \
+            && [[ "$CREDENTIAL_ENVIRONMENT" =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_][abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]{0,63}$ ]]; then
+            credential_environment_ready=true
+          fi
+          trusted_pulumi_ready=false
+          if [ "$HAS_PULUMI_TOKEN" = true ] || [ "$credential_environment_ready" = true ]; then
+            trusted_pulumi_ready=true
+          fi
+
           admitted=false
           route=none
           if [ "$trusted_ref" = true ] \
             && [ "$HAS_GCP_WIP" = true ] \
             && [ "$HAS_GCP_SA" = true ] \
-            && [ "$HAS_PULUMI_TOKEN" = true ]; then
+            && [ "$trusted_pulumi_ready" = true ]; then
             admitted=true
             route=trusted
           elif [ "$reviewed_route" = true ] \
@@ -475,7 +538,7 @@ jobs:
     # value equals a secret, and a PR author controls the caller's secret mapping, so
     # an output-carried name could be redacted into "no environment". Under
     # `admitted == 'true'` a pull_request can only have come through the reviewed route.
-    environment: ${{ github.event_name == 'pull_request' && inputs.preview-environment || '' }}
+    environment: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.credential-environment) || (github.event_name == 'pull_request' && inputs.preview-environment) || '' }}
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     strategy:
       # ADR 0238 (2026-10-23 amendment): stop sibling stack previews once one fails on a
@@ -505,7 +568,7 @@ jobs:
         # This command is workflow-owned, not a caller input. Package/Git
         # credentials are step-scoped and gone before cloud auth and Pulumi.
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.node-auth-token }}
+          NODE_AUTH_TOKEN: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.credential-environment != '' && secrets.NODE_AUTH_TOKEN || secrets.node-auth-token }}
           VERJSON_GIT_TOKEN: ${{ secrets.git-token }}
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
@@ -518,6 +581,17 @@ jobs:
           GIT_CONFIG_KEY_2: credential.https://github.com.helper
           GIT_CONFIG_VALUE_2: '!f() { echo "username=x-access-token"; echo "password=${VERJSON_GIT_TOKEN}"; }; f'
         run: npm ci
+
+      - name: Require environment-scoped Pulumi token
+        if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.credential-environment != '' }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PULUMI_ACCESS_TOKEN:-}" ]; then
+            echo "::error::credential-environment is set but PULUMI_ACCESS_TOKEN was not released to this job. Store it as a secret of that environment and pass the named grant."
+            exit 1
+          fi
 
       - name: Authenticate to GCP (Workload Identity)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -536,4 +610,4 @@ jobs:
           # the preview runs without attempting to post — never hard-failing.
           comment-on-pr: ${{ inputs.comment-on-pr && github.event_name == 'pull_request' }}
         env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.pulumi-access-token }}
+          PULUMI_ACCESS_TOKEN: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.credential-environment != '' && secrets.PULUMI_ACCESS_TOKEN || secrets.pulumi-access-token }}

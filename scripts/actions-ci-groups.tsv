@@ -77,6 +77,7 @@ platform	bash scripts/ci-gate/pulumi-comment.test.sh
 platform	python3 scripts/ci-gate/pulumi-private-node-packages.test.py
 platform	bash scripts/ci-gate/pulumi-comment-pipefail.test.sh
 platform	bash scripts/ci-gate/pulumi-untrusted-execution.test.sh
+platform	bash scripts/ci-gate/pulumi-environment-secrets.test.sh
 platform	bash scripts/ci-gate/ui-ci-untrusted-execution.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
@@ -208,6 +209,7 @@ changelog-release-3	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/c
 changelog-release-4	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-1	@budget=120 CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-1	bash scripts/ci-gate/changelog-caller-contract-shard.test.sh
+changelog-release-1	bash scripts/ci-gate/release-artifact-digest-reverify.test.sh
 changelog-release-1	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release-2	python3 scripts/ci-gate/adr-live-coverage-claims.test.py
 changelog-release-3	python3 scripts/ci-gate/adr-number-collision.test.py
@@ -228,6 +230,7 @@ changelog-release-1	python3 scripts/container_attestation_verify.test.py
 changelog-release-2	python3 scripts/container_oci_index.test.py
 changelog-release-3	python3 scripts/container_spdx_compaction.test.py
 changelog-release-4	python3 scripts/container_candidate_pnpm.test.py
+changelog-release-1	bash scripts/container-gitlink-file-dependencies.test.sh
 changelog-release-1	python3 scripts/container_candidate_retry.test.py
 changelog-release-2	python3 scripts/container_cosign_provenance.test.py
 changelog-release-3	python3 scripts/container_cosign_workflow_contract.test.py

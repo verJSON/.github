@@ -152,7 +152,7 @@ DUPLICATE_KEY_MUTANT = (
     "    if: github.repository == 'Verjson/verjson-cli-projects'\n",
     "    if: always()\n    if: github.repository == 'Verjson/verjson-cli-projects'\n",
 )
-ADMITTED_DIGEST_MUTANT = ("CONSUMER_WORKFLOW_SHA256: 'd23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117'",
+ADMITTED_DIGEST_MUTANT = ("CONSUMER_WORKFLOW_SHA256: 'bfe8d6cfb6b6db716e50818e7a362bc77c16b8c7f0e8fb3da5f0872cb9e376b9'",
                           f"CONSUMER_WORKFLOW_SHA256: '{_LEGACY}'")
 # YAML 1.1 spellings that PyYAML reads as the reviewed values and GitHub Actions may read
 # differently. Parsed-structure equality accepted them; exact bytes must not (ADR 0212).
@@ -907,7 +907,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             MODULE.discover_state(self.contract, SHA)
         compare.assert_called_once_with(
             "21eb48e713bd8304951fb7b26a900d08359af900",
-            "a89fe1f090545c15cdd6987f20119327206e2c59",
+            "d112b30f0d2bd448a28a57f3ff44df7877dc0a8c",
         )
         consumer.assert_not_called()
 

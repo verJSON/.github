@@ -2337,17 +2337,6 @@ class AtomicPipe:
             os.close(descriptor)
 
 
-@dataclass
-class AtomicPidfdProcess:
-    stdin: Any
-    stdout: Any
-    pidfd: int
-    ready_fd: int
-    gate_fd: int
-    error_fd: int
-    returncode: int | None = None
-
-
 class SlotAtomicPipe(AtomicPipe):
     def __init__(self, owner: AtomicDescriptorSlots, index: int):
         self._owner = owner
@@ -2372,7 +2361,7 @@ class SlotAtomicPipe(AtomicPipe):
         return written
 
 
-class SlotAtomicPidfdProcess(AtomicPidfdProcess):
+class SlotAtomicPidfdProcess:
     def __init__(self, owner: AtomicDescriptorSlots):
         self.owner = owner
         self.stdin = SlotAtomicPipe(owner, 1)
@@ -2398,7 +2387,7 @@ class SlotAtomicPidfdProcess(AtomicPidfdProcess):
 
 @dataclass
 class AtomicLaunchOwner:
-    child: AtomicPidfdProcess | None = None
+    child: SlotAtomicPidfdProcess | None = None
 
 
 _atomic_launcher_lock = threading.Lock()
@@ -2629,104 +2618,6 @@ def _spawn_slot_atomic_supervisor(
     return child
 
 
-def _spawn_atomic_supervisor(
-    arguments: list[str], environment: dict[str, str], pass_fds: tuple[int, ...],
-    cwd: str | None, native_launch: Callable[..., int], owner: AtomicLaunchOwner | None = None,
-) -> AtomicPidfdProcess:
-    if not arguments or not os.path.isabs(arguments[0]):
-        raise IntegrityError("trusted atomic launcher requires an absolute executable")
-    if any(type(fd) is not int or fd < 3 for fd in pass_fds) or len(set(pass_fds)) != len(pass_fds):
-        raise IntegrityError("trusted atomic launcher inherited descriptors are invalid")
-    for descriptor in pass_fds:
-        os.fstat(descriptor)
-    try:
-        encoded_arguments = [os.fsencode(argument) for argument in arguments]
-        encoded_environment = [os.fsencode(key) + b"=" + os.fsencode(value) for key, value in environment.items()]
-        encoded_cwd = os.fsencode(cwd) if cwd is not None else None
-    except (TypeError, ValueError) as error:
-        raise IntegrityError("trusted atomic launcher arguments are invalid") from error
-    if any(b"\x00" in value for value in [*encoded_arguments, *encoded_environment]) or (
-        encoded_cwd is not None and b"\x00" in encoded_cwd
-    ) or any("=" in key for key in environment):
-        raise IntegrityError("trusted atomic launcher arguments are invalid")
-    argv = (ctypes.c_char_p * (len(encoded_arguments) + 1))(*encoded_arguments, None)
-    envp = (ctypes.c_char_p * (len(encoded_environment) + 1))(*encoded_environment, None)
-    inherited = (ctypes.c_int * len(pass_fds))(*pass_fds) if pass_fds else None
-    owned: set[int] = set()
-    pidfd = ctypes.c_int(-1)
-    gate_w: int | None = None
-
-    def close_owned(descriptor: int) -> None:
-        owned.remove(descriptor)
-        os.close(descriptor)
-
-    try:
-        pipes = []
-        for _ in range(5):
-            pair = os.pipe2(os.O_CLOEXEC)
-            owned.update(pair)
-            pipes.append(pair)
-        (stdin_r, stdin_w), (stdout_r, stdout_w), (ready_r, ready_w), (gate_r, gate_w), (error_r, error_w) = pipes
-        if owned.intersection(pass_fds):
-            raise IntegrityError("trusted atomic launcher descriptors overlap")
-        result = native_launch(ctypes.byref(pidfd), stdin_r, stdout_w, ready_w, gate_r, error_w,
-                               inherited, len(pass_fds), encoded_cwd, argv, envp)
-        if pidfd.value >= 0:
-            owned.add(pidfd.value)
-        if result != 0:
-            raise IntegrityError(f"trusted atomic launcher failed: errno {-result}")
-        if pidfd.value < 0:
-            raise IntegrityError("trusted atomic launcher omitted its pidfd")
-        for descriptor in (stdin_r, stdout_w, ready_w, gate_r, error_w):
-            close_owned(descriptor)
-        stdin_stream = AtomicPipe(stdin_w)
-        stdout_stream = AtomicPipe(stdout_r)
-        child = AtomicPidfdProcess(stdin_stream, stdout_stream, pidfd.value, ready_r, gate_w, error_r)
-        if owner is not None:
-            owner.child = child
-        owned.difference_update((pidfd.value, stdin_w, stdout_r, ready_r, gate_w, error_r))
-        return child
-    except BaseException as error:
-        if owner is not None and owner.child is not None:
-            owned.difference_update((pidfd.value, stdin_w, stdout_r, ready_r, gate_w, error_r))
-            raise
-        if pidfd.value >= 0:
-            owned.add(pidfd.value)
-        if pidfd.value in owned:
-            cleanup_failures: list[BaseException] = []
-            try:
-                if gate_w is not None and gate_w in owned:
-                    close_owned(gate_w)
-            except BaseException as cleanup_error:
-                cleanup_failures.append(cleanup_error)
-            try:
-                signal.pidfd_send_signal(pidfd.value, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except BaseException as cleanup_error:
-                cleanup_failures.append(cleanup_error)
-            try:
-                failed_process = AtomicPidfdProcess(None, None, pidfd.value, -1, -1, -1)
-                _reap_pinned_supervisor(failed_process, pidfd.value, 5)
-            except BaseException as cleanup_error:
-                cleanup_failures.append(cleanup_error)
-            for cleanup_error in cleanup_failures:
-                error.add_note(f"atomic launcher cleanup failed: {type(cleanup_error).__name__}")
-        raise
-    finally:
-        active_error = sys.exc_info()[1]
-        close_failure = None
-        for descriptor in owned:
-            try:
-                os.close(descriptor)
-            except BaseException as error:
-                close_failure = close_failure or error
-        if close_failure is not None:
-            if active_error is None:
-                raise IntegrityError("atomic launcher descriptor cleanup failed") from close_failure
-            active_error.add_note(f"atomic launcher descriptor cleanup failed: {type(close_failure).__name__}")
-
-
 def _atomic_launcher_error(data: bytearray) -> None:
     if len(data) != struct.calcsize("@ii"):
         raise IntegrityError("trusted atomic launcher error frame is invalid")
@@ -2734,24 +2625,6 @@ def _atomic_launcher_error(data: bytearray) -> None:
     if stage not in range(1, 8) or error <= 0:
         raise IntegrityError("trusted atomic launcher error frame is invalid")
     raise IntegrityError(f"trusted atomic launcher failed at stage {stage}: errno {error}")
-
-
-def _wait_atomic_launcher_pipe(
-    descriptors: list[int], signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
-) -> list[int]:
-    while True:
-        signum = _read_host_cancellation(signals)
-        if signum is not None:
-            raise ScriptPlanInterrupted(signum)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise IntegrityError("trusted atomic launcher timed out")
-        try:
-            readable, _, _ = select.select(descriptors, [], [], min(remaining, 0.05))
-        except InterruptedError:
-            continue
-        if readable:
-            return readable
 
 
 def _wait_atomic_slot_pipe(
@@ -2774,19 +2647,14 @@ def _wait_atomic_slot_pipe(
 
 
 def _await_atomic_launcher_ready(
-    child: AtomicPidfdProcess, signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
+    child: SlotAtomicPidfdProcess, signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
 ) -> None:
     error_data = bytearray()
     while True:
-        if isinstance(child, SlotAtomicPidfdProcess):
-            readable = _wait_atomic_slot_pipe(child.owner, (4, 8), signals, deadline)
-            error_ready, ready = 8 in readable, 4 in readable
-        else:
-            readable = _wait_atomic_launcher_pipe([child.ready_fd, child.error_fd], signals, deadline)
-            error_ready, ready = child.error_fd in readable, child.ready_fd in readable
+        readable = _wait_atomic_slot_pipe(child.owner, (4, 8), signals, deadline)
+        error_ready, ready = 8 in readable, 4 in readable
         if error_ready:
-            chunk = (child.owner.read(8, 9 - len(error_data)) if isinstance(child, SlotAtomicPidfdProcess)
-                     else os.read(child.error_fd, 9 - len(error_data)))
+            chunk = child.owner.read(8, 9 - len(error_data))
             if not chunk:
                 if error_data:
                     _atomic_launcher_error(error_data)
@@ -2795,27 +2663,19 @@ def _await_atomic_launcher_ready(
             if len(error_data) > 8:
                 raise IntegrityError("trusted atomic launcher error frame is invalid")
         if ready:
-            if isinstance(child, SlotAtomicPidfdProcess):
-                child.owner.read_ready()
-                valid_ready = not error_data
-            else:
-                valid_ready = os.read(child.ready_fd, 2) == b"R" and not error_data
-            if not valid_ready:
+            child.owner.read_ready()
+            if error_data:
                 raise IntegrityError("trusted atomic launcher readiness frame is invalid")
             return
 
 
 def _await_atomic_launcher_error_channel(
-    child: AtomicPidfdProcess, signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
+    child: SlotAtomicPidfdProcess, signals: HostSignalQueue | _CallableHostSignalQueue, deadline: float,
 ) -> None:
     error_data = bytearray()
     while True:
-        if isinstance(child, SlotAtomicPidfdProcess):
-            _wait_atomic_slot_pipe(child.owner, (8,), signals, deadline)
-            chunk = child.owner.read(8, 9 - len(error_data))
-        else:
-            _wait_atomic_launcher_pipe([child.error_fd], signals, deadline)
-            chunk = os.read(child.error_fd, 9 - len(error_data))
+        _wait_atomic_slot_pipe(child.owner, (8,), signals, deadline)
+        chunk = child.owner.read(8, 9 - len(error_data))
         if not chunk:
             if error_data:
                 _atomic_launcher_error(error_data)
@@ -2881,7 +2741,7 @@ def run_supervised_bubblewrap(
                                           _atomic_launcher._owned_reap)
                     if _atomic_launcher is not None else None)
     status_read_fd = status_write_fd = -1
-    process: subprocess.Popen[bytes] | AtomicPidfdProcess | None = None
+    process: subprocess.Popen[bytes] | SlotAtomicPidfdProcess | None = None
     atomic_owner = AtomicLaunchOwner()
     pidfd: int | None = None
     provisional_pidfd: int | None = None
@@ -3128,10 +2988,10 @@ def run_supervised_bubblewrap(
             process = atomic_owner.child
         if process is None:
             return
-        if isinstance(process, AtomicPidfdProcess):
+        if isinstance(process, SlotAtomicPidfdProcess):
             if leader_pidfd is None:
                 leader_pidfd = process.pidfd
-            if isinstance(process, SlotAtomicPidfdProcess) and leader_pidfd < 0:
+            if leader_pidfd < 0:
                 return
             gate_authenticated = True
         if not gate_authenticated or leader_pidfd is None:
@@ -3165,14 +3025,9 @@ def run_supervised_bubblewrap(
                     process.stdin.close()
             except BaseException as error:
                 cleanup_failures.append(error)
-            if isinstance(process, AtomicPidfdProcess) and process.gate_fd >= 0:
+            if isinstance(process, SlotAtomicPidfdProcess) and process.gate_fd >= 0:
                 try:
-                    if isinstance(process, SlotAtomicPidfdProcess):
-                        process.owner.close(7)
-                    else:
-                        descriptor = process.gate_fd
-                        process.gate_fd = -1
-                        os.close(descriptor)
+                    process.owner.close(7)
                 except BaseException as error:
                     cleanup_failures.append(error)
             try:
@@ -3660,15 +3515,11 @@ def run_supervised_bubblewrap(
                             except BaseException as error:
                                 record_close_failure(error)
             finally:
-                atomic_descriptors = (
-                    (process.ready_fd, process.gate_fd, process.error_fd)
-                    if isinstance(process, AtomicPidfdProcess) and not isinstance(process, SlotAtomicPidfdProcess) else ()
-                )
                 closed_descriptors: set[int] = set()
                 inner_raw_descriptors = (pidfd, provisional_pidfd) if inner_descriptors is None else ()
                 status_raw_descriptors = (status_read_fd, status_write_fd) if status_owner is None else ()
                 raw_leader_pidfd = None if isinstance(process, SlotAtomicPidfdProcess) else leader_pidfd
-                for descriptor in (*status_raw_descriptors, *inner_raw_descriptors, raw_leader_pidfd, gate_environment_fd, *atomic_descriptors):
+                for descriptor in (*status_raw_descriptors, *inner_raw_descriptors, raw_leader_pidfd, gate_environment_fd):
                     if descriptor is not None and descriptor >= 0:
                         if descriptor in closed_descriptors:
                             continue

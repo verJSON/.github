@@ -17,6 +17,9 @@ class DependencyError(ValueError):
 
 PACKAGE = re.compile(r"^@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
 REGISTRY_PACKAGE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
+SAFE_RELATIVE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
+GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+FILE_SPEC_FIELDS = ("dependencies", "devDependencies", "optionalDependencies")
 PNPM_HOOK_KEYS = {
     "pnpmfile",
     "globalPnpmfile",
@@ -93,7 +96,64 @@ def validate_url(path: str, name: str, version: str, resolved: str, approved: se
     return private
 
 
-def build_npm_plan(lock: dict[str, Any], approved_names: list[str]) -> list[dict[str, Any]]:
+def normalize_gitlinks(gitlinks: Any) -> dict[str, str]:
+    if not isinstance(gitlinks, dict):
+        raise DependencyError("gitlink proof must be an object")
+    proven: dict[str, str] = {}
+    for path, sha in gitlinks.items():
+        if not isinstance(path, str) or SAFE_RELATIVE.fullmatch(path) is None:
+            raise DependencyError("gitlink path is not a normalized relative path")
+        if not isinstance(sha, str) or GIT_SHA.fullmatch(sha) is None:
+            raise DependencyError(f"gitlink {path} is not pinned to a commit")
+        proven[path] = sha
+    return proven
+
+
+def require_file_spec(manifest: Any, name: str, path: str) -> None:
+    if not isinstance(manifest, dict):
+        raise DependencyError("pinned gitlink validation requires package.json")
+    expected = f"file:{path}"
+    for field in FILE_SPEC_FIELDS:
+        specs = manifest.get(field, {})
+        if specs is None:
+            continue
+        if not isinstance(specs, dict):
+            raise DependencyError(f"package.json {field} must be an object")
+        if specs.get(name) == expected:
+            return
+    raise DependencyError(f"package.json does not depend on {name} through {expected}")
+
+
+def index_file_links(packages: dict[Any, Any], proven: dict[str, str]) -> dict[str, str]:
+    pointed: dict[str, str] = {}
+    for path, package in packages.items():
+        if not isinstance(package, dict):
+            raise DependencyError(f"lock entry {path} must be an object")
+        if package.get("link") is not True:
+            continue
+        resolved = package.get("resolved")
+        if (
+            not isinstance(path, str)
+            or "node_modules/" not in path
+            or not isinstance(resolved, str)
+            or SAFE_RELATIVE.fullmatch(resolved) is None
+            or resolved not in proven
+        ):
+            raise DependencyError(f"lock entry {path} links outside a pinned git submodule")
+        if "integrity" in package:
+            raise DependencyError(f"lock entry {path} is a file link and cannot carry download integrity")
+        if resolved in pointed:
+            raise DependencyError(f"lock entry {resolved} is linked more than once")
+        pointed[resolved] = path
+    return pointed
+
+
+def build_npm_plan(
+    lock: dict[str, Any],
+    approved_names: list[str],
+    gitlinks: dict[str, str] | None = None,
+    manifest: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     approved = validate_approved(approved_names)
     if lock.get("lockfileVersion") not in (2, 3):
         raise DependencyError("package-lock lockfileVersion must be 2 or 3")
@@ -101,10 +161,13 @@ def build_npm_plan(lock: dict[str, Any], approved_names: list[str]) -> list[dict
     packages = lock.get("packages")
     if not isinstance(packages, dict):
         raise DependencyError("package-lock packages must be an object")
+    proven = None if gitlinks is None else normalize_gitlinks(gitlinks)
+    pointed = {} if proven is None else index_file_links(packages, proven)
     found: set[str] = set()
     downloads: dict[tuple[str, str], bool] = {}
     bundled_paths: list[str] = []
     downloadable_paths: set[str] = set()
+    seen_gitlinks: set[str] = set()
     for path, package in packages.items():
         if not isinstance(package, dict):
             raise DependencyError(f"lock entry {path} must be an object")
@@ -121,6 +184,17 @@ def build_npm_plan(lock: dict[str, Any], approved_names: list[str]) -> list[dict
             or not REGISTRY_PACKAGE.fullmatch(name)
         ):
             raise DependencyError(f"lock entry {path} lacks a canonical package identity")
+        if proven is not None and path in proven:
+            if package.get("inBundle") is True or "resolved" in package or "integrity" in package:
+                raise DependencyError(f"lock entry {path} is a pinned git submodule and cannot carry a download")
+            link_path = pointed.get(path)
+            if link_path is None:
+                raise DependencyError(f"lock entry {path} is a pinned git submodule without a file: link")
+            if link_path.rsplit("node_modules/", 1)[-1] != name:
+                raise DependencyError(f"lock entry {path} does not match its file: link name")
+            require_file_spec(manifest, name, path)
+            seen_gitlinks.add(path)
+            continue
         if package.get("inBundle") is True:
             bundled_paths.append(path)
             continue
@@ -137,6 +211,12 @@ def build_npm_plan(lock: dict[str, Any], approved_names: list[str]) -> list[dict
     for path in bundled_paths:
         if not any(path.startswith(f"{parent}/node_modules/") for parent in downloadable_paths):
             raise DependencyError(f"bundled lock entry {path} has no integrity-pinned parent package")
+
+    missing_links = sorted(set(pointed) - seen_gitlinks)
+    if missing_links:
+        raise DependencyError(
+            f"file: link has no pinned package entry: {', '.join(missing_links)}"
+        )
 
     if found != approved:
         difference = ", ".join(sorted(approved ^ found))
@@ -239,6 +319,7 @@ def main() -> int:
     parser.add_argument("--approved", required=True)
     parser.add_argument("--package-manager", choices=("npm", "pnpm"), required=True)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--gitlinks", type=Path)
     parser.add_argument("--reviewed-manifest", type=Path)
     parser.add_argument("--project-root", type=Path)
     args = parser.parse_args()
@@ -247,6 +328,15 @@ def main() -> int:
         if not isinstance(approved, list):
             raise DependencyError("approved packages must be an array")
         text = args.lock.read_text(encoding="utf-8")
+        gitlinks = None
+        npm_manifest = None
+        if args.gitlinks is not None:
+            if args.package_manager != "npm":
+                raise DependencyError("gitlink file dependencies are an npm lockfile contract")
+            if args.manifest is None:
+                raise DependencyError("pinned gitlink validation requires package.json")
+            gitlinks = json.loads(args.gitlinks.read_text(encoding="utf-8"))
+            npm_manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         if args.package_manager == "pnpm":
             if args.manifest is None:
                 raise DependencyError("pnpm validation requires package.json")
@@ -311,7 +401,7 @@ def main() -> int:
         if args.package_manager == "pnpm":
             build_pnpm_plan(lock, approved)
         else:
-            build_npm_plan(lock, approved)
+            build_npm_plan(lock, approved, gitlinks, npm_manifest)
     except (DependencyError, OSError, json.JSONDecodeError) as error:
         print(f"container dependency acquisition rejected: {error}", file=os.sys.stderr)
         return 1

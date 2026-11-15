@@ -273,26 +273,6 @@ def run_inside_namespace(library_path, unrelated_library_path):
     else:
         raise AssertionError("a malformed replacement reused an earlier loaded library")
 
-    child = artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {"PATH": "/usr/bin:/bin"}, (), None, launch)
-    try:
-        signals = artifacts.HostSignalQueue()
-        artifacts._await_atomic_launcher_ready(child, signals, time.monotonic() + 5)
-        if not artifacts._signal_pinned_process_group(child.pidfd, 0):
-            raise AssertionError("atomic wrapper lost its process group")
-        os.write(child.gate_fd, b"G")
-        os.close(child.gate_fd)
-        child.gate_fd = -1
-        artifacts._await_atomic_launcher_error_channel(child, signals, time.monotonic() + 5)
-        artifacts._reap_pinned_supervisor(child, child.pidfd, 5)
-        if child.returncode != 0:
-            raise AssertionError("atomic wrapper did not retain the child outcome")
-    finally:
-        child.stdin.close()
-        child.stdout.close()
-        for descriptor in (child.pidfd, child.ready_fd, child.gate_fd, child.error_fd):
-            if descriptor >= 0:
-                os.close(descriptor)
-
     receipt_test_path = SOURCE.parent / "ci-entry-receipts.test.py"
     spec = importlib.util.spec_from_file_location("atomic_receipt_tests", receipt_test_path)
     receipt_tests = importlib.util.module_from_spec(spec)

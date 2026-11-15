@@ -14,6 +14,8 @@ on:
       - 'scripts/container_oci_index.py'
       - 'scripts/container_private_dependencies.py'
       - 'scripts/container_private_dependencies.test.py'
+      - 'scripts/container_gitlink_file_dependencies.sh'
+      - 'scripts/container-gitlink-file-dependencies.test.sh'
       - 'scripts/container_candidate_retry.py'
       - 'scripts/container_dependency_transfer.py'
       - 'scripts/container_dependency_transfer.test.py'
