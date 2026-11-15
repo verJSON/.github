@@ -1,10 +1,13 @@
 {
   "schema_version": 1,
   "repository": "Verjson/verjson-cli-projects",
-  "protected_node_ci_sha": "a89fe1f090545c15cdd6987f20119327206e2c59",
-  "consumer_node_ci_sha": "a89fe1f090545c15cdd6987f20119327206e2c59",
+  "protected_node_ci_sha": "d112b30f0d2bd448a28a57f3ff44df7877dc0a8c",
+  "consumer_node_ci_sha": "d112b30f0d2bd448a28a57f3ff44df7877dc0a8c",
   "rollout_legacy_consumer_workflow_sha256": null,
-  "node_versions": ["26", "24.19.0"],
+  "node_versions": [
+    "26",
+    "26.13.1"
+  ],
   "approved_internal_packages": [
     "@verjson/eslint-config",
     "@verjson/tsconfig"

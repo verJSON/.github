@@ -131,7 +131,7 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
-    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@d112b30f0d2bd448a28a57f3ff44df7877dc0a8c
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
@@ -154,11 +154,11 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
-    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@d112b30f0d2bd448a28a57f3ff44df7877dc0a8c
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
-      node-version: '24.19.0'
+      node-version: '26.13.1'
       secretless-pr: true
       approved-internal-packages: |-
         @verjson/eslint-config
@@ -427,7 +427,7 @@ def validate_workflow(path=WORKFLOW):
         "git/ref/heads/main" not in admission_run,
         "identity admission must not depend on the consumer main ref",
     )
-    for name, version in (("ci", "26"), ("ci-node-floor", "24.19.0")):
+    for name, version in (("ci", "26"), ("ci-node-floor", "26.13.1")):
         job = document["jobs"][name]
         require(job.get("needs") == "admission", f"{name} bypasses identity admission")
         require(job.get("permissions") == {
@@ -436,7 +436,7 @@ def validate_workflow(path=WORKFLOW):
         }, f"{name} permissions drifted")
         require(job.get("uses") == (
             "Verjson/.github/.github/workflows/node-ci-protected.yml@"
-            "a89fe1f090545c15cdd6987f20119327206e2c59"
+            "d112b30f0d2bd448a28a57f3ff44df7877dc0a8c"
         ), f"{name} reusable workflow identity drifted")
         require(job.get("secrets") == {
             "NODE_AUTH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
