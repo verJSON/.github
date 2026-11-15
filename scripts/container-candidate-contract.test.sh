@@ -208,8 +208,9 @@ assert "secrets" not in validate, (
 publish = caller["jobs"]["publish"]
 assert publish["with"]["cleanup-unused-docker-images"] is True
 assert publish["secrets"] == {
-    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"
-}, "trusted publication must retain the narrowly scoped package credential"
+    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+    "submodules-token": "${{ secrets.SUBMODULES_TOKEN }}",
+}, "trusted publication must retain the narrowly scoped package and submodule credentials"
 PY
 bash "$private_consumer/scripts/container-candidate-contract.test.sh"
 # A private-package caller routes the package token exactly once, to trusted
@@ -385,11 +386,17 @@ def validate_authority(read_only, publication):
         "private dependency acquisition must run only on trusted publication events"
     )
     assert acquisition["outputs"]["transfer-encryption-key"] == (
-        "${{ steps.package-node-modules.outputs.encryption-key }}"
+        "${{ steps.seal-node-modules.outputs.encryption-key }}"
     )
-    package_transfer = next(
+    credentialed = next(
         step for step in acquisition["steps"] if step.get("id") == "package-node-modules"
     )
+    assert "npm ci --ignore-scripts --no-audit --no-fund" in credentialed["run"]
+    assert "encrypt" not in credentialed["run"]
+    package_transfer = next(
+        step for step in acquisition["steps"] if step.get("id") == "seal-node-modules"
+    )
+    assert package_transfer["env"]["NODE_AUTH_TOKEN"] == ""
     assert 'container_dependency_transfer.py" encrypt' in package_transfer["run"]
     assert 'rm -f "$TRANSFER_DIR/container-node-modules.tgz"' in package_transfer["run"]
     assert "encryption-key=%s" in package_transfer["run"]
@@ -1342,7 +1349,7 @@ grep -qF 'npm ci --ignore-scripts' <<<"$acquisition_job"
 # GitHub's does, so no other copy of the job or a key can be the one hashed.
 # Any edit to that job, legitimate or not, fails here until a reviewer re-pins
 # reviewed_acquisition_job_sha256.
-reviewed_acquisition_job_sha256=ef498b200f1f0f20992682a1d9e6618643c948d6349d51008dc369591e63a150
+reviewed_acquisition_job_sha256=57f6ffeeaa89f48b3519e7bc672570d43ec84095ff6f52dd025bd23649ca6a84
 acquisition_job_sha256() { # <workflow file>
   python3 -B - "$1" <<'PY'
 import hashlib
@@ -1415,7 +1422,7 @@ npm_home_line='          mkdir -p "$npm_home"'
 token_env_line='          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}'
 # The transfer digest check also ends two other jobs' steps, so the anchor
 # includes the install step that follows it in this job.
-transfer_check_line="          printf '%s  %s\n' \"\$TRANSFER_SHA256\" \"\$transfer\" | sha256sum --check --strict"
+transfer_check_line='          bash "$helper" confirm "$proof"'
 transfer_check_line="$transfer_check_line"$'\n''      - id: package-node-modules'
 acquisition_job_line='  acquire-private-node-dependencies:'
 acquisition_step_name_line='        name: Acquire exact lockfile packages without lifecycle execution'
