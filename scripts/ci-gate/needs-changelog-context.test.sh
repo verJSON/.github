@@ -10,30 +10,42 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 workflow="$repo_root/.github/workflows/changelog-validate.yml"
+generated="$repo_root/.github/workflows/generated-artifacts.yml"
 engine="$repo_root/scripts/changelog.py"
 fails=0
 pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
-[ -f "$workflow" ] && [ -f "$engine" ] \
-  || { echo "FAIL - changelog-validate.yml or scripts/changelog.py is missing"; exit 1; }
+[ -f "$workflow" ] && [ -f "$generated" ] && [ -f "$engine" ] \
+  || { echo "FAIL - changelog-validate.yml, generated-artifacts.yml, or scripts/changelog.py is missing"; exit 1; }
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-awk -v want='      - name: needs-changelog-context' '
-  $0 == want { in_step = 1; next }
-  in_step && $0 == "        run: |" { in_run = 1; next }
-  in_run {
-    if ($0 != "" && $0 !~ /^          /) { exit }
-    sub(/^          /, "")
-    print
-  }
-' "$workflow" >"$tmp/step.sh"
+extract_step() {
+  local src="$1" dest="$2"
+  awk -v want='      - name: needs-changelog-context' '
+    $0 == want { in_step = 1; next }
+    in_step && $0 == "        run: |" { in_run = 1; next }
+    in_run {
+      if ($0 != "" && $0 !~ /^          /) { exit }
+      sub(/^          /, "")
+      print
+    }
+  ' "$src" >"$dest"
+}
+
+extract_step "$workflow" "$tmp/step.sh"
 
 [ -s "$tmp/step.sh" ] \
   && pass "the needs-changelog-context step extracts from changelog-validate.yml" \
   || { fail "no needs-changelog-context step found in changelog-validate.yml"; echo "1 test(s) failed."; exit 1; }
+
+extract_step "$generated" "$tmp/generated-step.sh"
+[ -s "$tmp/generated-step.sh" ] \
+  && cmp -s "$tmp/step.sh" "$tmp/generated-step.sh" \
+  && pass "generated-artifacts.yml carries the same handoff step body" \
+  || fail "generated-artifacts.yml handoff step is missing or drifted from changelog-validate.yml"
 
 # The step is informational. check-pr in the following step stays the gate.
 awk '
@@ -42,14 +54,28 @@ awk '
   in_step && $0 == "      - name: Validate fragments and pull-request policy" { exit }
   END { exit found ? 0 : 1 }
 ' "$workflow" \
-  && pass "the handoff step continues on error and stays ahead of validation" \
-  || fail "the handoff step is not continue-on-error immediately before validation"
+  && pass "changelog-validate handoff continues on error and stays ahead of validation" \
+  || fail "changelog-validate handoff is not continue-on-error immediately before validation"
+
+awk '
+  $0 == "      - name: needs-changelog-context" { in_step = 1 }
+  in_step && $0 == "        continue-on-error: true" { found = 1 }
+  in_step && $0 == "      - name: Validate generated artifacts" { exit }
+  END { exit found ? 0 : 1 }
+' "$generated" \
+  && pass "generated-artifacts handoff continues on error and stays ahead of validation" \
+  || fail "generated-artifacts handoff is not continue-on-error immediately before validation"
 
 grep -qF 'python3 -I .changelog-contract/scripts/changelog.py check-pr' "$workflow" \
-  && pass "validation still runs check-pr" \
-  || fail "validation no longer runs check-pr"
+  && pass "changelog-validate still runs check-pr" \
+  || fail "changelog-validate no longer runs check-pr"
+
+grep -qF 'python3 -I "$engine" check-pr' "$generated" \
+  && pass "generated-artifacts still runs check-pr" \
+  || fail "generated-artifacts no longer runs check-pr"
 
 grep -qF 'PR_AUTHOR: ${{ github.event.pull_request.user.login }}' "$workflow" \
+  && grep -qF 'PR_AUTHOR: ${{ github.event.pull_request.user.login }}' "$generated" \
   && grep -qF -- '--author "${PR_AUTHOR:-}"' "$tmp/step.sh" \
   && ! grep -qF 'github.event.pull_request.user.login' "$tmp/step.sh" \
   && pass "the author reaches the step as an environment value, not an inline expression" \

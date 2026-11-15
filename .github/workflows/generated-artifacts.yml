@@ -92,6 +92,53 @@ jobs:
           ref: ${{ inputs.contract_ref }}
           path: .changelog-contract
           persist-credentials: false
+      # Informational handoff (ADR 0243, #2120). continue-on-error keeps this
+      # step from becoming a merge gate: check-pr inside validation remains the
+      # required check for every author. Same step as changelog-validate.yml so
+      # generated-artifacts adopters (the common caller shape) see it too.
+      - name: needs-changelog-context
+        if: inputs.changelog && inputs.contract_ref != ''
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ] || [ -z "${HEAD_SHA:-}" ]; then
+            echo "needs-changelog-context: not a pull request"
+            exit 0
+          fi
+          err="$(mktemp)"
+          trap 'rm -f "$err"' EXIT
+          set +e
+          message="$(python3 -I "$GITHUB_WORKSPACE/.changelog-contract/scripts/changelog.py" needs-changelog-context \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --author "${PR_AUTHOR:-}" 2>"$err")"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          case "$status:$message" in
+            1:needs-changelog-context:*) ;;
+            *)
+              printf '::warning title=needs-changelog-context::handoff check could not run\n'
+              cat "$err" >&2 || true
+              exit 0
+              ;;
+          esac
+          {
+            printf '### needs-changelog-context\n\n'
+            printf '%s\n' "$message"
+          } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+          # Encode for the Actions log annotation without a pipe-fed consumer
+          # (#1430/#1445) and with an isolated interpreter (#python -I contract).
+          encoded="$(python3 -I -c 'import sys; data = sys.argv[1]; sys.stdout.write(data.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$message")"
+          printf '::error title=needs-changelog-context::%s\n' "$encoded"
+          exit 1
       - name: Validate generated artifacts
         id: validate
         env:

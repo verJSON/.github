@@ -78,14 +78,15 @@ fragment. That queue looked like ordinary CI breakage. The handoff is
 1. `check-pr` is unchanged. It still requires a valid new `NEXT/` fragment for
    dependency changes, for every author. There is no Renovate exemption, and
    no workflow writes a fragment.
-2. The `changelog-validate.yml` job runs an informational step named
-   `needs-changelog-context` before that gate. The step fails, under that
-   title, only when the pull request author is `renovate[bot]` or `renovate`,
-   a dependency manifest or lockfile changed, and the pull request adds no
-   valid new fragment. `continue-on-error` keeps the step from becoming a
-   second merge gate. The required check remains `changelog / validate`.
-   Adopters see the annotation when their changelog caller pin includes this
-   workflow.
+2. Both changelog caller shapes run an informational step named
+   `needs-changelog-context` before that gate: `changelog-validate.yml` and
+   `generated-artifacts.yml` (the common adopter pin). The step fails, under
+   that title, only when the pull request author is `renovate[bot]` or
+   `renovate`, a dependency manifest or lockfile changed, and the pull request
+   adds no valid new fragment. `continue-on-error` keeps the step from becoming
+   a second merge gate. The required check remains `changelog / validate`.
+   Adopters see the annotation when their changelog caller pin includes either
+   workflow at a commit that carries the step.
 3. The organization Renovate preset states the same contract in the pull
    request body: install, exercise, adapt, then author
    `NEXT/YYYY-MM-DD-issue-<id>-<slug>.md`. The slug matches
@@ -95,3 +96,13 @@ fragment. That queue looked like ordinary CI breakage. The handoff is
    after a valid fragment landed, so the annotation is the signal that clears.
    The preset body reaches the next Renovate run after `Verjson/renovate-config`
    merges that change.
+
+## Amendment 2026-11-15 — generated-artifacts callers get the same handoff
+
+The 2026-11-15 handoff landed first on `changelog-validate.yml`. Most adopters
+pin `generated-artifacts.yml` (including verjson-cli). Without the same step on
+that workflow, a pin bump to the earlier commit could not surface
+`needs-changelog-context` on Renovate PRs. The informational step is therefore
+duplicated on `generated-artifacts.yml` with the same body, author env contract,
+and `continue-on-error` placement ahead of validation. Evidence:
+verJSON/.github#2120 after verjson-cli#371.
