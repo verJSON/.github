@@ -2591,6 +2591,12 @@ REF_SITE_ALLOWLIST=(
   # strictly safer spelling. assert-mergeable-head.sh and verify-arm-receipt.sh now
   # encode their base ref with `@uri` like every other rules/branches/ reader, and the
   # scan below pins that: no allowlist entry remains for either site.
+  # The bootstrap classifier embeds the F-1R guarded caller as a Python bytes literal
+  # (#1843). That fixture contains base_ref_path=…@uri and the rules/branches/ use, but
+  # block_slice cannot pair them across escaped \n form. The live generator
+  # (scripts/gen-gate-rearm-caller.sh) emits the same site on a real line the scan
+  # accepts; this allowlist covers only the embedded fixture text.
+  $'.github/workflows/gate-rearm.yml\tbase_ref_path\t\t'
 )
 
 allowlisted_hits=()

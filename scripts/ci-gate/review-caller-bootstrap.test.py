@@ -108,6 +108,25 @@ def mirror(sha: str) -> bytes:
 
 CI_CALLER = ".github/workflows/ci.yml"
 CI_STALE = "ab93610d0b393005aed186f4aa17c75a549cea17"
+GATE_CALLER = ".github/workflows/gate-rearm.yml"
+LABEL_CALLER = ".github/workflows/ai-review-label-rearm.yml"
+PRIVILEGED_CALLER = ".github/workflows/ai-privileged-merge.yml"
+RETRY_CALLER = ".github/workflows/ai-promotion-retry.yml"
+RUNNER_STALE = "2d1ea177fdafe361f9369526cbab8bc05f9e476d"
+GATE_GUARD = "635aca975b1aa93660138875ba9616b27693476f"
+GATE_COMPOSED = "ae70e4ef0a70fa446fc6583a2473f2b4e68eac36"
+GATE_PRECOMPOSED = "e7db320ec8c63d36678623849f53b9fd88b1b0cb"
+LABEL_SPLIT = "0f8aead1065df13ef8cf232f7f2527c7d35da8a1"
+PRIVILEGED_TEMPLATE = "0bc98a81b6f42744d23ec1cc9af8e7053d324bf8"
+TEMPLATE_BOUNDARIES = (GATE_GUARD, GATE_COMPOSED, GATE_PRECOMPOSED, LABEL_SPLIT, PRIVILEGED_TEMPLATE)
+# Ancestors verified with git merge-base --is-ancestor against those commits.
+STALE_TEMPLATE_ANCESTORS = {GATE_PRECOMPOSED, PRIVILEGED_TEMPLATE}
+RUNNER_TEMPLATE_ANCESTORS = {GATE_PRECOMPOSED, GATE_COMPOSED, LABEL_SPLIT, PRIVILEGED_TEMPLATE}
+CURRENT_TEMPLATE_ANCESTORS = set(TEMPLATE_BOUNDARIES)
+CHECKS = '[{"app_id":1,"name":"build-test","workflow_id":2,"workflow_path":".github/workflows/ci.yml"}]'
+OTHER_CHECKS = '[{"app_id":9,"name":"lint","workflow_id":8,"workflow_path":".github/workflows/actionlint.yml"}]'
+RETRY_NAMES = '["CI"]'
+OTHER_RETRY_NAMES = '["Release"]'
 
 
 def ci_caller(sha: str, workflow: str = "node-ci.yml", owner: str = "Verjson/.github", ref_suffix: str = "",
@@ -437,6 +456,89 @@ def tamper(content: bytes) -> bytes:
     return content + b"# hand edited\n"
 
 
+def ensure_revision(revision: str) -> None:
+    """Make `revision` readable under a shallow actions-ci checkout (#2003)."""
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+        cwd=ROOT,
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        return
+    subprocess.run(
+        ["python3", str(ROOT / "scripts" / "shared_checkout_fetch.py"), "ensure-commit", str(ROOT), revision],
+        check=True,
+        capture_output=True,
+    )
+
+
+def run_generator(revision: str | None, script: str, args: list[str]) -> bytes:
+    """Generator bytes at `revision`, or the working tree when revision is None."""
+    if revision is None:
+        return subprocess.run(["bash", str(ROOT / "scripts" / script), *args], check=True, capture_output=True).stdout
+    ensure_revision(revision)
+    source = subprocess.run(["git", "show", f"{revision}:scripts/{script}"], check=True, capture_output=True, cwd=ROOT).stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / script
+        path.write_bytes(source)
+        path.chmod(0o755)
+        return subprocess.run(["bash", str(path), *args], check=True, capture_output=True).stdout
+
+
+def recognize_templates(consumer: Consumer, stale: str, contract: str, stale_has: set[str], contract_has: set[str]) -> Consumer:
+    for boundary in TEMPLATE_BOUNDARIES:
+        consumer.canonical[f"{boundary}...{stale}"] = "ahead" if boundary in stale_has else "behind"
+        consumer.canonical[f"{boundary}...{contract}"] = "ahead" if boundary in contract_has else "behind"
+    return consumer
+
+
+def generated_gate_files(stale: str, contract: str) -> dict[str, tuple[bytes, bytes]]:
+    """Base bytes from the generator at the stale revision; head bytes from the current generator."""
+    gate = (
+        run_generator(stale, "gen-gate-rearm-caller.sh", [stale]),
+        run_generator(None, "gen-gate-rearm-caller.sh", [contract]),
+    )
+    label = (
+        run_generator(stale, "gen-ai-review-label-rearm-caller.sh", [stale]),
+        run_generator(None, "gen-ai-review-label-rearm-caller.sh", [contract]),
+    )
+    privileged = (
+        run_generator(stale, "gen-privileged-merge-caller.sh", [stale, CHECKS]),
+        run_generator(None, "gen-privileged-merge-caller.sh", [contract, CHECKS]),
+    )
+    retry = (
+        run_generator(stale, "gen-privileged-merge-caller.sh", [stale, "--retry", RETRY_NAMES, CHECKS]),
+        run_generator(None, "gen-privileged-merge-caller.sh", [contract, "--retry", RETRY_NAMES, CHECKS]),
+    )
+    return {GATE_CALLER: gate, LABEL_CALLER: label, PRIVILEGED_CALLER: privileged, RETRY_CALLER: retry}
+
+
+def add_files(consumer: Consumer, **files: tuple[bytes | None, bytes | None]) -> Consumer:
+    for path, (before, after) in files.items():
+        if before is not None:
+            consumer.base[path] = before
+        elif path in consumer.base:
+            del consumer.base[path]
+        if after is not None:
+            consumer.head[path] = after
+        elif path in consumer.head:
+            del consumer.head[path]
+    return consumer
+
+
+def shared_pin_mirror(stale: str, contract: str, before_digest: str, after_digest: str, *, keep_node: bool) -> tuple[bytes, bytes]:
+    node = stale if keep_node else contract
+    before = (
+        f"const reviewCaller = '{stale}';\nconst nodeCi = '{stale}';\nconst gate = '{stale}';\n"
+        f"const reviewDigest = '{before_digest}';\n"
+    ).encode()
+    after = (
+        f"const reviewCaller = '{contract}';\nconst nodeCi = '{node}';\nconst gate = '{contract}';\n"
+        f"const reviewDigest = '{after_digest}';\n"
+    ).encode()
+    return before, after
+
+
 def with_files(**files: bytes) -> Consumer:
     consumer = Consumer()
     for path, (before, after) in files.items():
@@ -467,6 +569,9 @@ def pull_override(consumer: Consumer, **fields: object) -> Consumer:
         target[leaf] = value
     consumer.overrides[f"repos/{TARGET_REPO}/pulls/{PR_NUMBER}"] = pull
     return consumer
+
+
+wedged_cases: dict[str, Consumer] = {}
 
 
 def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
@@ -587,7 +692,7 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
         with_files(**{"tools/check/Action.yml": (mirror(STALE), mirror(CONTRACT))}), folded_rule)
     add("a mirror that changes more than the pin and digest is not a bootstrap",
         with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT) + b"export const extra = 1;\n")}),
-        ("require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),",
+        ("require(subset_substituted(before, after, swaps),",
          "require(after != before,"))
     executable = with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})
     executable.modes[("head", "tests/pins.test.ts")] = "100755"
@@ -771,6 +876,59 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     unavailable = Consumer()
     unavailable.missing.add(f"{CANONICAL}/compare/{CONTRACT}...main")
     add("an unavailable canonical comparison is not a bootstrap", unavailable, None)
+
+    def wedged(stale: str, ancestors: set[str]) -> Consumer:
+        consumer = Consumer()
+        if stale != STALE:
+            consumer.base[CALLER] = generate_caller(stale)
+            consumer.head[CALLER] = generate_caller(CONTRACT)
+            consumer.canonical = {
+                f"{FLOOR}...{stale}": "behind",
+                f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
+                f"{stale}...{CONTRACT}": "ahead",
+                f"{CONTRACT}...main": "ahead",
+            }
+        add_files(consumer, **generated_gate_files(stale, CONTRACT))
+        return recognize_templates(consumer, stale, CONTRACT, ancestors, CURRENT_TEMPLATE_ANCESTORS)
+
+    callers = wedged(STALE, STALE_TEMPLATE_ANCESTORS)
+    digest_before = hashlib.sha256(callers.base[CALLER]).hexdigest()
+    digest_after = hashlib.sha256(callers.head[CALLER]).hexdigest()
+    kept, moved = shared_pin_mirror(STALE, CONTRACT, digest_before, digest_after, keep_node=True)
+    add_files(callers, **{"tests/ci-workflow.test.ts": (kept, moved)})
+    # Held for the accepted-path assertion; the refusal cases below copy the same shape.
+    wedged_cases["kept-node"] = callers
+    edited_gate = wedged(STALE, STALE_TEMPLATE_ANCESTORS)
+    edited_gate.head[GATE_CALLER] += b"# hand edited\n"
+    add("a hand-edited generated gate caller is not a bootstrap", edited_gate,
+        ("require(before == render_gate(epoch_base, stale) and after == render_gate(epoch_head, contract), reason)",
+         "require(True, reason)"))
+    edited_label = wedged(STALE, STALE_TEMPLATE_ANCESTORS)
+    edited_label.head[LABEL_CALLER] += b"# hand edited\n"
+    add("a hand-edited generated label caller is not a bootstrap", edited_label,
+        ("require(before == render_label(epoch_base, stale) and after == render_label(epoch_head, contract), reason)",
+         "require(True, reason)"))
+    edited_privileged = wedged(STALE, STALE_TEMPLATE_ANCESTORS)
+    edited_privileged.head[PRIVILEGED_CALLER] = run_generator(None, "gen-privileged-merge-caller.sh", [CONTRACT, OTHER_CHECKS])
+    add("a privileged merge caller whose required checks change is not a bootstrap", edited_privileged,
+        ("require(before == render_privileged(stale, checks, labels) and after == render_privileged(contract, checks, labels), reason)",
+         "require(True, reason)"))
+    edited_retry = wedged(STALE, STALE_TEMPLATE_ANCESTORS)
+    edited_retry.head[RETRY_CALLER] = run_generator(
+        None, "gen-privileged-merge-caller.sh", [CONTRACT, "--retry", OTHER_RETRY_NAMES, CHECKS])
+    add("a promotion retry caller whose workflow names change is not a bootstrap", edited_retry,
+        ("require(before == render_retry(stale, names, checks) and after == render_retry(contract, names, checks), reason)",
+         "require(True, reason)"))
+    future_template = Consumer()
+    future_template.base[GATE_CALLER] = run_generator(None, "gen-gate-rearm-caller.sh", [STALE])
+    future_template.head[GATE_CALLER] = run_generator(None, "gen-gate-rearm-caller.sh", [CONTRACT])
+    recognize_templates(future_template, STALE, CONTRACT, set(), set())
+    add("a generated caller template newer than its revision is not a bootstrap", future_template,
+        ("if descends(boundary, revision):", "if True:"))
+    partial = wedged(STALE, STALE_TEMPLATE_ANCESTORS)
+    add_files(partial, **{"tests/ci-workflow.test.ts": (kept, moved.replace(b"const reviewCaller", b"let reviewCaller", 1))})
+    add("a pin mirror that rewrites more than a token subset is not a bootstrap", partial,
+        ("require(subset_substituted(before, after, swaps),", "require(after != before,"))
     malformed = Consumer()
     malformed.overrides[f"repos/{TARGET_REPO}/branches/main"] = {"__raw__": "<html>"}
     add("a malformed API response is not a bootstrap", malformed, None)
@@ -849,6 +1007,12 @@ INELIGIBLE_REASONS = {
     "a reusable CI pin bump without a review caller update is not a bootstrap": "does not change the generated review caller",
     "an unavailable canonical comparison is not a bootstrap": "GitHub API read failed",
     "a malformed API response is not a bootstrap": "GitHub API returned malformed JSON",
+    "a hand-edited generated gate caller is not a bootstrap": "is not the generated caller at the stale and contract revisions",
+    "a hand-edited generated label caller is not a bootstrap": "is not the generated caller at the stale and contract revisions",
+    "a privileged merge caller whose required checks change is not a bootstrap": "is not the generated caller at the stale and contract revisions",
+    "a promotion retry caller whose workflow names change is not a bootstrap": "is not the generated caller at the stale and contract revisions",
+    "a generated caller template newer than its revision is not a bootstrap": "is not the generated caller at the stale and contract revisions",
+    "a pin mirror that rewrites more than a token subset is not a bootstrap": "changes more than the review caller pin and digest",
 }
 
 
@@ -933,6 +1097,21 @@ def main() -> int:
         report(harness.eligible(runner_bootstrap), "the runner fleet's stale 2d1ea177 caller can bootstrap", harness.last)
         report(harness.eligible(with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})),
                "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
+        report(harness.eligible(wedged_cases["kept-node"]),
+               "a contract test may swap the generated callers' pins and leave the unmoved node-ci pin", harness.last)
+        runner_gates = Consumer()
+        runner_gates.base[CALLER] = generate_caller(RUNNER_STALE)
+        runner_gates.head[CALLER] = generate_caller(CONTRACT)
+        runner_gates.canonical = {
+            f"{FLOOR}...{RUNNER_STALE}": "behind",
+            f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
+            f"{RUNNER_STALE}...{CONTRACT}": "ahead",
+            f"{CONTRACT}...main": "ahead",
+        }
+        add_files(runner_gates, **generated_gate_files(RUNNER_STALE, CONTRACT))
+        recognize_templates(runner_gates, RUNNER_STALE, CONTRACT, RUNNER_TEMPLATE_ANCESTORS, CURRENT_TEMPLATE_ANCESTORS)
+        report(harness.eligible(runner_gates),
+               "a 2d1ea177 consumer can move every generated gate caller to the current templates", harness.last)
         report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
                "a reusable node-ci caller that only moves its pin to the contract revision is a companion", harness.last)
         ci_mirror = lambda node, review: f"const canonicalNodeCiPin = '{node}';\n".encode() + mirror(review)
@@ -1018,6 +1197,25 @@ def main() -> int:
             arm_bytes = subprocess.run(["python3", "-I", str(program), "render-caller", sha], capture_output=True).stdout
             report(rendered.returncode == 0 and arm_bytes == generate_caller(sha),
                    f"the arm's embedded caller template matches the canonical generator at {sha[:8]}")
+        def rendered_bytes(args: list[str]) -> bytes:
+            return subprocess.run(["python3", "-I", str(program), *args], capture_output=True).stdout
+        for epoch, revision in (("precomposed", STALE), ("composed", GATE_COMPOSED), ("guarded", None)):
+            expected = run_generator(revision, "gen-gate-rearm-caller.sh", [CONTRACT])
+            report(rendered.returncode == 0 and rendered_bytes(["render-gate", epoch, CONTRACT]) == expected,
+                   f"the embedded gate re-arm template matches the {epoch} generator")
+        for epoch, revision in (("lifecycle", STALE), ("label", None)):
+            expected = run_generator(revision, "gen-ai-review-label-rearm-caller.sh", [CONTRACT])
+            report(rendered.returncode == 0 and rendered_bytes(["render-label", epoch, CONTRACT]) == expected,
+                   f"the embedded label re-arm template matches the {epoch} generator")
+        privileged_args = [CONTRACT, CHECKS, '["self-hosted"]']
+        report(rendered.returncode == 0 and rendered_bytes(["render-privileged", *privileged_args])
+               == run_generator(None, "gen-privileged-merge-caller.sh", privileged_args)
+               == run_generator(STALE, "gen-privileged-merge-caller.sh", [STALE, CHECKS, '["self-hosted"]']).replace(STALE.encode(), CONTRACT.encode()),
+               "the embedded privileged merge template matches the generator and the stale-pin template")
+        retry_args = [CONTRACT, "--retry", '["My CI"]', CHECKS]
+        report(rendered.returncode == 0 and rendered_bytes(["render-retry", CONTRACT, '["My CI"]', CHECKS])
+               == run_generator(None, "gen-privileged-merge-caller.sh", retry_args),
+               "the embedded promotion retry template matches the generator")
         for bad in (("2026-02-30", "1696", STALE, CONTRACT), ("2026-10-13", "ABCDEF", STALE, CONTRACT),
                     ("2026-10-13", "0", STALE, CONTRACT), ("2026-10-13", "1696", STALE, STALE)):
             generated = subprocess.run(["bash", str(FRAGMENT_GENERATOR), *bad], capture_output=True)
