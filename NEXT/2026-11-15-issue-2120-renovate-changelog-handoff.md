@@ -13,4 +13,6 @@ ADR 0243 now points this handoff at #2120. `check-pr` still rejects a missing
 fragment for every author, and no workflow writes the fragment. The annotation
 is informational (`continue-on-error`) on `changelog-validate.yml`, so it
 appears when an adopter's changelog caller pin includes this workflow. The
-preset text is the signal on the pull request itself.
+preset text is the signal on the pull request itself. The annotation encoder
+runs under `python3 -I`, and the handoff contract tests use file-backed grep
+so they do not reintroduce pipe-fed `grep -q` under #1430/#1445.

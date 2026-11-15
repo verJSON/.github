@@ -123,7 +123,9 @@ jobs:
             printf '### needs-changelog-context\n\n'
             printf '%s\n' "$message"
           } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-          encoded="$(printf '%s' "$message" | python3 -c 'import sys; data = sys.stdin.read(); sys.stdout.write(data.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))')"
+          # Encode for the Actions log annotation without a pipe-fed consumer
+          # (#1430/#1445) and with an isolated interpreter (#python -I contract).
+          encoded="$(python3 -I -c 'import sys; data = sys.argv[1]; sys.stdout.write(data.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$message")"
           printf '::error title=needs-changelog-context::%s\n' "$encoded"
           exit 1
       - name: Validate fragments and pull-request policy

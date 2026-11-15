@@ -90,14 +90,16 @@ set +e
 out="$(run_step "$ws" BASE_SHA="$base" HEAD_SHA="$head" PR_AUTHOR='renovate[bot]' 2>"$tmp/missing.err")"
 rc=$?
 set -e
+printf '%s\n' "$out" >"$tmp/missing.out"
+# File-backed grep: pipe-fed `grep -q` trips pipefail under #1430/#1445.
 [ "$rc" -eq 1 ] \
-  && printf '%s\n' "$out" | grep -qF '::error title=needs-changelog-context::needs-changelog-context:' \
+  && grep -qF '::error title=needs-changelog-context::needs-changelog-context:' "$tmp/missing.out" \
   && grep -qF '### needs-changelog-context' "$ws/summary.md" \
   && grep -qF 'commander-15-1-0' "$ws/summary.md" \
   && grep -qF '0243-agent-authored-changelog-context' "$ws/summary.md" \
   && grep -qF 'dependency-upgrade/SKILL.md' "$ws/summary.md" \
   && pass "a Renovate dependency PR without a fragment fails with the handoff title" \
-  || fail "Renovate missing-fragment case rc=$rc out=$(printf '%s' "$out" | head -c 400)"
+  || fail "Renovate missing-fragment case rc=$rc out=$(head -c 400 "$tmp/missing.out")"
 
 ws="$tmp/human"
 make_repo "$ws"
@@ -107,9 +109,10 @@ set +e
 out="$(run_step "$ws" BASE_SHA="$base" HEAD_SHA="$head" PR_AUTHOR='pyousefi' 2>"$tmp/human.err")"
 rc=$?
 set -e
-[ "$rc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '::error' \
+printf '%s\n' "$out" >"$tmp/human.out"
+[ "$rc" -eq 0 ] && ! grep -q '::error' "$tmp/human.out" \
   && pass "a non-Renovate author does not get the handoff failure" \
-  || fail "human author case rc=$rc out=$(printf '%s' "$out" | head -c 400)"
+  || fail "human author case rc=$rc out=$(head -c 400 "$tmp/human.out")"
 
 ws="$tmp/valid"
 make_repo "$ws"
@@ -131,9 +134,10 @@ set +e
 out="$(run_step "$ws" BASE_SHA="$base" HEAD_SHA="$head" PR_AUTHOR='renovate[bot]' 2>"$tmp/valid.err")"
 rc=$?
 set -e
-[ "$rc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '::error' \
+printf '%s\n' "$out" >"$tmp/valid.out"
+[ "$rc" -eq 0 ] && ! grep -q '::error' "$tmp/valid.out" \
   && pass "a valid added fragment clears the handoff" \
-  || fail "valid fragment case rc=$rc out=$(printf '%s' "$out" | head -c 400)"
+  || fail "valid fragment case rc=$rc out=$(head -c 400 "$tmp/valid.out")"
 
 ws="$tmp/broken"
 make_repo "$ws"
@@ -141,9 +145,10 @@ set +e
 out="$(run_step "$ws" BASE_SHA='' HEAD_SHA='' PR_AUTHOR='renovate[bot]' 2>"$tmp/broken.err")"
 rc=$?
 set -e
-[ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qF 'not a pull request' \
+printf '%s\n' "$out" >"$tmp/broken.out"
+[ "$rc" -eq 0 ] && grep -qF 'not a pull request' "$tmp/broken.out" \
   && pass "a missing pull-request range skips the handoff" \
-  || fail "missing range case rc=$rc out=$(printf '%s' "$out" | head -c 400)"
+  || fail "missing range case rc=$rc out=$(head -c 400 "$tmp/broken.out")"
 
 ws="$tmp/badsha"
 make_repo "$ws"
@@ -151,9 +156,11 @@ set +e
 out="$(run_step "$ws" BASE_SHA='not-a-sha' HEAD_SHA='HEAD' PR_AUTHOR='renovate[bot]' 2>"$tmp/badsha.err")"
 rc=$?
 set -e
-[ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qF '::warning title=needs-changelog-context::handoff check could not run' \
-  && ! printf '%s\n' "$out" | grep -q '::error' \
+printf '%s\n' "$out" >"$tmp/badsha.out"
+[ "$rc" -eq 0 ] \
+  && grep -qF '::warning title=needs-changelog-context::handoff check could not run' "$tmp/badsha.out" \
+  && ! grep -q '::error' "$tmp/badsha.out" \
   && pass "an operational failure is not reported as a missing fragment" \
-  || fail "bad sha case rc=$rc out=$(printf '%s' "$out" | head -c 400)"
+  || fail "bad sha case rc=$rc out=$(head -c 400 "$tmp/badsha.out")"
 
 [ "$fails" -eq 0 ] && echo "ok - needs-changelog-context" || { echo "$fails test(s) failed."; exit 1; }
