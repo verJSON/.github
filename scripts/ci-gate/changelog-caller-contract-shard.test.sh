@@ -410,6 +410,458 @@ else
   fail "the caller contract rejected shard 5 without the shard diagnostic"
 fi
 
+# Every generator call in the caller contract is must-succeed or expected-refusal.
+# A must-succeed fixture redirect that ignores status leaves an empty file, and a
+# later rejection of that file still reads green because `fail` is suspended
+# between cases (#1983). write_generated_fixture / read_generated_fixture exit 1,
+# the same abort the nested-only fixtures used (#1974).
+cat >"$tmp/fixture-generator-inventory.py" <<'PY'
+import re
+import sys
+from collections import deque
+
+raw = open(sys.argv[1], encoding="utf-8").read().splitlines()
+CALLS = (
+    ("write", re.compile(r"\bwrite_generated_fixture\b(?!\()")),
+    ("read", re.compile(r"\bread_generated_fixture\b(?!\()")),
+    ("capture", re.compile(r"\bcapture_mode\b(?!\()")),
+    ("refusal", re.compile(r"\bexpect_generator_refusal\b(?!\()")),
+    ("raw", re.compile(r"\bbash \"\$gen\"")),
+    ("direct", re.compile(r"(?:^|\bif\s+)\"\$gen\"")),
+)
+
+
+def strip_comment(line):
+    out = []
+    quote = None
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            out.append(char)
+            if char == quote and (i == 0 or line[i - 1] != "\\"):
+                quote = None
+            i += 1
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(char)
+        elif char == "#":
+            break
+        else:
+            out.append(char)
+        i += 1
+    return "".join(out).rstrip()
+
+
+def heredoc_delimiters(line):
+    """Real heredoc openers. `<<` inside quotes is fixture text, not a body."""
+    delims = []
+    quote = None
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if char == quote and line[i - 1] != "\\":
+                quote = None
+            i += 1
+            continue
+        if char == "$" and i + 1 < len(line) and line[i + 1] == "'":
+            quote = "'"
+            i += 2
+            continue
+        if char in "'\"":
+            quote = char
+            i += 1
+            continue
+        if char == "#":
+            break
+        if (
+            char == "<"
+            and i + 1 < len(line)
+            and line[i + 1] == "<"
+            and (i == 0 or line[i - 1] != "<")
+            and not (i + 2 < len(line) and line[i + 2] == "<")
+        ):
+            j = i + 2
+            if j < len(line) and line[j] == "-":
+                j += 1
+            while j < len(line) and line[j] == " ":
+                j += 1
+            if j < len(line) and line[j] in "'\"":
+                end = line.find(line[j], j + 1)
+                if end == -1:
+                    break
+                delims.append(line[j + 1:end])
+                i = end + 1
+                continue
+            end = j
+            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
+                end += 1
+            if end > j:
+                delims.append(line[j:end])
+            i = max(end, i + 2)
+            continue
+        i += 1
+    return delims
+
+
+def brace_delta(line):
+    delta = 0
+    quote = None
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if char == quote and line[i - 1] != "\\":
+                quote = None
+            i += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "{":
+            delta += 1
+        elif char == "}":
+            delta -= 1
+        i += 1
+    return delta
+
+
+code = []
+pending = deque()
+for line in raw:
+    if pending:
+        if line.strip() == pending[0]:
+            pending.popleft()
+        code.append("")
+        continue
+    stripped = strip_comment(line)
+    for delim in heredoc_delimiters(line):
+        pending.append(delim)
+    code.append(stripped)
+if pending:
+    raise SystemExit("unclosed heredoc while inventorying generator calls: " + pending[0])
+
+spans = {}
+index = 0
+while index < len(code):
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{$", code[index])
+    if not match:
+        index += 1
+        continue
+    name = match.group(1)
+    depth = 0
+    start = index
+    while index < len(code):
+        depth += brace_delta(code[index])
+        index += 1
+        if depth == 0:
+            break
+    else:
+        raise SystemExit(f"function {name} at line {start + 1} never closes")
+    spans[name] = (start, index)
+
+for name in (
+    "capture_mode",
+    "expect_generator_refusal",
+    "write_generated_fixture",
+    "read_generated_fixture",
+):
+    if name not in spans:
+        raise SystemExit(f"missing {name}()")
+    start, end = spans[name]
+    if end - start > 80:
+        raise SystemExit(f"{name}() span lines {start + 1}-{end} is implausibly large")
+
+bodies = {name: "\n".join(raw[start:end]) for name, (start, end) in spans.items()}
+write_body = bodies["write_generated_fixture"]
+read_body = bodies["read_generated_fixture"]
+if 'bash "$gen" "$@" >"$dest" || status=$?' not in write_body or not re.search(r"(?m)^[ ]+exit 1$", write_body):
+    raise SystemExit("write_generated_fixture must run the generator and exit 1 when it fails")
+if re.search(r"(?m)^\s*fail\s", write_body):
+    raise SystemExit("write_generated_fixture uses fail, which is suspended between cases")
+if 'out="$(bash "$gen" "$@" 2>"$err")" || status=$?' not in read_body or not re.search(r"(?m)^[ ]+exit 1$", read_body):
+    raise SystemExit("read_generated_fixture must take the generator status and exit 1 on failure")
+if re.search(r"(?m)^\s*fail\s", read_body):
+    raise SystemExit("read_generated_fixture uses fail, which is suspended between cases")
+refusal_body = bodies["expect_generator_refusal"]
+if "exit 1" in refusal_body or '|| status=$?' not in refusal_body:
+    raise SystemExit("expect_generator_refusal must keep asserting the refusal, not abort the shard")
+if '[ "$mode_capture_failures" -eq 0 ] || exit 1' not in "\n".join(raw):
+    raise SystemExit("capture_mode failures must still abort the shard")
+
+inside = set()
+for name in (
+    "capture_mode",
+    "expect_generator_refusal",
+    "write_generated_fixture",
+    "read_generated_fixture",
+):
+    start, end = spans[name]
+    inside.update(range(start, end))
+
+logical = []
+index = 0
+while index < len(code):
+    if index in inside or not code[index].strip():
+        index += 1
+        continue
+    start = index
+    parts = []
+    while index < len(code):
+        piece = code[index]
+        if piece.endswith("\\"):
+            parts.append(piece[:-1].rstrip())
+            index += 1
+            continue
+        parts.append(piece)
+        index += 1
+        break
+    text = " ".join(part for part in parts if part.strip())
+    if text.strip():
+        logical.append((start, index - 1, text))
+
+
+def next_code(end):
+    cursor = end + 1
+    while cursor < len(code):
+        if code[cursor].strip():
+            return code[cursor].strip()
+        cursor += 1
+    return ""
+
+
+def then_action(text, following):
+    match = re.search(r"\bthen\b(.*)$", text)
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+    return following
+
+
+def fixture_redirect(text):
+    for match in re.finditer(r"(?<![0-9&|])>(?!&|>)\s*(\S+)", text):
+        if match.group(1) != "/dev/null":
+            return True
+    return False
+
+
+def classify(kind, text, following):
+    if kind in ("write", "read", "capture"):
+        return "must-succeed"
+    if kind == "refusal":
+        return "expected-refusal"
+    if "|| :" in text:
+        return "expected-refusal"
+    if "refusal_status" in text:
+        return "expected-refusal"
+    if re.search(r"\bif\s+!", text):
+        return "must-succeed"
+    if re.search(r"\bif\s+(?:bash \"\$gen\"|\"\$gen\")", text):
+        action = then_action(text, following)
+        if action.startswith("fail"):
+            return "expected-refusal"
+        if action.startswith("pass"):
+            return "must-succeed"
+        return None
+    if "||" in text:
+        return "must-succeed"
+    return None
+
+
+def if_aborts(start):
+    """A must-succeed if must exit the shard; fail() is suspended between cases."""
+    depth = 0
+    saw_exit = False
+    for index in range(start, len(code)):
+        line = code[index].strip()
+        if not line:
+            continue
+        if re.match(r"if\b", line):
+            depth += 1
+        if re.search(r"\bexit 1\b", line):
+            saw_exit = True
+        if re.match(r"fi\b", line):
+            depth -= 1
+            if depth == 0:
+                return saw_exit
+    return False
+
+
+errors = []
+rows = []
+for start, end, text in logical:
+    found = []
+    for kind, pattern in CALLS:
+        for match in pattern.finditer(text):
+            found.append((match.start(), kind))
+    if not found:
+        continue
+    following = next_code(end)
+    for _, kind in sorted(found):
+        if kind == "raw" and fixture_redirect(text) and "||" not in text and not re.search(r"\bif\s+", text):
+            errors.append(
+                "unchecked must-succeed generator redirect at line "
+                f"{start + 1}: {' '.join(text.split())[:160]}"
+            )
+            continue
+        if kind == "raw" and '$(bash "$gen"' in text and "||" not in text:
+            errors.append(
+                "unchecked must-succeed generator capture at line "
+                f"{start + 1}: {' '.join(text.split())[:160]}"
+            )
+            continue
+        if (
+            kind == "raw"
+            and re.search(r"\bif\s+(?:bash \"\$gen\"|\"\$gen\")", text)
+            and not re.search(r"\bif\s+!", text)
+            and then_action(text, following).startswith("pass")
+            and not if_aborts(start)
+        ):
+            errors.append(
+                "must-succeed generator call lacks a status check at line "
+                f"{start + 1}: {' '.join(text.split())[:160]}"
+            )
+            continue
+        classified = classify(kind, text, following)
+        if classified is None:
+            errors.append(
+                "unclassified generator call at line "
+                f"{start + 1}: {' '.join(text.split())[:160]}"
+            )
+            continue
+        rows.append((classified, start + 1, kind, " ".join(text.split())[:120]))
+
+if errors:
+    raise SystemExit("\n".join(errors))
+must = sum(1 for row in rows if row[0] == "must-succeed")
+refused = sum(1 for row in rows if row[0] == "expected-refusal")
+if must < 1 or refused < 1:
+    raise SystemExit(f"inventory is missing a class: must-succeed={must} expected-refusal={refused}")
+for classified, line, kind, text in rows:
+    print(f"{classified}\t{line}\t{kind}\t{text}")
+print(f"inventory: {len(rows)} calls, {must} must-succeed, {refused} expected-refusal")
+PY
+if inventory="$(python3 "$tmp/fixture-generator-inventory.py" "$caller" 2>"$tmp/inventory.err")"; then
+  summary="$(tail -n 1 <<<"$inventory")"
+  unclassified="$(grep -vE '^(must-succeed|expected-refusal)	' <<<"$inventory" | grep -v '^inventory: ' || true)"
+  if [ -n "$unclassified" ] || ! grep -q '^inventory: ' <<<"$summary"; then
+    fail "fixture generator inventory is not a complete classification: $summary"
+  else
+    pass "$summary (#1983)"
+  fi
+else
+  fail "fixture generator inventory rejected the caller contract: $(cat "$tmp/inventory.err")"
+fi
+cp "$caller" "$tmp/unchecked-caller.sh"
+printf '\nbash "$gen" release-node "$sha" >"$tmproot/unchecked-fixture.yml"\n' >>"$tmp/unchecked-caller.sh"
+if python3 "$tmp/fixture-generator-inventory.py" "$tmp/unchecked-caller.sh" >"$tmp/unchecked.out" 2>"$tmp/unchecked.err"; then
+  fail "a new must-succeed generator redirect without a status check was accepted"
+elif grep -q 'unchecked must-succeed generator redirect' "$tmp/unchecked.err"; then
+  pass "a new must-succeed generator redirect without a status check is rejected (#1983)"
+else
+  fail "an unchecked generator redirect failed without the status-check diagnostic: $(cat "$tmp/unchecked.err")"
+fi
+cp "$caller" "$tmp/added-refusal.sh"
+printf '\n%s\n' \
+  'expect_generator_refusal '\''new reason'\'' "passes" "accepted" workflow not-a-sha' \
+  >>"$tmp/added-refusal.sh"
+if python3 "$tmp/fixture-generator-inventory.py" "$tmp/added-refusal.sh" >"$tmp/added-refusal.out" 2>"$tmp/added-refusal.err"; then
+  pass "an added expected-refusal probe stays classified as a refusal (#1983)"
+else
+  fail "an added expected-refusal probe was rejected: $(cat "$tmp/added-refusal.err")"
+fi
+
+# Sampled must-succeed site: the default adopter's CODEOWNERS write. A case
+# shard builds that adopter before it selects a case, so every shard must abort
+# before a rejection can read the empty file as green (#1983). Bash presents
+# both a command substitution and a script redirect as a pipe, so stdout type
+# cannot tell them apart. The preamble captures codeowners once; the next
+# codeowners invocation is that write. Other modes stay non-empty and silent
+# so the shard reaches the write, and the retired-mode probe still refuses.
+cat >"$tmp/fail-codeowners.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+mode=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) continue ;;
+  esac
+  mode="$arg"
+  break
+done
+if [ "$mode" = codeowners ]; then
+  state="${FIXTURE_GENERATOR_STATE:?}"
+  mkdir -p "$state"
+  count=0
+  if [ -f "$state/codeowners" ]; then
+    count="$(cat "$state/codeowners")"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$state/codeowners"
+  if [ "$count" -ge 2 ]; then
+    echo "mutated fixture generator failed" >&2
+    exit 7
+  fi
+fi
+if [ "$mode" = renovate-attribution ] || [ -z "$mode" ]; then
+  echo "gen-changelog-caller.sh: unknown mode; the usage line lists every mode" >&2
+  exit 2
+fi
+if [ "$mode" = contract-test ]; then
+  printf '%s\n' 'EXPECTED_RELEASE_NODE_VERSION="22"'
+  exit 0
+fi
+printf '%s\n' fixture
+exit 0
+EOF
+chmod +x "$tmp/fail-codeowners.sh"
+if python3 - "$caller" "$tmp/mutated-caller.sh" "$repo_root" "$tmp/fail-codeowners.sh" <<'PY'
+import re
+import sys
+
+source, target, root, wrapper = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+assignment = re.compile(r'(?m)^repo_root="\$\(cd "\$here/\.\./\.\." && pwd\)"$')
+if len(assignment.findall(text)) != 1:
+    raise SystemExit(
+        f"expected one repo_root assignment, found {len(assignment.findall(text))}"
+    )
+text = assignment.sub("repo_root=" + repr(root), text, count=1)
+generator = 'gen="$repo_root/scripts/gen-changelog-caller.sh"'
+if text.count(generator) != 1:
+    raise SystemExit(f"expected one gen assignment, found {text.count(generator)}")
+text = text.replace(generator, "gen=" + repr(wrapper), 1)
+open(target, "w", encoding="utf-8").write(text)
+PY
+then
+  fixture_abort_pids=()
+  for fixture_abort_shard in 1 2 3 4; do
+    FIXTURE_GENERATOR_STATE="$tmp/state-$fixture_abort_shard" \
+      CHANGELOG_CALLER_CONTRACT_SHARD="$fixture_abort_shard" \
+      timeout 30 bash "$tmp/mutated-caller.sh" \
+      >"$tmp/shard-$fixture_abort_shard.out" 2>"$tmp/shard-$fixture_abort_shard.err" &
+    fixture_abort_pids+=("$!")
+  done
+  fixture_abort_shard=1
+  for fixture_abort_pid in "${fixture_abort_pids[@]}"; do
+    fixture_abort_status=0
+    wait "$fixture_abort_pid" || fixture_abort_status=$?
+    fixture_abort_out="$tmp/shard-$fixture_abort_shard.out"
+    fixture_abort_err="$tmp/shard-$fixture_abort_shard.err"
+    if [ "$fixture_abort_status" -ne 1 ] \
+      || ! grep -q 'FAIL - generator failed writing .*\.github/CODEOWNERS (exit 7)' "$fixture_abort_out" \
+      || grep -q 'running caller contract case' "$fixture_abort_err" \
+      || grep -q 'ok   - emitted suite rejects' "$fixture_abort_out" \
+      || grep -q 'All tests passed' "$fixture_abort_out"; then
+      fail "shard $fixture_abort_shard did not abort on the failing CODEOWNERS generator (exit $fixture_abort_status): $(tail -n 3 "$fixture_abort_out") $(tail -n 3 "$fixture_abort_err")"
+    else
+      pass "shard $fixture_abort_shard aborts when CODEOWNERS generation fails (#1983)"
+    fi
+    fixture_abort_shard=$((fixture_abort_shard + 1))
+  done
+else
+  fail "could not point the mutated caller at the failing generator"
+fi
 
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."
