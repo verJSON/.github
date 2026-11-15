@@ -841,6 +841,33 @@ ${restore_step}
             echo "::error::scripts/release-build.sh produced no files in release-artifacts/"
             exit 1
           fi
+      - name: Record digests for every produced artifact
+        shell: bash
+        env:
+          RUN_ID: \${{ github.run_id }}
+          RUN_ATTEMPT: \${{ github.run_attempt }}
+          JOB_INDEX: \${{ strategy.job-index }}
+        run: |
+          set -euo pipefail
+          [[ "\$RUN_ID" =~ ^[123456789][0123456789]*$ ]]
+          [[ "\$RUN_ATTEMPT" =~ ^[123456789][0123456789]*$ ]]
+          [[ "\$JOB_INDEX" =~ ^[0123456789]+$ ]]
+          mkdir -p release-artifact-digests
+          {
+            printf 'run_id=%s\n' "\$RUN_ID"
+            printf 'run_attempt=%s\n' "\$RUN_ATTEMPT"
+            printf 'job_index=%s\n' "\$JOB_INDEX"
+            printf '%s\n' '---'
+            # path<TAB>sha256; relative paths under release-artifacts/
+            find release-artifacts -type f -print0 \
+              | sort -z \
+              | while IFS= read -r -d '' path; do
+                  rel="\${path#release-artifacts/}"
+                  digest="\$(sha256sum -- "\$path" | cut -d' ' -f1)"
+                  [[ "\$digest" =~ ^[0123456789abcdef]{64}$ ]]
+                  printf '%s\t%s\n' "\$rel" "\$digest"
+                done
+          } >"release-artifact-digests/digests-\${JOB_INDEX}.tsv"
       - name: Upload this runner's release artifacts
         uses: ${release_upload_artifact}
         with:
@@ -848,10 +875,17 @@ ${restore_step}
           path: release-artifacts/*
           if-no-files-found: error
           retention-days: 1
+      - name: Upload this runner's release artifact digests
+        uses: ${release_upload_artifact}
+        with:
+          name: release-artifact-digests-\${{ strategy.job-index }}
+          path: release-artifact-digests/*
+          if-no-files-found: error
+          retention-days: 1
       - name: Remove restored dependencies and build outputs
         if: always()
         shell: bash
-        run: rm -rf node_modules release-artifacts
+        run: rm -rf node_modules release-artifacts release-artifact-digests
 EOF
 }
 
@@ -939,10 +973,59 @@ release_artifact_publish_job() {
           pattern: release-artifacts-*
           path: release-artifacts
           merge-multiple: true
-      - name: Require at least one produced artifact
+      - name: Download every runner's release artifact digests
+        uses: ${release_download_artifact}
+        with:
+          pattern: release-artifact-digests-*
+          path: release-artifact-digests
+          merge-multiple: true
+      - name: Re-verify each downloaded artifact against the build digests
+        env:
+          RUN_ID: \${{ github.run_id }}
+          RUN_ATTEMPT: \${{ github.run_attempt }}
         run: |
+          set -euo pipefail
+          [[ "\$RUN_ID" =~ ^[123456789][0123456789]*$ ]]
+          [[ "\$RUN_ATTEMPT" =~ ^[123456789][0123456789]*$ ]]
           [ -n "\$(find release-artifacts -type f -print -quit)" ] \\
             || { echo "::error::no release artifacts were produced by the build matrix"; exit 1; }
+          [ -n "\$(find release-artifact-digests -type f -name 'digests-*.tsv' -print -quit)" ] \\
+            || { echo "::error::no build-leg digest manifests were downloaded"; exit 1; }
+          expected="\$(mktemp)"
+          trap 'rm -f -- "\$expected"' EXIT
+          : >"\$expected"
+          for manifest in release-artifact-digests/digests-*.tsv; do
+            [ -f "\$manifest" ] || continue
+            header="\$(sed -n '1,3p' "\$manifest")"
+            printf '%s\n' "\$header" | grep -qxF "run_id=\$RUN_ID" \\
+              || { echo "::error::digest manifest \$manifest is not bound to run \$RUN_ID"; exit 1; }
+            printf '%s\n' "\$header" | grep -qxF "run_attempt=\$RUN_ATTEMPT" \\
+              || { echo "::error::digest manifest \$manifest is not bound to attempt \$RUN_ATTEMPT"; exit 1; }
+            printf '%s\n' "\$header" | grep -qE '^job_index=[0123456789]+$' \\
+              || { echo "::error::digest manifest \$manifest lacks a numeric job_index"; exit 1; }
+            # Body after the --- separator.
+            awk 'found { print } /^---$/ { found=1 }' "\$manifest" >>"\$expected"
+          done
+          [ -s "\$expected" ] \\
+            || { echo "::error::build-leg digest manifests carried no artifact digests"; exit 1; }
+          while IFS=\$'\t' read -r rel want; do
+            [ -n "\$rel" ] && [ -n "\$want" ] \\
+              || { echo "::error::digest manifest row is malformed"; exit 1; }
+            [[ "\$want" =~ ^[0123456789abcdef]{64}$ ]] \\
+              || { echo "::error::digest for \$rel is not a 64-hex SHA-256"; exit 1; }
+            path="release-artifacts/\$rel"
+            [ -f "\$path" ] \\
+              || { echo "::error::build recorded digest for missing artifact \$rel"; exit 1; }
+            got="\$(sha256sum -- "\$path" | cut -d' ' -f1)"
+            [ "\$got" = "\$want" ] \\
+              || { echo "::error::artifact \$rel digest mismatch: expected \$want got \$got"; exit 1; }
+          done <"\$expected"
+          # Every downloaded file must appear in the digest inventory.
+          while IFS= read -r -d '' path; do
+            rel="\${path#release-artifacts/}"
+            grep -qxF "\$rel" <(cut -f1 "\$expected") \\
+              || { echo "::error::downloaded artifact \$rel has no build-leg digest"; exit 1; }
+          done < <(find release-artifacts -type f -print0 | sort -z)
       - name: Publish the snapshot release and artifacts
         env:
           GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
