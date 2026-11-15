@@ -2092,7 +2092,7 @@ jobs:
             }
             accepted_status() {
               case "$1" in
-                [1-5][0-9][0-9]|none) printf '%s' "$1" ;;
+                [12345][0123456789][0123456789]|none) printf '%s' "$1" ;;
                 *) printf 'none' ;;
               esac
             }
