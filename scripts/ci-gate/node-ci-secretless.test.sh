@@ -335,12 +335,16 @@ python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" "$root/scripts/gen-
 || fail "a temporary-root Node CI sandbox omits /etc/alternatives (#1782)"
 import importlib.util
 import sys
+from pathlib import Path
 import yaml
 
 spec = importlib.util.spec_from_file_location("gen_node_ci_protected", sys.argv[3])
 generator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(generator)
 protected_runtime = generator.protected_candidate_helper_body()
+compatibility_runtime = (
+    Path(sys.argv[3]).resolve().parent / "ci_secretless_compatibility_lanes.py"
+).read_text(encoding="utf-8")
 expected = {
     "Rebuild exact approved lifecycle packages without credentials",
     "Run exact credentialless consumer script plan",
@@ -354,6 +358,8 @@ for path in sys.argv[1:3]:
         run = step.get("run", "")
         if path.endswith("node-ci-protected.yml") and name == "Run exact credentialless consumer script plan":
             run = protected_runtime
+        if name == "Run runtime-resolved compatibility lanes without credentials":
+            run = compatibility_runtime
         if '"--tmpfs", "/",' in run:
             sandboxed[name] = run
     assert expected <= set(sandboxed), (path, sorted(sandboxed))

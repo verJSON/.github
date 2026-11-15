@@ -16,6 +16,8 @@ WORKFLOWS = (
 )
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
+COMPATIBILITY_LANES = ROOT / "scripts/ci_secretless_compatibility_lanes.py"
+COMPATIBILITY_STEP = "Run runtime-resolved compatibility lanes without credentials"
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 PYTHON = re.compile(r"(?:^|\s)(?:/usr/bin/)?python(?:3(?:\.\d+)?)?(?:\s|$)")
 
@@ -185,6 +187,40 @@ class NodeCiPythonHeredocsTest(unittest.TestCase):
             'python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan &',
             candidate["run"],
         )
+
+    def test_compatibility_lanes_execute_the_pinned_helper(self):
+        source = COMPATIBILITY_LANES.read_text(encoding="utf-8")
+        compile(source, str(COMPATIBILITY_LANES), "exec")
+        tree = ast.parse(source)
+        self.assertTrue(
+            any(
+                isinstance(node, ast.FunctionDef) and node.name == "public_cache_bind_targets"
+                for node in tree.body
+            )
+        )
+        for workflow in WORKFLOWS:
+            with self.subTest(workflow=workflow.name):
+                document = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+                step = next(
+                    item
+                    for item in document["jobs"]["build-test"]["steps"]
+                    if item.get("name") == COMPATIBILITY_STEP
+                )
+                self.assertEqual(
+                    "${{ fromJSON(toJSON(job)).workflow_sha }}",
+                    step["env"]["JOB_WORKFLOW_SHA"],
+                )
+                self.assertIn(
+                    "${JOB_WORKFLOW_SHA}/scripts/ci_secretless_compatibility_lanes.py",
+                    step["run"],
+                )
+                self.assertIn(
+                    'helper="$RUNNER_TEMP/ci_secretless_compatibility_lanes.py"',
+                    step["run"],
+                )
+                self.assertIn("sha256sum -- ", step["run"])
+                self.assertIn('exec /usr/bin/python3 -I "$helper" run', step["run"])
+                self.assertNotIn("<<'PY'", step["run"])
 
 
 if __name__ == "__main__":

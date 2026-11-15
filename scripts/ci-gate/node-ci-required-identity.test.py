@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "c4d10ad74b508ef772f2bdb935db405ed59652c14bf0ca239d273c34fc815f7b"
+LEGACY_SHA256 = "7ba14090a1b5befbfab9ac07889de4c03ceb80fe08f5ee40e2689b45c928ec19"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -124,7 +124,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             source_error = StringIO()
             with redirect_stderr(source_error), self.assertRaises(SystemExit):
                 generator.main(["--check"])
-            self.assertIn("source workflow exceeds 490000 UTF-8 bytes", source_error.getvalue())
+            self.assertIn("source workflow exceeds 416000 UTF-8 bytes", source_error.getvalue())
             self.assertEqual(sentinel, target.read_bytes())
             self.assertEqual(before_source_guard, target.stat().st_mtime_ns)
 
@@ -134,7 +134,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             output_error = StringIO()
             with redirect_stderr(output_error), self.assertRaises(SystemExit):
                 generator.main(["--check"])
-            self.assertIn("generated protected workflow exceeds 490000 UTF-8 bytes", output_error.getvalue())
+            self.assertIn("generated protected workflow exceeds 416000 UTF-8 bytes", output_error.getvalue())
             self.assertEqual(sentinel, target.read_bytes())
             self.assertEqual(before_output_guard, target.stat().st_mtime_ns)
 

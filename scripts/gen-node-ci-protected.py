@@ -10,8 +10,8 @@ SOURCE = ROOT / ".github/workflows/node-ci.yml"
 TARGET = ROOT / ".github/workflows/node-ci-protected.yml"
 # Growth tripwires, not platform limits: each sits a few KiB above the largest
 # reviewed source or output, so crossing one is a review point (ADR 0238).
-MAX_SOURCE_BYTES = 490_000
-MAX_OUTPUT_BYTES = 490_000
+MAX_SOURCE_BYTES = 416_000
+MAX_OUTPUT_BYTES = 416_000
 
 CREDENTIAL_ENV_KEYS = (
     "GH_TOKEN",
