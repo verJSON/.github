@@ -136,3 +136,19 @@ verjson-cli-projects#159 (merge `35fe7a9b`) put the generated v4.2.0 caller on i
 - **verify-run:** run 39730529407 on verjson-cli-projects#142 head `07270146…` (above
   the snapshot's max run id) succeeded; "verified: fresh exact-head required-workflow
   run and strict admission check".
+
+## 2026-11-15 amendment — v5.0.0 pin and Node 26.13.1 floor (#2065)
+
+`config/cli-projects-required-node-ci.json` now pins both
+`consumer_node_ci_sha` and `protected_node_ci_sha` to the v5.0.0 contract
+`d112b30f0d2bd448a28a57f3ff44df7877dc0a8c`. `node_versions` is
+`["26", "26.13.1"]`. The consumer caller generator takes its
+`node-version` from the configured floor instead of a hard-coded
+`24.19.0`. The admitted consumer caller digest is therefore
+`bfe8d6cfb6b6db716e50818e7a362bc77c16b8c7f0e8fb3da5f0872cb9e376b9`.
+
+Ruleset 21830367 (and any live required-workflow actor) still needs a
+human rotation onto the regenerated
+`cli-projects-package-surface-required.yml` before adopters can merge
+with the new pin. This amendment records the repository-side contract
+change only.

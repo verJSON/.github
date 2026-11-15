@@ -38,7 +38,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             "files": ["src", "templates", "README.md"],
             "publishConfig": {"registry": "https://npm.pkg.github.com"},
             "scripts": {"build": "bash scripts/check-sources.sh"},
-            "engines": {"node": ">=24.19.0"},
+            "engines": {"node": ">=26.13.1"},
         }), encoding="utf-8")
         release = """on:\n  workflow_dispatch:\njobs:\n  release:\n    uses: Verjson/.github/.github/workflows/node-release.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"""
         ci = """on:\n  pull_request:\njobs:\n  ci:\n    uses: Verjson/.github/.github/workflows/node-ci.yml@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"""
@@ -114,9 +114,9 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         self.assertEqual(MODULE.required_node_engine(), f">={floor_lane}")
 
     def test_required_workflow_uses_current_canonical_node_ci_pin(self):
-        # v4.2.0: the protected lanes move with the consumer caller in one rotation and
+        # v5.0.0: the protected lanes move with the consumer caller in one rotation and
         # pick up ADR 0234's hosted-lane guard and spelled-out digit classes.
-        expected_sha = "a89fe1f090545c15cdd6987f20119327206e2c59"
+        expected_sha = "d112b30f0d2bd448a28a57f3ff44df7877dc0a8c"
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
         self.assertEqual(config["protected_node_ci_sha"], expected_sha)
 
@@ -130,7 +130,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertEqual(workflow["jobs"][job]["uses"], expected_uses)
 
-    def test_admitted_consumer_caller_is_the_v4_2_0_generated_image(self):
+    def test_admitted_consumer_caller_is_the_v5_0_0_generated_image(self):
         # The consumer declares its contract release, and contract-version.py requires
         # every Verjson/.github pin in it to name that release, so the admitted caller
         # must track the release the consumer adopts (ADR 0212, 2026-10-20). Moving it
@@ -140,11 +140,11 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             config, "config/cli-projects-required-node-ci.json"
         )
         self.assertEqual(
-            config["consumer_node_ci_sha"], "a89fe1f090545c15cdd6987f20119327206e2c59"
+            config["consumer_node_ci_sha"], "d112b30f0d2bd448a28a57f3ff44df7877dc0a8c"
         )
         self.assertEqual(
             hashlib.sha256(consumer.encode()).hexdigest(),
-            "d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117",
+            "bfe8d6cfb6b6db716e50818e7a362bc77c16b8c7f0e8fb3da5f0872cb9e376b9",
         )
         # Retired by the second rotation after #159 landed the generated caller (ADR 0212).
         self.assertIsNone(config["rollout_legacy_consumer_workflow_sha256"])
@@ -300,9 +300,9 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         # the rotation verifier may accept through the legacy digest.
         for pin, digest in (
             ("1c7659b77e1c97743cdcfc0a1603141bfe25320d",
-             "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886"),
+             "ba10b19f3fd1e5b9bf8a5b4e6a51534fc75581ac8cd11ede241a25731753157c"),
             ("4a08c756547ccaf8977eda692e14eff56fddaf15",
-             "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c"),
+             "eeb57d42e6305f7574c9cd8d83fda9c54d1f2a9d6b8ff1b54dbec79f08b4940b"),
         ):
             with self.subTest(pin=pin):
                 stale = GENERATOR.render_consumer({**config, "consumer_node_ci_sha": pin}, path)

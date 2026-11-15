@@ -30,7 +30,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          CONSUMER_WORKFLOW_SHA256: 'd23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117'
+          CONSUMER_WORKFLOW_SHA256: 'bfe8d6cfb6b6db716e50818e7a362bc77c16b8c7f0e8fb3da5f0872cb9e376b9'
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -74,7 +74,7 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
-    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@d112b30f0d2bd448a28a57f3ff44df7877dc0a8c
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
@@ -97,11 +97,11 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
-    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@d112b30f0d2bd448a28a57f3ff44df7877dc0a8c
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
-      node-version: '24.19.0'
+      node-version: '26.13.1'
       secretless-pr: true
       approved-internal-packages: |-
         @verjson/eslint-config
