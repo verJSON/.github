@@ -2696,7 +2696,8 @@ RELAY_HEAD_REFUSAL = (
 # The relay backlog, frozen (round-4 review of #1827): the relayed jobs
 # #1831 moves, as they stood when ADR 0235 began scanning relays (44 keys).
 # actionlint.yml's workflow_call job left on 2026-11-15 (Part of #1831).
-# The keys that remain are the
+# container-candidate.yml's three workflow_call jobs left on 2026-11-15
+# (Part of #1831). The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
@@ -2712,9 +2713,6 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),
     ('changelog-validate.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-candidate.yml [workflow_call]', 'prepare'): frozenset({'relay-head'}),
-    ('container-candidate.yml [workflow_call]', 'pull-request-build'): frozenset(),
-    ('container-candidate.yml [workflow_call]', 'skip-private-node-build'): frozenset(),
     ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
         frozenset({'relay-head', 'runtime-checkout'}),
     ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),

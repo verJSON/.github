@@ -3023,14 +3023,13 @@ for label, dockerfile in (
 # change, so a removed key cannot quietly return. The five pull_request keys
 # frozen alongside it have already left (finding 6). actionlint.yml's
 # workflow_call job left on 2026-11-15 (Part of #1831).
+# container-candidate.yml's three workflow_call jobs left on 2026-11-15
+# (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),
     ('changelog-validate.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-candidate.yml [workflow_call]', 'prepare'): frozenset({'relay-head'}),
-    ('container-candidate.yml [workflow_call]', 'pull-request-build'): frozenset(),
-    ('container-candidate.yml [workflow_call]', 'skip-private-node-build'): frozenset(),
     ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
         frozenset({'relay-head', 'runtime-checkout'}),
     ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),
@@ -3899,21 +3898,23 @@ expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "scripts/run.s
                True, "a git show inside a script the job runs is refused too")
 # A standalone workflow_call job checks out its caller's repository, so this
 # rule does not reach it; that exposure is the relay backlog's (#1831).
+# helm-ci.yml / lint-template remains in RELAY_BACKLOG after container-candidate
+# left on 2026-11-15 (Part of #1831).
 CALLER_TREE = {
-    "container-candidate.yml": """
+    "helm-ci.yml": """
         on: workflow_call
         jobs:
-          pull-request-build:
+          lint-template:
             runs-on: [self-hosted, general]
             steps:
               - uses: actions/checkout@v4
               - run: docker build .
     """,
 }
-CALLER_LABEL = ("container-candidate.yml [workflow_call]", "pull-request-build")
+CALLER_LABEL = ("helm-ci.yml [workflow_call]", "lint-template")
 expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 1,
-       ("PENDING: container-candidate.yml [workflow_call]: job 'pull-request-build'",
-        "VIOLATION: container-candidate.yml [public pull_request workflow_call]: job 'pull-request-build'",
+       ("PENDING: helm-ci.yml [workflow_call]: job 'lint-template'",
+        "VIOLATION: helm-ci.yml [public pull_request workflow_call]: job 'lint-template'",
         "scenario digest sha256:"),
        "a generic relay backlog row cannot waive the strict public-call scenario",
        *PENDING_ARGS)

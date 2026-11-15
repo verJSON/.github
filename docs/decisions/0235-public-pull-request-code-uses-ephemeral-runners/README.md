@@ -1298,3 +1298,24 @@ test snapshot, and `public-pr-runner-isolation.pending.tsv` together. The
 other relay rows stay. `release.yml` `verify`'s pending digest is refreshed
 from the checker's report because that row binds this checker; the job is
 unchanged.
+
+## Amendment (2026-11-15, #1831) — container-candidate's three relay jobs leave
+
+**Finding.** `container-candidate.yml`'s three `workflow_call` jobs
+(`prepare`, `pull-request-build`, `skip-private-node-build`) still resolved
+to a persistent runner for a public Verjson repository when the caller event
+was not a public pull request. Two paths remained open: `inputs.runner` could
+supply self-hosted labels on a public call, and the final
+`vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK` chain landed on the
+persistent fallback when the untrusted lane was unset.
+
+**Decision (Part of #1831).** `inputs.runner` is honored only when the
+repository is private or the owner is not Verjson — the same gate
+`node-ci` uses for `runner_labels`. A public-visibility branch selects
+`fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')` ahead of the
+fallback tail, so a public Verjson call never reads `CI_LANE_FALLBACK`.
+Private Verjson targets keep the trusted lane; non-Verjson callers stay on
+hosted. The three keys leave `RELAY_BACKLOG`, the test snapshot, and
+`public-pr-runner-isolation.pending.tsv` together. `hosted-selector-policy.py`
+pins the new canonical expression. `release.yml` `verify`'s pending digest is
+refreshed because that row binds this checker; the job is unchanged.
