@@ -335,12 +335,19 @@ python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" "$root/scripts/gen-
 || fail "a temporary-root Node CI sandbox omits /etc/alternatives (#1782)"
 import importlib.util
 import sys
+from pathlib import Path
 import yaml
 
 spec = importlib.util.spec_from_file_location("gen_node_ci_protected", sys.argv[3])
 generator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(generator)
 protected_runtime = generator.protected_candidate_helper_body()
+compatibility_runtime = (
+    Path(sys.argv[3]).resolve().parent / "ci_secretless_compatibility_lanes.py"
+).read_text(encoding="utf-8")
+rebuild_runtime = (
+    Path(sys.argv[3]).resolve().parent / "ci_secretless_rebuild_packages.py"
+).read_text(encoding="utf-8")
 expected = {
     "Rebuild exact approved lifecycle packages without credentials",
     "Run exact credentialless consumer script plan",
@@ -354,6 +361,10 @@ for path in sys.argv[1:3]:
         run = step.get("run", "")
         if path.endswith("node-ci-protected.yml") and name == "Run exact credentialless consumer script plan":
             run = protected_runtime
+        if name == "Run runtime-resolved compatibility lanes without credentials":
+            run = compatibility_runtime
+        if name == "Rebuild exact approved lifecycle packages without credentials":
+            run = rebuild_runtime
         if '"--tmpfs", "/",' in run:
             sandboxed[name] = run
     assert expected <= set(sandboxed), (path, sorted(sandboxed))
@@ -375,19 +386,23 @@ PY
 # against the selected toolchain's own headers rather than download them. The
 # real-Bubblewrap addon build runs only on the hosted compatibility lane; this
 # keeps both workflows honest on every runner.
-python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" <<'PY' \
+python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" "$root" <<'PY' \
   && pass "the offline lifecycle rebuild points node-gyp at the selected toolchain headers (#1798)" \
   || fail "the offline lifecycle rebuild leaves node-gyp to download headers (#1798)"
 import sys
+from pathlib import Path
 import yaml
 
-for path in sys.argv[1:]:
+program = (Path(sys.argv[3]) / "scripts/ci_secretless_rebuild_packages.py").read_text(encoding="utf-8")
+for path in sys.argv[1:3]:
     steps = yaml.safe_load(open(path, encoding="utf-8"))["jobs"]["build-test"]["steps"]
     run = next(
         step["run"] for step in steps
         if step.get("name") == "Rebuild exact approved lifecycle packages without credentials"
     )
-    lines = [line.strip() for line in run.splitlines() if not line.lstrip().startswith("#")]
+    assert "scripts/ci_secretless_rebuild_packages.py" in run, path
+    assert "sha256sum -- " in run, path
+    lines = [line.strip() for line in program.splitlines() if not line.lstrip().startswith("#")]
     assert '"--unshare-net",' in lines, path
     environment = lines[lines.index("rebuild_process_env = {"):lines.index("**rebuild_env,")]
     assert environment.count('"npm_config_nodedir": toolchain_destination,') == 1, path
