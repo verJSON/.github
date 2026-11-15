@@ -578,18 +578,18 @@ if (process.env.TEST_FAIL === 'true') process.exit(42);
     def test_removing_bound_execution_exposes_swap_load_restore_mutation(self):
         self.prepare()
         needle = (
-            "                run_bound_consumer(\n"
-            "                    sandbox_entries,\n"
-            "                    artifact_bytes,\n"
-            "                    provenance_bytes,\n"
-            "                    script_env,\n"
-            "                )"
+            "                    run_bound_consumer(\n"
+            "                        sandbox_entries,\n"
+            "                        artifact_bytes,\n"
+            "                        provenance_bytes,\n"
+            "                        script_env,\n"
+            "                    )"
         )
         replacement = (
-            "                subprocess.run(\n"
-            "                    ['npm', 'run', request['script']],\n"
-            "                    check=True, env=script_env,\n"
-            "                )"
+            "                    subprocess.run(\n"
+            "                        ['npm', 'run', request['script']],\n"
+            "                        check=True, env=script_env,\n"
+            "                    )"
         )
         runner = self.instrument_runner("unbound-consumer.sh", needle, replacement)
         result = self.run_swap_load_restore(runner, skip_host_path_probe=True)
