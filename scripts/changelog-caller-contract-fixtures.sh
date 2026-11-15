@@ -7,7 +7,9 @@
 # stays the sequence of changelog_caller_case_selected calls: caller_case_prepare
 # consumes the selection, and the matching caller_case_take does not consume it
 # again.
-# shellcheck disable=SC2034
+# shellcheck disable=SC2034,SC2154
+# SC2154: caller_case_count is assigned by changelog_caller_case_selected in the
+# sourced shard helper before these helpers run.
 
 declare -A caller_case_selected_ordinal
 caller_case_holding=

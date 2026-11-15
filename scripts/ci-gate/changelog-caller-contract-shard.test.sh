@@ -486,10 +486,14 @@ FIXTURE_OWNER
 mismatch_status=0
 (
   set -uo pipefail
+  # shellcheck source=scripts/changelog-caller-contract-shard.sh
   source "$shard"
+  # shellcheck source=scripts/changelog-caller-contract-fixtures.sh
   source "$repo_root/scripts/changelog-caller-contract-fixtures.sh"
   caller_case_count=0
+  # shellcheck disable=SC2034 # read by the sourced shard and fixture helpers
   caller_case_ran=0
+  # shellcheck disable=SC2034 # read by the sourced shard helper
   CHANGELOG_CALLER_CONTRACT_SHARD=1
   caller_case_prepare alpha
   caller_case_take beta

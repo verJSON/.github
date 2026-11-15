@@ -6101,6 +6101,7 @@ done
 # ADR 0059 it is the form that can never be corrected afterwards. A renderer that
 # cannot produce it leaves only "skip the review" or "edit a generated artifact",
 # and the contract forbids the second (#443).
+# shellcheck disable=SC2034 # read by the assertion body evaluated below
 released_out="$tmproot/as-released.out"
 fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 if (cd "$quoted" && ./scripts/render-next.sh --as-released) >"$released_out" 2>&1; then
@@ -6133,6 +6134,7 @@ Python-only release note.
 FRAGMENT
 commit_fixture "$quoted" component
 FIXTURE_OWNER
+# shellcheck disable=SC2034 # read by the assertion body evaluated below
 component_out="$tmproot/component.out"
 fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 if (cd "$quoted" && ./scripts/render-next.sh --component python) \
@@ -6149,7 +6151,9 @@ FIXTURE_OWNER
 # so a caller cannot reach subcommands the contract does not sanction.
 # Forwarded, the engine's own argument parser would refuse it too, so only the
 # renderer's exit 2 and its own line show the renderer refused it.
+# shellcheck disable=SC2034 # read by the assertion body evaluated below
 renderer_refusal_err="$tmproot/renderer-refusal.err"
+# shellcheck disable=SC2034 # read by the assertion body evaluated below
 renderer_refusal_status=0
 fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 (cd "$quoted" && ./scripts/render-next.sh release --version v9.9.9) >/dev/null 2>"$renderer_refusal_err" \

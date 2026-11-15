@@ -16,7 +16,7 @@ instead of every shard building the full set.
 
 The shard-only caller-contract fixture helpers change full-checkout bytes
 seen by `release.yml` verify, so the ADR 0235 pending backlog digest moves
-to `sha256:cbcd88129c8e807b8d10d2b85682e60ed042cfb2c9818a9bd2bd9329c30c5c3c`.
+to `sha256:d8ea636310bec56cbe4e667c6bc48809fad858f7443781cac50f5eee68ddba3d`.
 
 After merging #2108 abort helpers onto the shard wraps, remaining must-succeed
 `bash "$gen"` redirects use `write_generated_fixture` so the inventory and
