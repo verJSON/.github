@@ -183,12 +183,11 @@ merge-gate	bash scripts/ci-gate/elide-lockfiles.test.sh
 merge-gate	bash scripts/ci-gate/rereview-skip.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-target-guard.test.sh
 merge-gate	bash scripts/ci-gate/target-visibility.test.sh
-# @exclusive: on the first concurrent actions-ci run this row and the required-checks
-# audit were the two CPU-heavy rows that exceeded the command budget while competing
-# with sibling rows, so each reserves the whole runner (ADR 0225 Context and Decision
-# 1; #1736, PR #1746). Alone it is ~24s on main run 43623577812; keep exclusive until
-# a sibling-load remeasure shows it stays under its 120s budget without the reservation.
-merge-gate	@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
+# Was @exclusive with required-checks-audit after #1736/#1746 (ADR 0225). On main
+# run 43623577812 it is a single-threaded ~24s row whose exclusivity sat fully on
+# the merge-gate critical path (~18–20s wall). Drop the reservation; @budget=120
+# still fails closed if sibling load blows the row out (#1998).
+merge-gate	@budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin-extractor-differential.test.sh
 merge-gate	bash scripts/ci-gate/require-secrets.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-permission.test.sh

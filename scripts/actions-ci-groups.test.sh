@@ -28,7 +28,6 @@ assert exclusive_commands == {
     "platform\t@exclusive @budget=180 bash scripts/actions-ci-groups.test.sh",
     "platform\t@exclusive @budget=120 python3 scripts/ci-gate/conformance/conformance.test.py",
     "platform\t@exclusive @budget=120 bash scripts/required-checks-audit.test.sh",
-    "merge-gate\t@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh",
     (
         "changelog-release-2\t@exclusive @budget=600 "
         "CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh"

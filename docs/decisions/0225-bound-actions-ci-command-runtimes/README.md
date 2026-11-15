@@ -76,3 +76,16 @@ Pull-request runs that uploaded no records were all runs where `shell-test-group
 
 - Consumers can now expect a records artifact for `docs` and `locale-collation` wherever the job's log announces the group. The 2026-10-17 amendment's statement that those groups produce no records no longer holds.
 - Per-case cost is recorded only for cases that have their own row. A case that becomes a hot spot gets its own part, and the part's partition test pins that it runs once.
+
+## Amendment (2026-11-15) — drop exclusive on privileged-merge conformance (#1998)
+
+- **Issue:** [verJSON/.github#1998](https://github.com/verJSON/.github/issues/1998)
+
+The Consequences list above marked `privileged-merge-conformance` `@exclusive`
+with the required-checks audit after the first concurrent actions-ci run
+(#1736 / #1746). On main run 43623577812 the row is a single-threaded ~24s
+bash audit; its exclusivity reserved all four merge-gate cores for that whole
+prefix (~18–20s of the group's ~112s command wall). The suite is no longer the
+slow contended shape that needed the reservation: drop `@exclusive`, keep
+`@budget=120`, and let sibling load fail the budget closed if contention
+returns. The required-checks audit row stays exclusive.
