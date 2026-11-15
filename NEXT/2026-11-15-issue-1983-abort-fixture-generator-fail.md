@@ -12,3 +12,5 @@ Every must-succeed redirect in `scripts/ci-gate/changelog-caller-contract.test.s
 Caller-contract fixture abort coverage changes full-checkout bytes seen by
 `release.yml` verify, so the ADR 0235 pending backlog digest moves to
 `sha256:1dbf9d08…`.
+
+Fixture-abort coverage changes the settable-guard inventory scanned from the caller-contract tests; `GUARD_COUNT` moves from 543 to 551.
