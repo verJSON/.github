@@ -1030,6 +1030,66 @@ jobs:
             r"unreviewed=\['Verjson/beta'\] absent=\[\]"
         )
 
+    def test_a_legacy_cohort_mismatch_still_names_the_missing_admission_caller(self):
+        # #1401: `verjson-core-checks=enforced` arms the repository under the
+        # legacy selector before the reviewed list is updated. Raising the
+        # cohort mismatch first hid the missing default-branch
+        # `ai-review-merge.yml`, so the next pull request was what reported
+        # that the arm cannot run.
+        self.contract["arm_property_migration"]["repositories"] = ["Verjson/alpha"]
+        self.enter_legacy_selector_state()
+        self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-merge.yml")
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        findings = caught.exception.findings
+        self.assertTrue(any(
+            "legacy arm cohort differs" in finding and "Verjson/beta" in finding
+            for finding in findings
+        ))
+        self.assertTrue(any(
+            "cannot satisfy the arm" in finding
+            and "Verjson/beta:.github/workflows/ai-review-merge.yml" in finding
+            for finding in findings
+        ))
+        status, stdout, stderr = self.run_main()
+        self.assertEqual(status, 1)
+        self.assertTrue(stdout)
+        error_lines = [line for line in stderr.splitlines() if line.startswith("ERROR:")]
+        self.assertTrue(any("legacy arm cohort differs" in line for line in error_lines))
+        self.assertTrue(any(
+            "cannot satisfy the arm" in line and "ai-review-merge.yml" in line
+            for line in error_lines
+        ))
+
+    def test_missing_deterministic_ci_still_names_the_missing_admission_caller(self):
+        # The deterministic-CI gap stays a fail-fast prerequisite. It must not
+        # be the only line when that same repository also lacks the caller the
+        # arm reads before it can authorize a merge (#1401).
+        rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
+        beta = next(row for row in rows if row["repository_full_name"] == "Verjson/beta")
+        beta["properties"] = [
+            {"property_name": "verjson-stack", "value": "helm"},
+            {"property_name": "verjson-core-checks", "value": "enforced"},
+            {"property_name": "verjson-ai-authorization", "value": "enforced"},
+        ]
+        self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-merge.yml")
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.audit(self.contract, self.read)
+        self.assertNotIsInstance(caught.exception, AUDIT.AuditFindings)
+        message = str(caught.exception)
+        self.assertRegex(message, "without canonical deterministic required CI.*Verjson/beta")
+        self.assertRegex(
+            message,
+            r"cannot satisfy the arm.*Verjson/beta:\.github/workflows/ai-review-merge\.yml",
+        )
+        status, stdout, stderr = self.run_main()
+        self.assertEqual((status, stdout), (1, ""))
+        error_lines = [line for line in stderr.splitlines() if line.startswith("ERROR:")]
+        self.assertEqual(len(error_lines), 2, stderr)
+        self.assertIn("without canonical deterministic required CI", error_lines[0])
+        self.assertIn("cannot satisfy the arm", error_lines[1])
+        self.assertIn("ai-review-merge.yml", error_lines[1])
+
     def test_legacy_cohort_ignores_the_organization_display_case(self):
         # #1775: on 2026-10-02 the organization login became `verJSON`, so the API
         # returns `verJSON/<repo>` while the reviewed list records `Verjson/<repo>`.
