@@ -21,3 +21,7 @@ fail-closed for absent, ref-only, ambiguous, repository-level, unreachable, malf
 or unreadable provenance, including an evaluate-only ruleset. `verjson-cli-projects`
 regenerates both privileged callers at this merge SHA to rebind those three contexts
 and keep `changelog / validate` and `changelog-contract` (ADR 0081, 2026-11-15 correction).
+
+Full-checkout bytes seen by `release.yml` verify and `capability-floor-observe`
+change with the privileged-merge provenance helpers, so their ADR 0235 pending
+backlog digests are refreshed.
