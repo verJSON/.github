@@ -128,3 +128,17 @@ delivers the identical fail-closed guarantee without that regression.
 
 This restores an invariant already decided above; it does not change the
 decision, so no new ADR number was minted for it.
+
+## 2026-11-15 amendment — public route names the renamed runner repository
+
+[Verjson/.github#1808](https://github.com/Verjson/.github/issues/1808)
+found that `ai-privileged-merge.yml` still compared `github.repository`
+against `Verjson/verjson-github-runner` after that repository was renamed
+to `Verjson/verjson-git-runners`. The public-hosted stage above still
+admits exactly two public Verjson identities; only the runner repository's
+string changed. The canonical workflow and its caller-contract pins now
+use `Verjson/verjson-git-runners`. Visibility and fail-closed rules are
+unchanged.
+
+This restores the intended public allowlist after the rename; it does not
+widen the set of admitted repositories, so no new ADR number was minted.
