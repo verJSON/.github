@@ -393,7 +393,6 @@ jobs:
           TRANSFER_DIR: ${{ github.workspace }}/.verjson-container-node-modules-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          case "$PACKAGE_MANAGER" in npm) lock_file=package-lock.json ;; pnpm) lock_file=pnpm-lock.yaml ;; *) echo "::error::packageManager accepts only npm or pnpm"; exit 1 ;; esac
           helper="$RUNNER_TEMP/container_gitlink_file_dependencies.sh"
           proof="$RUNNER_TEMP/container-gitlinks.json"
           printf '%s  %s\n' "$GITLINK_SHA256" "$helper" | sha256sum --check --strict

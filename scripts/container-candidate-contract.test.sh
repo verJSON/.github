@@ -1349,7 +1349,7 @@ grep -qF 'npm ci --ignore-scripts' <<<"$acquisition_job"
 # GitHub's does, so no other copy of the job or a key can be the one hashed.
 # Any edit to that job, legitimate or not, fails here until a reviewer re-pins
 # reviewed_acquisition_job_sha256.
-reviewed_acquisition_job_sha256=57f6ffeeaa89f48b3519e7bc672570d43ec84095ff6f52dd025bd23649ca6a84
+reviewed_acquisition_job_sha256=ae5f948785f952e77c275db33fd1ce3b942bad7e2daabb9e0ba4826e29488357
 acquisition_job_sha256() { # <workflow file>
   python3 -B - "$1" <<'PY'
 import hashlib
