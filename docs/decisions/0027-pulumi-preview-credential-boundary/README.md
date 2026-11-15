@@ -78,7 +78,7 @@ caller reproducing an event/secret guard correctly.
 
 [ADR 0266](../0266-pulumi-environment-scoped-token/README.md) lets a trusted ref
 omit the mapped `pulumi-access-token` when the caller sets a well-formed
-`secrets-environment`. Admission and validation still do not receive the token.
+`credential-environment`. Admission and validation still do not receive the token.
 The preview job reads `secrets.PULUMI_ACCESS_TOKEN` only while bound to that
-environment on the default branch. An empty `secrets-environment` keeps the
+environment on the default branch. An empty `credential-environment` keeps the
 three-secret admission rule in the decision above.

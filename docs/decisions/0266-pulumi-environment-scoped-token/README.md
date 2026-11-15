@@ -26,19 +26,19 @@ secret aliases cannot be environment secret names.
 
 ## Decision
 
-1. Callers may set optional `secrets-environment`. Empty means the preview
+1. Callers may set optional `credential-environment`. Empty means the preview
    job's environment expression and the mapped `pulumi-access-token` path are
    unchanged.
 2. The preview job's `environment` is derived from the event and the inputs,
    never from a step output. A `push` or `workflow_dispatch` whose ref is
-   `refs/heads/<default branch>` binds `secrets-environment` when it is
+   `refs/heads/<default branch>` binds `credential-environment` when it is
    non-empty. A `pull_request` binds `preview-environment` only. Every other
    event binds no environment from this input.
 3. `validate` and `preview-admission` do not set `environment` and do not read
    `secrets.PULUMI_ACCESS_TOKEN`, `secrets.pulumi-access-token`, or
    `secrets.NODE_AUTH_TOKEN`. Validation's package acquisition keeps the
    explicit `node-auth-token` grant from ADR 0263.
-4. Trusted-ref admission treats a charset-valid `secrets-environment` as
+4. Trusted-ref admission treats a charset-valid `credential-environment` as
    satisfying the Pulumi-token presence check and does not read the token.
    GCP workload-identity secrets are still required. The reviewed pull-request
    route still requires the mapped token. A name outside
@@ -57,7 +57,7 @@ secret aliases cannot be environment secret names.
 
 ## Consequences
 
-- Adopters who leave `secrets-environment` empty keep today's mapped secrets
+- Adopters who leave `credential-environment` empty keep today's mapped secrets
   and the ADR 0239 reviewer gate.
 - A pull request cannot aim the preview job at the secrets environment. The
   expression ignores that input on `pull_request`, and admission still refuses
