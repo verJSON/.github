@@ -773,13 +773,14 @@ fi
 
 # Sampled must-succeed site: the default adopter's CODEOWNERS write. A case
 # shard builds that adopter before it selects a case, so every shard must abort
-# before a rejection can read the empty file as green (#1983). Command
-# substitutions and /dev/null probes have a socket for stdout here; the fixture
-# redirect is a regular file. Only that CODEOWNERS write fails.
+# before a rejection can read the empty file as green (#1983). Bash presents
+# both a command substitution and a script redirect as a pipe, so stdout type
+# cannot tell them apart. The preamble captures codeowners once; the next
+# codeowners invocation is that write. Other modes stay non-empty and silent
+# so the shard reaches the write, and the retired-mode probe still refuses.
 cat >"$tmp/fail-codeowners.sh" <<'EOF'
 #!/usr/bin/env bash
 set -u
-real="${FIXTURE_GENERATOR_REAL:?}"
 mode=""
 for arg in "$@"; do
   case "$arg" in
@@ -788,29 +789,30 @@ for arg in "$@"; do
   mode="$arg"
   break
 done
-kind="$(stat -L -c %F /proc/self/fd/1 2>/dev/null || echo unknown)"
-case "$kind" in
-  regular*)
-    if [ "$mode" = codeowners ]; then
-      echo "mutated fixture generator failed" >&2
-      exit 7
-    fi
-    if [ "$mode" = contract-test ]; then
-      printf '%s\n' 'EXPECTED_RELEASE_NODE_VERSION="22"'
-      exit 0
-    fi
-    exec "$real" "$@"
-    ;;
-  socket)
-    if [ "$mode" = renovate-attribution ] || [ -z "$mode" ]; then
-      echo "gen-changelog-caller.sh: unknown mode; the usage line lists every mode" >&2
-      exit 2
-    fi
-    printf '%s\n' fixture
-    exit 0
-    ;;
-esac
-exec "$real" "$@"
+if [ "$mode" = codeowners ]; then
+  state="${FIXTURE_GENERATOR_STATE:?}"
+  mkdir -p "$state"
+  count=0
+  if [ -f "$state/codeowners" ]; then
+    count="$(cat "$state/codeowners")"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$state/codeowners"
+  if [ "$count" -ge 2 ]; then
+    echo "mutated fixture generator failed" >&2
+    exit 7
+  fi
+fi
+if [ "$mode" = renovate-attribution ] || [ -z "$mode" ]; then
+  echo "gen-changelog-caller.sh: unknown mode; the usage line lists every mode" >&2
+  exit 2
+fi
+if [ "$mode" = contract-test ]; then
+  printf '%s\n' 'EXPECTED_RELEASE_NODE_VERSION="22"'
+  exit 0
+fi
+printf '%s\n' fixture
+exit 0
 EOF
 chmod +x "$tmp/fail-codeowners.sh"
 if python3 - "$caller" "$tmp/mutated-caller.sh" "$repo_root" "$tmp/fail-codeowners.sh" <<'PY'
@@ -834,7 +836,8 @@ PY
 then
   fixture_abort_pids=()
   for fixture_abort_shard in 1 2 3 4; do
-    FIXTURE_GENERATOR_REAL="$gen" CHANGELOG_CALLER_CONTRACT_SHARD="$fixture_abort_shard" \
+    FIXTURE_GENERATOR_STATE="$tmp/state-$fixture_abort_shard" \
+      CHANGELOG_CALLER_CONTRACT_SHARD="$fixture_abort_shard" \
       timeout 30 bash "$tmp/mutated-caller.sh" \
       >"$tmp/shard-$fixture_abort_shard.out" 2>"$tmp/shard-$fixture_abort_shard.err" &
     fixture_abort_pids+=("$!")
