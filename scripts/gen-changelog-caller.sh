@@ -7656,29 +7656,40 @@ echo "ok - pull requests cannot consume NEXT/ fragments"
 # Dependency-only bot updates are still observable changes. The policy is keyed
 # exclusively to the changed-file boundary, not actor identity, so Renovate and
 # human-authored updates receive the same requirement.
+#
+# One base repository, then one branch and one check-pr per path. Repeating
+# git init for the same base commit dominated this loop; checkout keeps a later
+# path from seeing an earlier path's file, so the rejection names that path alone
+# (#1977).
+# BEGIN engine-path-dependency-fixtures
+new_fixture
+init_fixture_repo
+printf 'base\n' >"$fixture_root/case/README.md"
+git -C "$fixture_root/case" add .
+git -C "$fixture_root/case" commit -qm base
+dependency_base="$(git -C "$fixture_root/case" rev-parse HEAD)"
+dependency_path_index=0
 for dependency_path in \
   package.json apps/api/package-lock.json pnpm-lock.yaml web/yarn.lock \
   pyproject.toml requirements.txt requirements-dev.txt poetry.lock Pipfile \
   Pipfile.lock uv.lock services/worker/go.mod services/worker/go.sum \
   crates/core/Cargo.toml Cargo.lock infra/.terraform.lock.hcl; do
-  new_fixture
-  init_fixture_repo
-  printf 'base\n' >"$fixture_root/case/README.md"
-  git -C "$fixture_root/case" add .
-  git -C "$fixture_root/case" commit -qm base
-  base="$(git -C "$fixture_root/case" rev-parse HEAD)"
+  dependency_path_index=$((dependency_path_index + 1))
+  git -C "$fixture_root/case" checkout -q -B "dependency-path-$dependency_path_index" "$dependency_base"
   mkdir -p "$(dirname "$fixture_root/case/$dependency_path")"
   printf 'dependency update\n' >"$fixture_root/case/$dependency_path"
   git -C "$fixture_root/case" add .
   git -C "$fixture_root/case" commit -qm "renovate dependency update"
   if python3 "$contract" check-pr --repo-root "$fixture_root/case" \
-    --base "$base" --head HEAD 2>"$fixture_root/error"; then
+    --base "$dependency_base" --head HEAD 2>"$fixture_root/error"; then
     fail "dependency change without a fragment was accepted: $dependency_path"
   fi
-  grep -q 'dependency manifests or lockfiles require a new NEXT fragment' \
-    "$fixture_root/error"
+  grep -qxF "changelog: dependency manifests or lockfiles require a new NEXT fragment: $dependency_path" \
+    "$fixture_root/error" \
+    || fail "dependency rejection did not name only $dependency_path"
 done
 echo "ok - dependency manifests and lockfiles require a new fragment for every actor (#524)"
+# END engine-path-dependency-fixtures
 
 new_fixture
 init_fixture_repo
@@ -7742,29 +7753,39 @@ fi
 grep -q 'release-relevant changes require a new NEXT fragment' "$fixture_root/error"
 echo "ok - non-dependency changes require a new fragment"
 
+# Same shared base as the dependency paths. This loop stays inside the
+# is_release_relevant_change guard so an older pinned engine still skips it
+# (#1977).
+# BEGIN engine-path-executable-fixtures
+new_fixture
+init_fixture_repo
+printf 'base\n' >"$fixture_root/case/README.md"
+git -C "$fixture_root/case" add .
+git -C "$fixture_root/case" commit -qm base
+executable_base="$(git -C "$fixture_root/case" rev-parse HEAD)"
+executable_path_index=0
 for executable_path in \
   .github/workflows/ci.test.yml \
   .github/workflows/release.spec.yaml \
   .github/actions/test/action.yml \
   tests/action.yml \
   packages/foo/tests/action.yaml; do
-  new_fixture
-  init_fixture_repo
-  printf 'base\n' >"$fixture_root/case/README.md"
-  git -C "$fixture_root/case" add .
-  git -C "$fixture_root/case" commit -qm base
-  base="$(git -C "$fixture_root/case" rev-parse HEAD)"
+  executable_path_index=$((executable_path_index + 1))
+  git -C "$fixture_root/case" checkout -q -B "executable-path-$executable_path_index" "$executable_base"
   mkdir -p "$fixture_root/case/$(dirname "$executable_path")"
   printf 'name: executable\n' >"$fixture_root/case/$executable_path"
   git -C "$fixture_root/case" add .
   git -C "$fixture_root/case" commit -qm "add executable github yaml"
   if python3 "$contract" check-pr --repo-root "$fixture_root/case" \
-    --base "$base" --head HEAD 2>"$fixture_root/error"; then
+    --base "$executable_base" --head HEAD 2>"$fixture_root/error"; then
     fail "executable GitHub YAML escaped release context: $executable_path"
   fi
-  grep -q 'release-relevant changes require a new NEXT fragment' "$fixture_root/error"
+  grep -qxF "changelog: release-relevant changes require a new NEXT fragment (all paths except changelog stores and test-only files): $executable_path" \
+    "$fixture_root/error" \
+    || fail "executable YAML rejection did not name only $executable_path"
 done
 echo "ok - executable GitHub YAML takes precedence over test exemptions"
+# END engine-path-executable-fixtures
 fi
 
 new_fixture

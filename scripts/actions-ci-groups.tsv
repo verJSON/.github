@@ -210,6 +210,7 @@ changelog-release-3	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/c
 changelog-release-4	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-1	@budget=120 CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-1	bash scripts/ci-gate/changelog-caller-contract-shard.test.sh
+changelog-release-4	bash scripts/ci-gate/changelog-contract-engine-paths.test.sh
 changelog-release-1	bash scripts/ci-gate/release-artifact-digest-reverify.test.sh
 changelog-release-1	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release-2	python3 scripts/ci-gate/adr-live-coverage-claims.test.py
