@@ -40,11 +40,14 @@ grep -qF 'credential-environment:' "$wf" \
   && pass "credential-environment is an optional input" \
   || fail "credential-environment input is missing"
 # The default must belong to this input, not a later one.
-awk '
+# Read awk to EOF via a redirect (not grep -q) so a still-writing producer cannot
+# trip pipefail with SIGPIPE (#1430 / #1445).
+credential_default="$(awk '
   $0 ~ /^      credential-environment:/ { capture = 1 }
   capture { print }
   capture && /^        default:/ { exit }
-' "$wf" | grep -qx "        default: ''" \
+' "$wf")"
+grep -qx "        default: ''" <<<"$credential_default" \
   && pass "credential-environment defaults to empty, leaving current behavior" \
   || fail "credential-environment does not default to empty"
 
