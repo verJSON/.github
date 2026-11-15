@@ -26,6 +26,19 @@ DEFINITIONS = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef, ast.As
 failures = 0
 
 
+def assign_names(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    targets = getattr(node, "targets", None)
+    if targets is None and getattr(node, "target", None) is not None:
+        targets = [node.target]
+    for target in targets or []:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            names.update(elt.id for elt in target.elts if isinstance(elt, ast.Name))
+    return names
+
+
 def check(condition: bool, label: str) -> None:
     global failures
     print(f"{'ok  ' if condition else 'FAIL'} - {label}")
@@ -161,6 +174,16 @@ reporting_nodes = [node for node in statements
                    if any(called_names(part) & reporting for part in eager_parts(node))]
 reporting_keys = {(node.lineno, node.col_offset) for node in reporting_nodes}
 module_keys = {(node.lineno, node.col_offset) for node in statements}
+skip_assigns = next(
+    (
+        frozenset(ast.literal_eval(node.value))
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [ast.unparse(target) for target in node.targets] == ["PROBE_SKIP_ASSIGN_NAMES"]
+    ),
+    frozenset(),
+)
+check(bool(skip_assigns), "the test declares PROBE_SKIP_ASSIGN_NAMES for probe-definition replay")
 selected_reporting = collections.Counter()
 for part in PARTS:
     env = {**os.environ, "RUNNER_ISOLATION_TEST_PART": part}
@@ -180,7 +203,17 @@ for part in PARTS:
     else:
         start, finish = shard_ranges[part]
         expected_nodes = [node for node in statements if start < node.lineno < finish]
-        expected_nodes.extend(node for node in outside if isinstance(node, DEFINITIONS))
+
+        def probe_shared(node: ast.AST) -> bool:
+            if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef)):
+                return True
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                return not (assign_names(node) & skip_assigns)
+            return False
+
+        expected_nodes.extend(
+            node for node in outside if isinstance(node, DEFINITIONS) and probe_shared(node)
+        )
     expected_keys = collections.Counter((node.lineno, node.col_offset) for node in expected_nodes)
     selected_checks = [key for key in selected_keys if key in reporting_keys]
     selected_reporting.update(selected_checks)

@@ -77,6 +77,10 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#1869](https://github.com/VerJSON/.github/issues/1869) — Canonical node-ci cost levers for trunk-based three-tier flow (build-once ArtifactSet, size headroom by extracting inline Python from `node-ci.yml`, remaining sandbox profiles). Draft deferral shipped as #1986/ADR 0253 (issue #1984 closed 2026-11-14). `node-ci.yml` is ~486 KiB against the 490 KiB protected-generator tripwire (ADR 0238 amendment 2026-11-12). Verified open 2026-11-14 via `gh issue view`.
+
+- [#1972](https://github.com/VerJSON/.github/issues/1972) — Cut `public-pr-runner-isolation` test from ~460s toward ~60s; in progress on `perf/1972-runner-isolation-test-speed`. Verified open 2026-11-14.
+
 - [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open, tracked separately from #1945 after the 2026-11-13 ARB dependency review. Do not treat agent review evidence as authoritative until its identity criteria pass.
 
 - [#1875](https://github.com/VerJSON/.github/issues/1875) — ADR 0238's Playwright profile merged as #1938; privileged-helper and APT-cache integrity follow-up is in progress. Item 5 remains tracked under #1692, which natively blocks #1875. Verified open and blocked 2026-11-13 via `gh issue view` and native dependency metadata.
