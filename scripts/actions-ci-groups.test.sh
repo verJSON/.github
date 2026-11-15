@@ -2232,8 +2232,9 @@ expected = shards | {
     "merge-gate\tbash scripts/ci-gate/native-automerge.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/arm-receipt.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/zero-provider-recovery.test.sh": 90,
-    # 173s serially on main run 38513400637.
-    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
+    # #2009 ThreadPool cut this from ~113s serial; hosted 43s on main run
+    # 43623577812 → twice rounded up is 90 (ADR 0225). Local ~21s.
+    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 90,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
     # #1972: in-process checker + lean probe fixtures. Hosted core 63s on run
