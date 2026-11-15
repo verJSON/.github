@@ -93,11 +93,18 @@ run_case() {
   : >"$ACTIONLOG"
   printf '%s' "${2:-}" >"$COMMENTS_FILE"
   printf '%s' "$1" >"$FIXTURE"
-  bash -eo pipefail "$script" >/dev/null 2>&1
+  # Keep the hold's own output. Every freshness refusal exits 1, so the
+  # reason line is what names the guard under test.
+  bash -eo pipefail "$script" >"$tmp/err.txt" 2>&1
   echo "rc=$?"
 }
 out_has() { grep -q "$1" "$tmp/out.txt"; }
 act_has() { grep -q "$1" "$tmp/act.log"; }
+reason_has() { grep -qF -- "$1" "$tmp/err.txt"; }
+conflict_reason='::error::Branch conflicts with main — holding until resolved.'
+metadata_reason='::error::Could not read PR metadata after 3 attempts, so freshness could not be evaluated at all. Holding rather than merging on a base we could not check.'
+mergeable_reason='::error::Could not read PR mergeability after bounded retries; holding rather than proceeding on an unverified state.'
+compare_reason='::error::Could not determine whether the head is behind main: the compare API was unanswerable after 3 attempts. Holding rather than merging on a possibly stale base.'
 
 H='{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE"}'
 
@@ -111,10 +118,10 @@ BEHIND_BY=3 run_case '{"author":{"login":"human"},"headRefName":"feat/renovate-c
 { act_has UPDATE && out_has 'proceed=false'; } && pass "human branch merely containing 'renovate' is NOT skipped" || fail "over-matched renovate on a human branch"
 
 rc=$(BEHIND_BY=0 run_case '{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"s","baseRefName":"main","mergeable":"CONFLICTING"}')
-{ [ "$rc" = "rc=1" ] && act_has COMMENT; } && pass "conflict holds (exit 1) and comments" || fail "conflict path wrong ($rc)"
+{ [ "$rc" = "rc=1" ] && act_has COMMENT && reason_has "$conflict_reason"; } && pass "conflict holds (exit 1) and comments" || fail "conflict path wrong ($rc)"
 
 rc=$(BEHIND_BY=0 run_case '{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"s","baseRefName":"main","mergeable":"CONFLICTING"}' '{"comments":[{"body":"<!-- gate:branch-conflict --> old"}]}')
-{ [ "$rc" = "rc=1" ] && ! act_has COMMENT; } && pass "conflict comment is deduped" || fail "conflict comment not deduped"
+{ [ "$rc" = "rc=1" ] && ! act_has COMMENT && reason_has "$conflict_reason"; } && pass "conflict comment is deduped" || fail "conflict comment not deduped"
 
 # (a) CONFLICTING from mere base drift → update-branch clears it → step aside
 # like the BEHIND success path (proceed=false), no conflict comment.
@@ -124,12 +131,12 @@ rc=$(POST_UPDATE_MERGEABLE=MERGEABLE BEHIND_BY=0 run_case '{"author":{"login":"h
 
 # (b) CONFLICTING + update-branch API fails → hold (exit 1) + conflict comment.
 rc=$(UPDATE_RC=1 BEHIND_BY=0 run_case '{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"s","baseRefName":"main","mergeable":"CONFLICTING"}')
-{ [ "$rc" = "rc=1" ] && act_has COMMENT; } && pass "conflict + failed update-branch holds + comments" || fail "failed-update conflict path wrong ($rc)"
+{ [ "$rc" = "rc=1" ] && act_has COMMENT && reason_has "$conflict_reason"; } && pass "conflict + failed update-branch holds + comments" || fail "failed-update conflict path wrong ($rc)"
 
 # (c) CONFLICTING + update-branch "succeeds" but branch is STILL CONFLICTING
 # (genuine content conflict) → hold (exit 1) + conflict comment.
 rc=$(POST_UPDATE_MERGEABLE=CONFLICTING BEHIND_BY=0 run_case '{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"s","baseRefName":"main","mergeable":"CONFLICTING"}')
-{ [ "$rc" = "rc=1" ] && act_has UPDATE && act_has COMMENT; } && pass "genuine conflict survives update-branch → holds + comments" || fail "genuine-conflict path wrong ($rc)"
+{ [ "$rc" = "rc=1" ] && act_has UPDATE && act_has COMMENT && reason_has "$conflict_reason"; } && pass "genuine conflict survives update-branch → holds + comments" || fail "genuine-conflict path wrong ($rc)"
 
 # (d) Renovate CONFLICTING branch → still exempt: no update attempt, no comment.
 POST_UPDATE_MERGEABLE=MERGEABLE BEHIND_BY=0 run_case '{"author":{"login":"renovate[bot]"},"headRefName":"renovate/x","headRefOid":"s","baseRefName":"main","mergeable":"CONFLICTING"}' >/dev/null
@@ -150,7 +157,7 @@ unset PRVIEW_FAIL
 # sits EARLIER in the step than the compare guard below, so a correlated
 # outage tripped it first and the compare guard was never reached — the guard
 # #1476 added was unreachable on exactly the total-outage path it exists for.
-{ [ "$rc" = "rc=1" ] && out_has 'proceed=false' && ! out_has 'proceed=true'; } \
+{ [ "$rc" = "rc=1" ] && out_has 'proceed=false' && ! out_has 'proceed=true' && reason_has "$metadata_reason"; } \
   && pass "unreadable PR metadata holds (proceed=false, exit 1)" \
   || fail "unreadable PR metadata did not hold ($rc)"
 
@@ -162,7 +169,7 @@ unset PRVIEW_FAIL
 # direction: no proceed=true, no merge, and a nonzero exit the human can see.
 for mode in error empty unparseable; do
   rc=$(COMPARE_MODE="$mode" run_case "$H")
-  { [ "$rc" = "rc=1" ] && ! out_has 'proceed=true' && ! act_has UPDATE; } \
+  { [ "$rc" = "rc=1" ] && ! out_has 'proceed=true' && ! act_has UPDATE && reason_has "$compare_reason"; } \
     && pass "indeterminate compare ($mode) holds instead of reading as behind=0" \
     || fail "indeterminate compare ($mode) did not hold ($rc)"
 done
@@ -192,12 +199,12 @@ COMPARE_MODE=recovers COMPARE_FAILURES=1 BEHIND_BY=0 run_case "$H" >/dev/null
 # that proceeds through the freshness gate. An unreadable or permanently
 # UNKNOWN state holds the PR after the bounded retries.
 rc=$(MERGEABLE_FAIL=1 run_case '{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"s","baseRefName":"main","mergeable":"UNKNOWN"}')
-[ "$rc" = "rc=1" ] && ! out_has 'proceed=true' \
+[ "$rc" = "rc=1" ] && ! out_has 'proceed=true' && reason_has "$mergeable_reason" \
   && pass "unreadable mergeability holds instead of proceeding" \
   || fail "unreadable mergeability did not hold"
 
 rc=$(run_case '{"author":{"login":"human"},"headRefName":"feat/x","headRefOid":"s","baseRefName":"main","mergeable":"UNKNOWN"}')
-[ "$rc" = "rc=1" ] && ! out_has 'proceed=true' \
+[ "$rc" = "rc=1" ] && ! out_has 'proceed=true' && reason_has "$mergeable_reason" \
   && pass "persistently unknown mergeability holds instead of proceeding" \
   || fail "persistently unknown mergeability did not hold"
 
