@@ -267,6 +267,7 @@ changelog-release-1	python3 scripts/ci-gate/changelog-release-propose.test.py
 changelog-release-2	bash scripts/ci-gate/changelog-contract-resolution.test.sh
 changelog-release-3	bash scripts/ci-gate/changelog-validate-preview.test.sh
 changelog-release-4	bash scripts/ci-gate/changelog-validate-pin.test.sh
+changelog-release-4	bash scripts/ci-gate/needs-changelog-context.test.sh
 changelog-release-1	bash scripts/contract-pin.test.sh
 changelog-release-2	python3 scripts/render_changelog_adoption_issue_test.py
 changelog-release-3	@budget=90 bash scripts/component-changelog-contract.test.sh

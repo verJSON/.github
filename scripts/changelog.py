@@ -19,6 +19,18 @@ from pathlib import Path, PurePosixPath
 # below and the directory they describe cannot drift apart.
 UNRELEASED_DIR = "NEXT"
 
+# Informational handoff for Renovate dependency PRs (ADR 0243 amendment,
+# verJSON/.github#2120). This is not a merge gate and does not change check-pr.
+RENOVATE_AUTHORS = frozenset({"renovate", "renovate[bot]"})
+NEEDS_CHANGELOG_CONTEXT_TITLE = "needs-changelog-context"
+NEEDS_CHANGELOG_CONTEXT_ADR = (
+    "https://github.com/Verjson/.github/blob/main/docs/decisions/"
+    "0243-agent-authored-changelog-context/README.md"
+)
+NEEDS_CHANGELOG_CONTEXT_SKILL = (
+    "https://github.com/Verjson/verjson-agents/blob/main/skills/dependency-upgrade/SKILL.md"
+)
+
 CANONICAL_NAME = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2})-issue-(?P<identity>\d+|[0-9]{8}T[0-9]{6}Z|[0-9a-fA-F]{6,12})-(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)\.md$"
 )
@@ -1488,7 +1500,7 @@ def require_valid_added_fragments(
         )
 
 
-def check_pr(repo_root: Path, base: str, head: str) -> None:
+def pull_request_name_status(repo_root: Path, base: str, head: str) -> dict[str, str]:
     require_revision("--base", base)
     require_revision("--head", head)
     status_by_path = {}
@@ -1502,6 +1514,100 @@ def check_pr(repo_root: Path, base: str, head: str) -> None:
     ).splitlines():
         status, path = line.split("\t", 1)
         status_by_path[path] = status
+    return status_by_path
+
+
+def pull_request_fragment_changes(
+    repo_root: Path, base: str, head: str
+) -> tuple[set[str], set[str]]:
+    consumed: set[str] = set()
+    added: set[str] = set()
+    for line in git(
+        repo_root,
+        "diff",
+        "--find-renames",
+        "--name-status",
+        "--end-of-options",
+        f"{base}...{head}",
+    ).splitlines():
+        fields = line.split("\t")
+        status = fields[0]
+        if status == "D" and len(fields) == 2 and is_fragment_path(fields[1]):
+            consumed.add(fields[1])
+        if status == "A" and len(fields) == 2 and is_fragment_path(fields[1]):
+            added.add(fields[1])
+        if (
+            status.startswith("R")
+            and len(fields) == 3
+            and is_fragment_path(fields[1])
+            and not is_fragment_path(fields[2])
+        ):
+            consumed.add(fields[1])
+        if (
+            status.startswith("R")
+            and len(fields) == 3
+            and not is_fragment_path(fields[1])
+            and is_fragment_path(fields[2])
+        ):
+            added.add(fields[2])
+    return consumed, added
+
+
+def is_renovate_author(author: str) -> bool:
+    return author.strip().lower() in RENOVATE_AUTHORS
+
+
+def added_fragment_is_valid(repo_root: Path, path: str) -> bool:
+    """Whether one added path is a canonical fragment ``check_pr`` would accept.
+
+    A non-canonical name is invalid. It must not abort the handoff scan:
+    ``fragments()`` raises for the whole ``NEXT/`` directory, and the handoff
+    still applies when no added path is valid.
+    """
+    if not CANONICAL_NAME.fullmatch(PurePosixPath(path).name):
+        return False
+    try:
+        load_canonical(repo_root / path)
+    except ChangelogError:
+        return False
+    return True
+
+
+def needs_changelog_context(
+    repo_root: Path, base: str, head: str, author: str
+) -> str | None:
+    """Return handoff text when a Renovate PR has no valid new NEXT fragment.
+
+    ``None`` means the handoff does not apply: another author, no dependency
+    change, or a valid added fragment. ``check_pr`` stays the merge gate and
+    does not read the author.
+    """
+    if not is_renovate_author(author):
+        require_revision("--base", base)
+        require_revision("--head", head)
+        return None
+    status_by_path = pull_request_name_status(repo_root, base, head)
+    dependencies = sorted(path for path in status_by_path if is_dependency_file(path))
+    if not dependencies:
+        return None
+    _consumed, added = pull_request_fragment_changes(repo_root, base, head)
+    if any(added_fragment_is_valid(repo_root, path) for path in added):
+        return None
+    return (
+        f"{NEEDS_CHANGELOG_CONTEXT_TITLE}: Renovate changed dependency manifests "
+        f"or lockfiles ({', '.join(dependencies)}) without a valid new NEXT fragment. "
+        "changelog / validate remains the merge gate. "
+        "An agent must install the bumped dependency, exercise the consumer, "
+        "adapt it, and author NEXT/YYYY-MM-DD-issue-<id>-<slug>.md describing "
+        "that work. The slug matches [a-z0-9]+(?:-[a-z0-9]+)* and cannot contain "
+        "dots (commander-15-1-0, not commander-15.1.0). "
+        f"ADR 0243: {NEEDS_CHANGELOG_CONTEXT_ADR}. "
+        f"Dependency-upgrade skill: {NEEDS_CHANGELOG_CONTEXT_SKILL}."
+    )
+
+
+def check_pr(repo_root: Path, base: str, head: str) -> None:
+    status_by_path = pull_request_name_status(repo_root, base, head)
     # Policy evaluates both sides of a move. Rename-aware name-only output can
     # collapse a delete/add pair to its destination and hide consumption of an
     # immutable source from the authorization boundary.
@@ -1519,36 +1625,7 @@ def check_pr(repo_root: Path, base: str, head: str) -> None:
             "ordinary pull requests cannot edit generated aggregates or released snapshots: "
             + ", ".join(sorted(forbidden))
         )
-    consumed = set()
-    added_fragments = set()
-    for line in git(
-        repo_root,
-        "diff",
-        "--find-renames",
-        "--name-status",
-        "--end-of-options",
-        f"{base}...{head}",
-    ).splitlines():
-        fields = line.split("\t")
-        status = fields[0]
-        if status == "D" and len(fields) == 2 and is_fragment_path(fields[1]):
-            consumed.add(fields[1])
-        if status == "A" and len(fields) == 2 and is_fragment_path(fields[1]):
-            added_fragments.add(fields[1])
-        if (
-            status.startswith("R")
-            and len(fields) == 3
-            and is_fragment_path(fields[1])
-            and not is_fragment_path(fields[2])
-        ):
-            consumed.add(fields[1])
-        if (
-            status.startswith("R")
-            and len(fields) == 3
-            and not is_fragment_path(fields[1])
-            and is_fragment_path(fields[2])
-        ):
-            added_fragments.add(fields[2])
+    consumed, added_fragments = pull_request_fragment_changes(repo_root, base, head)
     if consumed:
         raise ChangelogError(
             "ordinary pull requests cannot consume NEXT fragments: "
@@ -1638,6 +1715,14 @@ def parser() -> argparse.ArgumentParser:
     pr.add_argument("--repo-root", type=Path, default=Path.cwd())
     pr.add_argument("--base", required=True)
     pr.add_argument("--head", default="HEAD")
+    handoff = subparsers.add_parser(
+        "needs-changelog-context",
+        help="report a Renovate pull request that still needs an agent-authored NEXT fragment",
+    )
+    handoff.add_argument("--repo-root", type=Path, default=Path.cwd())
+    handoff.add_argument("--base", required=True)
+    handoff.add_argument("--head", default="HEAD")
+    handoff.add_argument("--author", default="")
     release_parser = subparsers.add_parser("release")
     release_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     release_parser.add_argument("--version", required=True)
@@ -1742,6 +1827,13 @@ def main() -> int:
             sys.stdout.write(render_released(repo_root))
         elif args.command == "check-pr":
             check_pr(repo_root, args.base, args.head)
+        elif args.command == "needs-changelog-context":
+            message = needs_changelog_context(
+                repo_root, args.base, args.head, args.author
+            )
+            if message is not None:
+                print(message)
+                return 1
         elif args.command == "release":
             release(repo_root, args.version, args.fragment, component=args.component)
         elif args.command == "next-version":
@@ -1777,6 +1869,10 @@ def main() -> int:
                 print(digest)
     except ChangelogError as exc:
         print(f"changelog: {exc}", file=sys.stderr)
+        # The handoff command uses exit 1 only for the missing-fragment signal.
+        # An operational failure must not be reported as that signal.
+        if args.command == "needs-changelog-context":
+            return 2
         return 1
     return 0
 
