@@ -44,6 +44,9 @@ on:
       NODE_AUTH_TOKEN:
         description: Token used only by canonical lockfile-bound package acquisition
         required: false
+      submodules-token:
+        description: Token used only to fetch pinned private submodules. Empty uses the job token.
+        required: false
 
 permissions:
   contents: read
@@ -225,7 +228,7 @@ jobs:
       contents: read
     outputs:
       transfer-cache-key: ${{ steps.create-node-modules-cache-key.outputs.cache-key }}
-      transfer-encryption-key: ${{ steps.package-node-modules.outputs.encryption-key }}
+      transfer-encryption-key: ${{ steps.seal-node-modules.outputs.encryption-key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -238,6 +241,7 @@ jobs:
       - name: Download pinned dependency transfer implementation
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
+          GITLINK_SHA256: c9e6dc7d0f9a027073d4e1b9a6c2c542b80e70cc6858a2f98f0549817fcfd7ff
           TRANSFER_SHA256: ${{ inputs.transfer-sha256 }}
         run: |
           set -euo pipefail
@@ -247,7 +251,48 @@ jobs:
           }
           transfer="$RUNNER_TEMP/container_dependency_transfer.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${CONTRACT_REF}/scripts/container_dependency_transfer.py" -o "$transfer"
+          gitlink="$RUNNER_TEMP/container_gitlink_file_dependencies.sh"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${CONTRACT_REF}/scripts/container_gitlink_file_dependencies.sh" -o "$gitlink"
+          printf '%s  %s\n' "$GITLINK_SHA256" "$gitlink" | sha256sum --check --strict
           printf '%s  %s\n' "$TRANSFER_SHA256" "$transfer" | sha256sum --check --strict
+      - name: Admit pinned gitlink file dependencies
+        id: gitlinks
+        env:
+          GITLINK_SHA256: c9e6dc7d0f9a027073d4e1b9a6c2c542b80e70cc6858a2f98f0549817fcfd7ff
+          PACKAGE_MANAGER: ${{ needs.prepare.outputs.package-manager }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_gitlink_file_dependencies.sh"
+          proof="$RUNNER_TEMP/container-gitlinks.json"
+          printf '%s  %s\n' "$GITLINK_SHA256" "$helper" | sha256sum --check --strict
+          if [ "$PACKAGE_MANAGER" != npm ] || [ ! -f package-lock.json ]; then
+            printf '%s\n' '{}' > "$proof"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash "$helper" admit package-lock.json "$REPOSITORY_OWNER" "$proof"
+          if [ "$(jq 'length' "$proof")" = 0 ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.gitlinks.outputs.needed == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: 'true'
+          token: ${{ secrets.submodules-token || github.token }}
+      - name: Confirm pinned gitlink checkouts
+        env:
+          GITLINK_SHA256: c9e6dc7d0f9a027073d4e1b9a6c2c542b80e70cc6858a2f98f0549817fcfd7ff
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_gitlink_file_dependencies.sh"
+          proof="$RUNNER_TEMP/container-gitlinks.json"
+          printf '%s  %s\n' "$GITLINK_SHA256" "$helper" | sha256sum --check --strict
+          bash "$helper" confirm "$proof"
       - id: package-node-modules
         name: Acquire exact lockfile packages without lifecycle execution
         env:
@@ -256,10 +301,11 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
           EVENT_NAME: ${{ github.event_name }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GITLINK_SHA256: c9e6dc7d0f9a027073d4e1b9a6c2c542b80e70cc6858a2f98f0549817fcfd7ff
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
           PACKAGE_MANAGER: ${{ needs.prepare.outputs.package-manager }}
           REPOSITORY: ${{ github.repository }}
-          TRANSFER_DIR: ${{ github.workspace }}/.verjson-container-node-modules-${{ github.run_id }}-${{ github.run_attempt }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           base_manifest=''
@@ -296,8 +342,21 @@ jobs:
           printf '%s  %s\n' '${{ inputs.acquisition-sha256 }}' "$acquisition" | sha256sum --check --strict
           validator_args=(--package-manager "$PACKAGE_MANAGER" --lock "$lock_file" --approved "$APPROVED_PRIVATE_PACKAGES")
           [ "$PACKAGE_MANAGER" = npm ] || validator_args+=(--manifest package.json --project-root .)
+          if [ "$PACKAGE_MANAGER" = npm ]; then
+            helper="$RUNNER_TEMP/container_gitlink_file_dependencies.sh"
+            proof="$RUNNER_TEMP/container-gitlinks.json"
+            printf '%s  %s\n' "$GITLINK_SHA256" "$helper" | sha256sum --check --strict
+            bash "$helper" admit package-lock.json "$REPOSITORY_OWNER" "$proof"
+            if [ "$(jq 'length' "$proof")" != 0 ]; then
+              bash "$helper" confirm "$proof"
+              bash "$helper" require-npm "$proof"
+            fi
+            validator_args+=(--manifest package.json --gitlinks "$proof")
+          fi
           [ -z "$base_manifest" ] || validator_args+=(--reviewed-manifest "$base_manifest")
           python3 -I "$acquisition" "${validator_args[@]}"
+          lock_digest="$(sha256sum "$lock_file" | cut -d' ' -f1)"
+          printf '%s\n' "$lock_digest" > "$RUNNER_TEMP/container-lock-sha256"
           user_config="$RUNNER_TEMP/container-user.npmrc"
           global_config="$RUNNER_TEMP/container-global.npmrc"
           npm_cache="$RUNNER_TEMP/container-npm-cache"
@@ -320,10 +379,32 @@ jobs:
             NPM_CONFIG_USERCONFIG="$user_config" \
             PATH="$PATH" \
             bash -c 'if [ "$1" = npm ]; then npm ci --ignore-scripts --no-audit --no-fund; else corepack pnpm install --frozen-lockfile --ignore-scripts; fi' _ "$PACKAGE_MANAGER"
+      - name: Build pinned gitlink packages without credentials
+        id: seal-node-modules
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          GITLINK_SHA256: c9e6dc7d0f9a027073d4e1b9a6c2c542b80e70cc6858a2f98f0549817fcfd7ff
+          NODE_AUTH_TOKEN: ''
+          NPM_TOKEN: ''
+          PACKAGE_MANAGER: ${{ needs.prepare.outputs.package-manager }}
+          TRANSFER_DIR: ${{ github.workspace }}/.verjson-container-node-modules-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_gitlink_file_dependencies.sh"
+          proof="$RUNNER_TEMP/container-gitlinks.json"
+          printf '%s  %s\n' "$GITLINK_SHA256" "$helper" | sha256sum --check --strict
+          if [ "$PACKAGE_MANAGER" = npm ]; then
+            bash "$helper" build "$proof"
+            bash "$helper" materialize "$proof" node_modules
+          fi
           artifact="$RUNNER_TEMP/container-node-modules"
           mkdir -p "$artifact"
           mv node_modules "$artifact/node_modules"
-          lock_digest="$(sha256sum "$lock_file" | cut -d' ' -f1)"
+          lock_digest="$(cat "$RUNNER_TEMP/container-lock-sha256")"
+          [ "${#lock_digest}" -eq 64 ] || { echo "::error::lock digest is missing"; exit 1; }
           printf '%s\n' "$lock_digest" > "$artifact/.verjson-lock-sha256"
           [ ! -e "$TRANSFER_DIR" ] && [ ! -L "$TRANSFER_DIR" ] || {
             echo "::error::reserved container dependency transfer path exists"
@@ -373,7 +454,8 @@ jobs:
             "$RUNNER_TEMP/container-npm-cache" "$RUNNER_TEMP/container-npm-home"
           rm -f "$RUNNER_TEMP/container-user.npmrc" "$RUNNER_TEMP/container-global.npmrc" \
             "$RUNNER_TEMP/container_private_dependencies.py" "$RUNNER_TEMP/container_dependency_transfer.py" \
-            "$RUNNER_TEMP/container-candidate-base-package.json"
+            "$RUNNER_TEMP/container_gitlink_file_dependencies.sh" "$RUNNER_TEMP/container-gitlinks.json" \
+            "$RUNNER_TEMP/container-lock-sha256" "$RUNNER_TEMP/container-candidate-base-package.json"
 
   publish-base:
     if: >-

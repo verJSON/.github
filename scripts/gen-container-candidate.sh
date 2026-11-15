@@ -99,7 +99,7 @@ jobs:
       disk-sha256: $disk_sha256
       retry-sha256: $retry_sha256
       provenance-sha256: $provenance_sha256
-$(if [ "$private_packages" = true ]; then printf '%s\n' '    secrets:' "      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}"; fi)
+$(if [ "$private_packages" = true ]; then printf '%s\n' '    secrets:' "      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}" "      submodules-token: \${{ secrets.SUBMODULES_TOKEN }}"; fi)
 YAML
   ;;
 validator)
@@ -183,6 +183,7 @@ if grep -Eq 'secrets: inherit|registry-namespace:|environment:' "\$caller"; then
 fi
 if [ "$private_packages" = true ]; then
   [ "\$(grep -cF 'NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}' "\$caller")" -eq 1 ] || fail "private-package caller must route its acquisition token only to trusted publication"
+  [ "\$(grep -cF 'submodules-token: \${{ secrets.SUBMODULES_TOKEN }}' "\$caller")" -eq 1 ] || fail "private-package caller must route the submodule token only to trusted publication"
 validation_job="\$(mktemp)"
 awk '/^  validate:/{copy=1} /^  publish:/{copy=0} copy' "\$caller" > "\$validation_job"
 if grep -Eq 'packages: read|secrets:|NODE_AUTH_TOKEN' "\$validation_job"; then
