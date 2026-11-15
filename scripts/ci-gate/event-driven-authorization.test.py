@@ -1069,9 +1069,21 @@ def main() -> int:
             "generated promotion callers must accept only trusted explicit dispatches")
 
     forbidden = re.compile(r"\bsleep\b|MERGE_PROBE|ci-wait", re.I)
+
+    def without_acquisition_watchdog(workflow: dict) -> dict:
+        # ADR 0230's runner-acquisition-watchdog polls with sleep on purpose; that
+        # bound is not merge-probe waiting. Scan every other job's executable text.
+        return {
+            "jobs": {
+                name: job
+                for name, job in workflow.get("jobs", {}).items()
+                if name != "runner-acquisition-watchdog"
+            }
+        }
+
     for path, workflow in ((REVIEW, review), (PROMOTE, promote), (RETRY, retry)):
         require(
-            not forbidden.search(executable_run_text(workflow)),
+            not forbidden.search(executable_run_text(without_acquisition_watchdog(workflow))),
             f"{path.name} still contains runner-held waiting",
         )
     require(promote_text.count("check-runs?per_page=100") == 1,
@@ -1081,7 +1093,7 @@ def main() -> int:
     mutated_review["jobs"]["gate"]["steps"].append(
         {"run": "for attempt in $(seq 1 20); do gh api commits/head/check-runs?per_page=100; sleep 30; done"})
     require(
-        forbidden.search(executable_run_text(mutated_review)) is not None,
+        forbidden.search(executable_run_text(without_acquisition_watchdog(mutated_review))) is not None,
         "runner-held waiting detector must reject executable sleep",
     )
 
@@ -1094,7 +1106,7 @@ def main() -> int:
         }
     )
     require(
-        forbidden.search(executable_run_text(mutated_comments)) is None,
+        forbidden.search(executable_run_text(without_acquisition_watchdog(mutated_comments))) is None,
         "runner-held waiting detector must ignore shell comments",
     )
     validate_runner_free_external_ci_wait(mutated_comments, "gate")
@@ -1108,7 +1120,7 @@ def main() -> int:
             {"run": inline_comment}
         )
         require(
-            forbidden.search(executable_run_text(documented_inline)) is None,
+            forbidden.search(executable_run_text(without_acquisition_watchdog(documented_inline))) is None,
             "inline comments at shell word boundaries must be ignored",
         )
         validate_runner_free_external_ci_wait(documented_inline, "gate")
@@ -1132,7 +1144,7 @@ def main() -> int:
             {"run": documentation_comment + "printf '%s\\n' ready"}
         )
         require(
-            forbidden.search(executable_run_text(documented)) is None,
+            forbidden.search(executable_run_text(without_acquisition_watchdog(documented))) is None,
             "top-level documentation comments must allow natural prose",
         )
     require(

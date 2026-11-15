@@ -26,4 +26,4 @@ Full-checkout bytes seen by `release.yml` verify and `capability-floor-observe`
 change with the privileged-merge provenance helpers, so their ADR 0235 pending
 backlog digests are refreshed.
 
-Required-workflow provenance helpers change the settable-guard inventory; `GUARD_COUNT` moves to 561.
+Required-workflow provenance helpers change the settable-guard inventory; `GUARD_COUNT` moves to 566.
