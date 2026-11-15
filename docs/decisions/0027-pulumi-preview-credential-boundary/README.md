@@ -73,3 +73,12 @@ caller reproducing an event/secret guard correctly.
   unlisted secret-bearing events; it also pins job permissions, command
   placement, credential scrubbing, checkout behavior, install/auth order,
   action SHAs, and the existing comment-on-push no-op contract.
+
+## 2026-11-15 — Environment-scoped Pulumi token
+
+[ADR 0266](../0266-pulumi-environment-scoped-token/README.md) lets a trusted ref
+omit the mapped `pulumi-access-token` when the caller sets a well-formed
+`secrets-environment`. Admission and validation still do not receive the token.
+The preview job reads `secrets.PULUMI_ACCESS_TOKEN` only while bound to that
+environment on the default branch. An empty `secrets-environment` keeps the
+three-secret admission rule in the decision above.

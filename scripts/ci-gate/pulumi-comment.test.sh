@@ -262,7 +262,7 @@ contains_literal "$preview_job" 'persist-credentials: false' \
   && pass "preview checkout does not persist GITHUB_TOKEN" \
   || fail "preview checkout persists credentials"
 contains_literal "$preview_job" 'run: npm ci' \
-  && contains_literal "$preview_job" 'NODE_AUTH_TOKEN: ${{ secrets.node-auth-token }}' \
+  && contains_literal "$preview_job" 'secrets.NODE_AUTH_TOKEN || secrets.node-auth-token' \
   && contains_literal "$preview_job" 'VERJSON_GIT_TOKEN: ${{ secrets.git-token }}' \
   && contains_literal "$preview_job" 'GIT_CONFIG_GLOBAL: /dev/null' \
   && contains_literal "$preview_job" "GIT_CONFIG_COUNT: '3'" \

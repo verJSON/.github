@@ -171,7 +171,7 @@ done
 preview_job="$(job_block preview)"
 validate_job="$(job_block validate)"
 env_line="$(grep -E '^    environment:' <<<"$preview_job")"
-[ "$env_line" = "    environment: \${{ github.event_name == 'pull_request' && inputs.preview-environment || '' }}" ] \
+[ "$env_line" = "    environment: \${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.secrets-environment) || (github.event_name == 'pull_request' && inputs.preview-environment) || '' }}" ] \
   && ! grep -qF 'outputs.' <<<"$env_line" \
   && pass "preview environment is derived from event and input, not a redactable step output" \
   || fail "preview environment is missing or depends on a step output (got: $env_line)"
