@@ -1288,6 +1288,367 @@ jobs:
               return stale
 
 
+          GATE_PRECOMPOSED = b'# GENERATED FILE \xe2\x80\x94 do not edit by hand.\n# Regenerate with:\n#   scripts/gen-gate-rearm-caller.sh @@SHA@@ > .github/workflows/gate-rearm.yml\n#\n# Thin caller for the immutable gate re-arm bridge in Verjson/.github.\nname: gate re-arm\n\non:\n  pull_request_target:\n    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, edited, unlabeled]\npermissions:\n  contents: read\n\njobs:\n  rearm:\n    permissions:\n      contents: read\n      actions: write\n      checks: write\n      issues: write\n      pull-requests: write\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@@@SHA@@\n    secrets: inherit\n    with:\n      ai_review_environment: ai-review-app\n'
+          GATE_COMPOSED = b'# GENERATED FILE \xe2\x80\x94 do not edit by hand.\n# Regenerate with:\n#   scripts/gen-gate-rearm-caller.sh @@SHA@@ > .github/workflows/gate-rearm.yml\n#\n# Thin caller for the immutable gate re-arm bridge in Verjson/.github.\nname: gate re-arm\n\non:\n  workflow_call:\n    inputs:\n      ai_review_environment:\n        description: Main-only environment containing the AI review App private key\n        required: true\n        type: string\n  pull_request_target:\n    types: [opened, reopened, synchronize]\npermissions:\n  contents: read\n\njobs:\n  rearm:\n    permissions:\n      contents: read\n      actions: write\n      checks: write\n      issues: write\n      pull-requests: write\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@@@SHA@@\n    secrets: inherit\n    with:\n      ai_review_environment: ai-review-app\n'
+          LABEL_LIFECYCLE = b'# GENERATED FILE \xe2\x80\x94 do not edit by hand.\n# Regenerate with:\n# scripts/gen-ai-review-label-rearm-caller.sh @@SHA@@ > .github/workflows/ai-review-label-rearm.yml\nname: AI review lifecycle re-arm\n\non:\n  pull_request_target:\n    types: [labeled, ready_for_review, converted_to_draft, edited, unlabeled]\n\npermissions:\n  actions: read\n  contents: read\n\njobs:\n  rearm:\n    permissions:\n      actions: write\n      checks: write\n      contents: read\n      issues: write\n      pull-requests: write\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@@@SHA@@\n    secrets: inherit\n    with:\n      ai_review_environment: ai-review-app\n'
+          LABEL_CURRENT = b'# GENERATED FILE \xe2\x80\x94 do not edit by hand.\n# Regenerate with:\n# scripts/gen-ai-review-label-rearm-caller.sh @@SHA@@ > .github/workflows/ai-review-label-rearm.yml\nname: AI review label re-arm\n\non:\n  pull_request_target:\n    types: [labeled]\n\npermissions:\n  actions: read\n  contents: read\n\njobs:\n  rearm:\n    permissions:\n      actions: write\n      checks: write\n      contents: read\n      issues: write\n      pull-requests: write\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@@@SHA@@\n    secrets: inherit\n    with:\n      ai_review_environment: ai-review-app\n'
+
+          def guarded_template():
+              return (
+                  b"# GENERATED FILE \xe2\x80\x94 do not edit by hand.\n# Regenerate with:\n#   scripts/gen-gate-rearm-caller.sh @@SHA@@ > .github/workflows/gate-rearm.yml\n#\n# Thin caller for the immutable gate re-arm bridge in Verjson/.github.\nname: gate re-arm\n\non:\n  workflow_call:\n    inputs:\n      ai_review_environment:\n        description: Main-only environment containing the AI review App private key\n        required: true\n        type: string\n  pull_request_target:\n    types: [opened, reopened, synchronize]\npermissions:\n  contents: read\n\n# No concurrency here or on either job: the arm's group is declared by the reusable\n# workflow and engages only when rearm starts, so a skipped rearm displaces nothing.\njobs:\n  # Yields the local arm only where the base ref provably requires the organization's\n  # arm, whose own run arms the head; any uncertainty keeps the local arm. A liveness\n  # decision, never admission evidence: Gate W alone checks the required run (ADR 0255).\n  guard:\n    runs-on: "
+                  + gha('fromJSON(vars.CI_LANE_UNTRUSTED || \'["ubuntu-24.04"]\')').encode()
+                  + b'\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    outputs:\n      local_arm: '
+                  + gha("steps.decide.outputs.local_arm == 'false' && 'false' || 'true'").encode()
+                  + b'\n    steps:\n      - id: decide\n        continue-on-error: true\n        shell: bash\n        env:\n          GH_TOKEN: '
+                  + gha('github.token').encode()
+                  + b'\n          EVENT_NAME: '
+                  + gha('github.event_name').encode()
+                  + b'\n          EVENT_ACTION: '
+                  + gha('github.event.action').encode()
+                  + b'\n          REPOSITORY: '
+                  + gha('github.repository').encode()
+                  + b'\n          BASE_REF: '
+                  + gha('github.event.pull_request.base.ref').encode()
+                  + b'\n        run: |\n          #!/usr/bin/env bash\n          readonly ORG_ARM_REPOSITORY_ID=1269388380\n          readonly ORG_ARM_PATH=.github/workflows/gate-rearm.yml\n\n          decide() { # local_arm reason\n            printf \'local_arm=%s\\n\' "$1" >>"$GITHUB_OUTPUT"\n            printf \'local arm guard: local_arm=%s: %s\\n\' "$1" "${2//[[:cntrl:]]/ }"\n            exit 0\n          }\n\n          case "$EVENT_NAME/$EVENT_ACTION" in\n            pull_request_target/opened|pull_request_target/reopened|pull_request_target/synchronize) ;;\n            *) decide true "$EVENT_NAME/$EVENT_ACTION is not a head transition the organization arm receives" ;;\n          esac\n\n          base_ref_path="$(jq -rn --arg r "$BASE_REF" \'$r | @uri\')"\n          rules_path="repos/$REPOSITORY/rules/branches/$base_ref_path"\n          scratch="$(mktemp -d)"\n          trap \'rm -rf "$scratch"\' EXIT\n          gh api --paginate "$rules_path?per_page=100" </dev/null >"$scratch/rules" 2>"$scratch/error" \\\n            || decide true "could not read $rules_path: $(head -c 500 "$scratch/error")"\n          rules="$(jq -s \'add\' <"$scratch/rules" 2>/dev/null)" \\\n            || decide true "the rules response is not JSON"\n          verdict="$(jq -r --arg path "$ORG_ARM_PATH" --argjson id "$ORG_ARM_REPOSITORY_ID" \'\n            def readable:\n              (.ruleset_id | type) == "number"\n              and (.parameters | type) == "object"\n              and (.parameters.workflows | type) == "array" and (.parameters.workflows | length) > 0\n              and all(.parameters.workflows[]; type == "object" and (.path | type) == "string" and .path != ""\n                                               and (.repository_id | type) == "number");\n            if type != "array" then "true\\tthe rules response is not a JSON array"\n            elif any(.[]; type != "object" or (.type == "workflows" and (readable | not))) then\n              "true\\tthe rules response carries a rule the guard cannot read"\n            else [ .[] | select(.type == "workflows") | .parameters.workflows[] | select(.path == $path) ] as $at_path\n            | if ($at_path | length) == 0 then "true\\tno workflows rule names \\($path)"\n              elif any($at_path[]; .repository_id != $id) then\n                "true\\tambiguous: a workflows rule names \\($path) from repository \\([ $at_path[] | select(.repository_id != $id) | .repository_id ] | map(tostring) | join(", ")), not the organization arm (\\($id))"\n              else "false\\tthe organization arm \\($path) from repository \\($id) is required on this base ref" end end\' <<<"$rules")"\n          decide "${verdict%%$\'\\t\'*}" "${verdict#*$\'\\t\'}"\n  rearm:\n    needs: guard\n    if: '
+                  + gha("!cancelled() && needs.guard.outputs.local_arm != 'false'").encode()
+                  + b'\n    permissions:\n      contents: read\n      actions: write\n      checks: write\n      issues: write\n      pull-requests: write\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@@@SHA@@\n    secrets: inherit\n    with:\n      ai_review_environment: ai-review-app\n'
+              )
+
+          def gha(body):
+              return "$" + "{{ " + body + " }}"
+
+
+          def fill_sha(template, sha):
+              require(SHA.fullmatch(sha) is not None and b"@@SHA@@" in template, "revision is malformed")
+              return template.replace(b"@@SHA@@", sha.encode())
+
+
+          def render_gate(epoch, sha):
+              templates = {"precomposed": GATE_PRECOMPOSED, "composed": GATE_COMPOSED}
+              if epoch == "guarded":
+                  raw = guarded_template()
+              else:
+                  require(epoch in templates, "is not the generated caller at the stale and contract revisions")
+                  raw = templates[epoch]
+              return fill_sha(raw, sha)
+
+
+          def render_label(epoch, sha):
+              templates = {"lifecycle": LABEL_LIFECYCLE, "label": LABEL_CURRENT}
+              require(epoch in templates, "is not the generated caller at the stale and contract revisions")
+              return fill_sha(templates[epoch], sha)
+
+
+          def bash_percent_q(text):
+              safe = set("%+-./:=@_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+              special = set(" !\"#$&'()*,;<>?[\\]^`{|}~")
+              if text == "":
+                  return "''"
+              quoted = []
+              for char in text:
+                  code = ord(char)
+                  if char in safe or code > 159 and code not in (8232, 8233):
+                      quoted.append(char)
+                  elif char in special:
+                      quoted.append("\\" + char)
+                  else:
+                      require(False, "generated caller JSON is not shell-quoted")
+              return "".join(quoted)
+
+
+          def yaml_single(text):
+              return "'" + text.replace("'", "''") + "'"
+
+
+          def allowed_text(text):
+              if not isinstance(text, str) or text == "" or "$" + "{{" in text:
+                  return False
+              for char in text:
+                  code = ord(char)
+                  if code < 32 or code == 127 or 128 <= code <= 159 or code in (8232, 8233):
+                      return False
+              return True
+
+
+          def compact_json(value):
+              return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+          def json_value(text):
+              try:
+                  value = json.loads(text)
+              except ValueError:
+                  return None
+              if not isinstance(text, str) or text != compact_json(value):
+                  return None
+              return value
+
+
+          CHECK_KEYS = {"app_id", "name", "workflow_id", "workflow_path"}
+          CHECK_NAME_FORBIDDEN = re.compile(r"^(AI review authorization|AI terminal merge promotion|AI terminal promotion retry)$")
+          CHECK_PATH_OK = re.compile(r"^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$")
+          CHECK_PATH_FORBIDDEN = re.compile(r"/ai-(review-merge|privileged-merge|promotion-retry)\.yml$")
+          LABEL_OK = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+          def valid_checks(text):
+              value = json_value(text)
+              if not isinstance(value, list) or not value:
+                  return False
+              names = []
+              for item in value:
+                  if not isinstance(item, dict) or set(item) != CHECK_KEYS:
+                      return False
+                  name, path = item["name"], item["workflow_path"]
+                  if (not isinstance(name, str) or not allowed_text(name) or CHECK_NAME_FORBIDDEN.fullmatch(name) is not None
+                          or not isinstance(path, str) or CHECK_PATH_OK.fullmatch(path) is None
+                          or CHECK_PATH_FORBIDDEN.search(path) is not None):
+                      return False
+                  for key in ("app_id", "workflow_id"):
+                      number = item[key]
+                      if type(number) is not int or number <= 0:
+                          return False
+                  names.append(name)
+              return len(names) == len(set(names))
+
+
+          def valid_workflow_names(text):
+              value = json_value(text)
+              if not isinstance(value, list) or not value or len(value) != len(set(value)):
+                  return False
+              return all(isinstance(item, str) and allowed_text(item) for item in value)
+
+
+          def valid_runner_labels(text):
+              value = json_value(text)
+              if not isinstance(value, list) or not value:
+                  return False
+              return all(isinstance(item, str) and LABEL_OK.fullmatch(item) is not None for item in value)
+
+
+          def render_privileged(sha, required_checks, runner_labels=None):
+              require(SHA.fullmatch(sha) is not None and valid_checks(required_checks) is True,
+                      "is not the generated caller at the stale and contract revisions")
+              require(runner_labels is None or valid_runner_labels(runner_labels) is True,
+                      "is not the generated caller at the stale and contract revisions")
+              labels_regen = "" if runner_labels is None else " '" + runner_labels + "'"
+              labels_line = "" if runner_labels is None else "\n      runner_labels: " + yaml_single(runner_labels)
+              return (
+                  "# GENERATED FILE — do not edit by hand.\n"
+                  "# Regenerate with:\n"
+                  "#   scripts/gen-privileged-merge-caller.sh " + sha + " " + bash_percent_q(required_checks) + labels_regen
+                  + " > .github/workflows/ai-privileged-merge.yml\n"
+                  "#\n"
+                  "# Thin caller for the canonical privileged merge (Verjson/.github). All trust\n"
+                  "# logic lives there; nothing here may re-implement it.\n"
+                  "name: AI privileged merge\n"
+                  "\n"
+                  "on:\n"
+                  "  workflow_dispatch:\n"
+                  "    inputs:\n"
+                  "      pr_number:\n"
+                  "        required: true\n"
+                  "        type: string\n"
+                  "      expected_head_sha:\n"
+                  "        required: true\n"
+                  "        type: string\n"
+                  "      authorization_check_id:\n"
+                  "        required: true\n"
+                  "        type: string\n"
+                  "      arm_run_id:\n"
+                  "        required: true\n"
+                  "        type: string\n"
+                  "      arm_run_attempt:\n"
+                  "        required: true\n"
+                  "        type: string\n"
+                  "      review_policy:\n"
+                  "        required: true\n"
+                  "        type: string\n"
+                  "      source_run_id:\n"
+                  "        required: false\n"
+                  "        type: string\n"
+                  "\n"
+                  "permissions:\n"
+                  "  actions: write\n"
+                  "  checks: read\n"
+                  "  contents: read\n"
+                  "  issues: read\n"
+                  "  pull-requests: read\n"
+                  "\n"
+                  "# Deliberately distinct from the canonical workflow's concurrency group.\n"
+                  "concurrency:\n"
+                  "  group: ai-native-automerge-call-" + gha("inputs.pr_number") + "-" + gha("inputs.expected_head_sha") + "\n"
+                  "  cancel-in-progress: false\n"
+                  "\n"
+                  "jobs:\n"
+                  "  # The job key is CONTRACTUAL: the published check name is\n"
+                  "  # \"<caller job> / <callee job>\" and both workflows exclude that shape.\n"
+                  "  # Renaming it makes the gate wait on its own continuation.\n"
+                  "  privileged_merge:\n"
+                  "    uses: Verjson/.github/.github/workflows/ai-privileged-merge.yml@" + sha + "\n"
+                  "    secrets: inherit\n"
+                  "    # The callee reads its caller-owned environment secret directly.\n"
+                  "    with:\n"
+                  "      merge_environment: merge-app\n"
+                  "      pr_number: " + gha("inputs.pr_number") + "\n"
+                  "      expected_head_sha: " + gha("inputs.expected_head_sha") + "\n"
+                  "      authorization_check_id: " + gha("inputs.authorization_check_id") + "\n"
+                  "      arm_run_id: " + gha("inputs.arm_run_id") + "\n"
+                  "      arm_run_attempt: " + gha("inputs.arm_run_attempt") + "\n"
+                  "      review_policy: " + gha("inputs.review_policy") + "\n"
+                  "      source_run_id: " + gha("inputs.source_run_id") + "\n"
+                  "      required_checks: " + yaml_single(required_checks) + "\n"
+                  "      privileged_lane: " + gha("vars.CI_LANE_PRIVILEGED") + labels_line + "\n"
+                  "      merge_app_client_id: " + gha("vars.MERGE_APP_CLIENT_ID") + "\n"
+              ).encode()
+
+
+          def render_retry(sha, workflow_names, required_checks):
+              require(SHA.fullmatch(sha) is not None and valid_workflow_names(workflow_names) is True
+                      and valid_checks(required_checks) is True,
+                      "is not the generated caller at the stale and contract revisions")
+              return (
+                  "# GENERATED FILE — do not edit by hand.\n"
+                  "# Regenerate with:\n"
+                  "#   scripts/gen-privileged-merge-caller.sh " + sha + " --retry " + bash_percent_q(workflow_names) + " "
+                  + bash_percent_q(required_checks) + " > .github/workflows/ai-promotion-retry.yml\n"
+                  "name: AI terminal promotion retry\n"
+                  "\n"
+                  "on:\n"
+                  "  workflow_run:\n"
+                  "    workflows: " + workflow_names + "\n"
+                  "    types: [completed]\n"
+                  "\n"
+                  "permissions:\n"
+                  "  actions: write\n"
+                  "  checks: read\n"
+                  "  contents: read\n"
+                  "  issues: read\n"
+                  "  pull-requests: read\n"
+                  "\n"
+                  "jobs:\n"
+                  "  retry:\n"
+                  "    uses: Verjson/.github/.github/workflows/ai-promotion-retry.yml@" + sha + "\n"
+                  "    secrets: inherit\n"
+                  "    with:\n"
+                  "      merge_environment: merge-app\n"
+                  "      required_checks: " + yaml_single(required_checks) + "\n"
+                  "      privileged_lane: " + gha("vars.CI_LANE_PRIVILEGED") + "\n"
+                  "      merge_app_client_id: " + gha("vars.MERGE_APP_CLIENT_ID") + "\n"
+              ).encode()
+
+
+          def yaml_unescape(quoted):
+              require(len(quoted) >= 2 and quoted[:1] == b"'" and quoted[-1:] == b"'",
+                      "is not the generated caller at the stale and contract revisions")
+              inner = quoted[1:-1]
+              require(b"'" not in inner.replace(b"''", b""), "is not the generated caller at the stale and contract revisions")
+              return inner.replace(b"''", b"'").decode("utf-8")
+
+
+          PRIVILEGED_CHECKS = re.compile(rb"\n      required_checks: ('(?:[^']|'')*')\n      privileged_lane: ")
+          PRIVILEGED_LABELS = re.compile(rb"\n      runner_labels: ('(?:[^']|'')*')\n      merge_app_client_id: ")
+          RETRY_NAMES = re.compile(rb"\n    workflows: (\[[^\n]*\])\n    types: \[completed\]\n")
+
+
+          def extract_privileged(content):
+              checks = PRIVILEGED_CHECKS.search(content)
+              require(checks is not None, "is not the generated caller at the stale and contract revisions")
+              labels = PRIVILEGED_LABELS.search(content)
+              return yaml_unescape(checks.group(1)), None if labels is None else yaml_unescape(labels.group(1))
+
+
+          def extract_retry(content):
+              names = RETRY_NAMES.search(content)
+              checks = PRIVILEGED_CHECKS.search(content)
+              require(names is not None and checks is not None, "is not the generated caller at the stale and contract revisions")
+              return names.group(1).decode("utf-8"), yaml_unescape(checks.group(1))
+
+
+          # Newest template boundary first. A revision uses the newest boundary it contains.
+          # These commits are the generator revisions that changed emitted caller bytes.
+          GATE_TEMPLATE_EPOCHS = (
+              ("635aca975b1aa93660138875ba9616b27693476f", "guarded"),
+              ("ae70e4ef0a70fa446fc6583a2473f2b4e68eac36", "composed"),
+              ("e7db320ec8c63d36678623849f53b9fd88b1b0cb", "precomposed"),
+          )
+          LABEL_TEMPLATE_EPOCHS = (
+              ("0f8aead1065df13ef8cf232f7f2527c7d35da8a1", "label"),
+              ("e7db320ec8c63d36678623849f53b9fd88b1b0cb", "lifecycle"),
+          )
+          PRIVILEGED_TEMPLATE_EPOCH = "0bc98a81b6f42744d23ec1cc9af8e7053d324bf8"
+          GENERATED_CALLERS = {
+              ".github/workflows/gate-rearm.yml": "gate",
+              ".github/workflows/ai-review-label-rearm.yml": "label",
+              ".github/workflows/ai-privileged-merge.yml": "privileged",
+              ".github/workflows/ai-promotion-retry.yml": "retry",
+          }
+
+
+          def template_name(revision, epochs, descends):
+              for boundary, name in epochs:
+                  if descends(boundary, revision):
+                      return name
+              return ""
+
+
+          def prove_generated_caller(path, before, after, stale, contract, descends):
+              kind = GENERATED_CALLERS[path]
+              reason = "is not the generated caller at the stale and contract revisions"
+              if kind in {"privileged", "retry"}:
+                  require(descends(PRIVILEGED_TEMPLATE_EPOCH, stale) is True and descends(PRIVILEGED_TEMPLATE_EPOCH, contract) is True, reason)
+              if kind == "gate":
+                  epoch_base = template_name(stale, GATE_TEMPLATE_EPOCHS, descends)
+                  epoch_head = template_name(contract, GATE_TEMPLATE_EPOCHS, descends)
+                  require(epoch_base in {"precomposed", "composed", "guarded"}
+                          and epoch_head in {"precomposed", "composed", "guarded"}, reason)
+                  require(before == render_gate(epoch_base, stale) and after == render_gate(epoch_head, contract), reason)
+              elif kind == "label":
+                  epoch_base = template_name(stale, LABEL_TEMPLATE_EPOCHS, descends)
+                  epoch_head = template_name(contract, LABEL_TEMPLATE_EPOCHS, descends)
+                  require(epoch_base in {"lifecycle", "label"} and epoch_head in {"lifecycle", "label"}, reason)
+                  require(before == render_label(epoch_base, stale) and after == render_label(epoch_head, contract), reason)
+              elif kind == "privileged":
+                  checks, labels = extract_privileged(before)
+                  require(before == render_privileged(stale, checks, labels) and after == render_privileged(contract, checks, labels), reason)
+              else:
+                  require(kind == "retry", reason)
+                  names, checks = extract_retry(before)
+                  require(before == render_retry(stale, names, checks) and after == render_retry(contract, names, checks), reason)
+
+
+          def subset_substituted(before, after, swaps):
+              # A companion may replace any non-empty subset of the stale pin and digest tokens.
+              # Every other byte stays put, so a shared pin can move for the callers that moved
+              # and remain for a caller the lane does not move.
+              keys = sorted((key for key, value in swaps.items() if key != value), key=len, reverse=True)
+              spans = []
+              index = 0
+              while index < len(before):
+                  key = next((candidate for candidate in keys if before.startswith(candidate, index)), None)
+                  if key is None:
+                      index += 1
+                      continue
+                  spans.append((index, key))
+                  index += len(key)
+              cursor = out = 0
+              changed = False
+              for start, key in spans:
+                  gap = before[cursor:start]
+                  if after[out:out + len(gap)] != gap:
+                      return False
+                  out += len(gap)
+                  value = swaps[key]
+                  if after.startswith(key, out):
+                      out += len(key)
+                  elif after.startswith(value, out):
+                      out += len(value)
+                      changed = True
+                  else:
+                      return False
+                  cursor = start + len(key)
+              return changed and after[out:] == before[cursor:]
+
           def compare(base, head):
               comparison = api(f"repos/{CANONICAL}/compare/{base}...{head}")
               require(comparison["base_commit"]["sha"] == base, "canonical comparison base is not exact")
@@ -1355,8 +1716,9 @@ jobs:
                   "default-branch review caller is not generated by a recognized template",
               )
               require(head_caller == render_caller(contract), "proposed review caller is not generated")
-              # Consumer contract tests mirror the caller pin and digest. A mirror may change only by
-              # swapping exactly those tokens; workflow and action configuration may not change at all.
+              # Consumer contract tests mirror caller pins and digests. A mirror may change only by
+              # substituting a subset of those tokens. Generated gate callers move by the same
+              # render proof as the review caller.
               swaps = {stale.encode(): contract.encode(),
                        hashlib.sha256(base_caller).hexdigest().encode(): hashlib.sha256(head_caller).hexdigest().encode()}
               added = sorted(path for path in changed if path not in base_tree)
@@ -1374,15 +1736,31 @@ jobs:
               for path in modified:
                   require(path in base_tree and path in head_tree, f"{shown(path)} is not modified in place")
               # Exact-case only: GitHub runs workflows from `.github/workflows/` itself, never a subdirectory.
-              reusable_ci = [path for path in modified if WORKFLOW_FILE.fullmatch(path) is not None]
+              generated = [path for path in modified if path in GENERATED_CALLERS]
+              reusable_ci = [path for path in modified if path not in GENERATED_CALLERS and WORKFLOW_FILE.fullmatch(path) is not None]
+              ancestry = {}
+
+              def descends(older, newer):
+                  key = (older, newer)
+                  if key not in ancestry:
+                      ancestry[key] = contains(older, newer)
+                  return ancestry[key]
+
+              for path in generated:
+                  before_caller = blob(repo, base_tree[path])
+                  after_caller = blob(repo, head_tree[path])
+                  prove_generated_caller(path, before_caller, after_caller, stale, contract, descends)
+                  old_digest = hashlib.sha256(before_caller).hexdigest().encode()
+                  new_digest = hashlib.sha256(after_caller).hexdigest().encode()
+                  if old_digest != new_digest:
+                      swaps[old_digest] = new_digest
               ci_stale = set()
               for path in reusable_ci:
                   ci_stale |= reusable_ci_pins(path, blob(repo, base_tree[path]), blob(repo, head_tree[path]), contract)
               # A contract test may mirror a moved reusable CI pin as well; it moves to the same contract.
               swaps.update({revision.encode(): contract.encode() for revision in ci_stale})
-              swap = re.compile(b"|".join(re.escape(token) for token in sorted(swaps, key=len, reverse=True)))
               for path in modified:
-                  if path in reusable_ci:
+                  if path in reusable_ci or path in generated:
                       continue
                   base_entry, head_entry = base_tree[path], head_tree[path]
                   # GitHub matches these names case-insensitively on case-insensitive checkouts.
@@ -1391,7 +1769,7 @@ jobs:
                           f"{shown(path)} is workflow or action configuration")
                   before = blob(repo, base_entry)
                   after = blob(repo, head_entry)
-                  require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),
+                  require(subset_substituted(before, after, swaps),
                           f"{shown(path)} changes more than the review caller pin and digest")
 
               floor_to_stale = compare(CASING_REPAIR, stale)
@@ -1413,6 +1791,21 @@ jobs:
                       return 0
                   if len(arguments) == 2 and arguments[0] == "render-caller" and SHA.fullmatch(arguments[1]):
                       sys.stdout.buffer.write(render_caller(arguments[1]))
+                      return 0
+                  if (len(arguments) == 3 and arguments[0] == "render-gate"
+                          and arguments[1] in {"precomposed", "composed", "guarded"} and SHA.fullmatch(arguments[2])):
+                      sys.stdout.buffer.write(render_gate(arguments[1], arguments[2]))
+                      return 0
+                  if (len(arguments) == 3 and arguments[0] == "render-label"
+                          and arguments[1] in {"lifecycle", "label"} and SHA.fullmatch(arguments[2])):
+                      sys.stdout.buffer.write(render_label(arguments[1], arguments[2]))
+                      return 0
+                  if (arguments[:1] == ["render-privileged"] and len(arguments) in {3, 4}
+                          and SHA.fullmatch(arguments[1])):
+                      sys.stdout.buffer.write(render_privileged(arguments[1], arguments[2], arguments[3] if len(arguments) == 4 else None))
+                      return 0
+                  if (len(arguments) == 4 and arguments[0] == "render-retry" and SHA.fullmatch(arguments[1])):
+                      sys.stdout.buffer.write(render_retry(arguments[1], arguments[2], arguments[3]))
                       return 0
               except Ineligible as error:
                   print(f"not a stale review caller bootstrap: {error}", file=sys.stderr)

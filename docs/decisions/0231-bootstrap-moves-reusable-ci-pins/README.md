@@ -159,6 +159,10 @@ the gate.
   revision is rotated to this change's merge SHA and read back.
 - A consumer that pins a reusable CI workflow outside the allowlist still needs an
   ordinary pull request after its bootstrap, reviewed by the now-current caller.
+  [ADR 0268](../0268-bootstrap-generated-gate-callers-and-subset-pin-swaps/README.md)
+  later admits the four generated gate callers by render proof, and lets a companion
+  swap a subset of a shared stale SHA so node CI can stay put. The reusable CI
+  allowlist and its line-diff proof are unchanged.
 
 ## Verification
 
@@ -186,3 +190,12 @@ through the same step, with canonical ancestry taken from local git. It reports
 `eligible=true`, stale `68b823b1`, and contract `ff21f300`. The live default-branch callers of
 verjson-cli (`ci.yml`, `actionlint.yml`), verjson-payments, and verjson-cli-cloud, each
 moved to the contract, are all admitted by the narrowed rule.
+
+## Amendments
+
+### 2026-11-15 — Subset swaps for a shared stale SHA (#1843)
+
+ADR 0268 keeps this decision's reusable CI proof and relaxes the companion rule
+that every occurrence of a moved pin must be replaced. A contract test may leave
+the occurrences that belong to a caller this lane does not move. Generated gate
+callers are not added to `REUSABLE_CI`; they use the review caller's render proof.

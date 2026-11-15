@@ -5,7 +5,9 @@
 - **Issue:** [verJSON/.github#1696](https://github.com/verJSON/.github/issues/1696)
 - **Extends:** [ADR 0079](../0079-head-bound-ai-authorization-and-native-auto-merge/README.md), [ADR 0145](../0145-recover-zero-provider-review-preflight/README.md), [ADR 0166](../0166-environment-only-app-private-keys/README.md), [ADR 0206](../0206-ai-authorization-property-is-independent/README.md)
 - **Extended by:** [ADR 0231](../0231-bootstrap-moves-reusable-ci-pins/README.md) (2026-10-14) — a bootstrap may
-  also move allowlisted canonical reusable CI pins to its contract revision, widening rule 5's companions
+  also move allowlisted canonical reusable CI pins to its contract revision, widening rule 5's companions;
+  [ADR 0268](../0268-bootstrap-generated-gate-callers-and-subset-pin-swaps/README.md) (2026-11-15) — a bootstrap may
+  also move the other generated gate callers when both sides match the generator, and a companion may swap a subset of those tokens
 - **Category:** Merge-gate authorization (sensitive class)
 
 ## Context
@@ -299,3 +301,14 @@ bypass actors unchanged. Post-rotation PR #1934 run 1852 at head
 passed; dispatch run 40628569755 also concluded success. GitHub reported 19
 successful and 5 skipped checks, with no failures. The final receipt commit
 still requires its own checks before merge.
+
+### 2026-11-15 — Generated gate callers and subset pin swaps (#1843)
+
+[ADR 0268](../0268-bootstrap-generated-gate-callers-and-subset-pin-swaps/README.md)
+admits `gate-rearm.yml`, `ai-review-label-rearm.yml`, `ai-privileged-merge.yml`,
+and `ai-promotion-retry.yml` on the same bootstrap when each side equals the
+generator output for that revision's template. Rule 5's companions may replace
+a subset of the admitted pin and digest tokens instead of every occurrence.
+The review-caller render proof, the stale-revision gate, and the single
+generated fragment are unchanged. The lane still takes effect only after
+ruleset 20722935 is rotated to the merge commit that carries the new proof.
