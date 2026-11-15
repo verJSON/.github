@@ -107,7 +107,7 @@ jobs:
       environment: ${{ inputs.merge_environment }}
 
   invalid_verjson_route:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner')) }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-git-runners') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-git-runners')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
@@ -118,7 +118,7 @@ jobs:
           exit 1
 
   validate_privileged_lane:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-git-runners') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
@@ -149,7 +149,7 @@ jobs:
   privileged_merge:
     environment: ${{ inputs.merge_environment }}
     needs: [validate_privileged_lane, app-key-policy]
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (needs.app-key-policy.result == 'success' && (always() && (github.repository_owner != 'Verjson' || github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner' && inputs.privileged_lane == '["ubuntu-24.04"]' && needs.validate_privileged_lane.result == 'success'))) }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (needs.app-key-policy.result == 'success' && (always() && (github.repository_owner != 'Verjson' || github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-git-runners') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-git-runners' && inputs.privileged_lane == '["ubuntu-24.04"]' && needs.validate_privileged_lane.result == 'success'))) }}
     runs-on: ${{ github.repository_owner != 'Verjson' && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.visibility == 'public' && 'ubuntu-24.04' || fromJSON(inputs.privileged_lane) }}
     timeout-minutes: 5
     outputs:

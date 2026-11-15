@@ -133,12 +133,12 @@ import yaml
 
 workflow = yaml.safe_load(open(sys.argv[1]))
 
-allowed = ("Verjson/.github", "Verjson/verjson-github-runner")
+allowed = ("Verjson/.github", "Verjson/verjson-git-runners")
 allow_guard = "(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true)"
 public_guard = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true"
-want_guard_if = "${{ " + allow_guard + " && (github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner')) }}"
-want_validation_if = "${{ " + allow_guard + " && (github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner') }}"
-want_if = "${{ always() && (github.repository_owner != 'Verjson' || github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner' && inputs.privileged_lane == '[\"ubuntu-24.04\"]' && needs.validate_privileged_lane.result == 'success') }}"
+want_guard_if = "${{ " + allow_guard + " && (github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-git-runners') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-git-runners')) }}"
+want_validation_if = "${{ " + allow_guard + " && (github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-git-runners') }}"
+want_if = "${{ always() && (github.repository_owner != 'Verjson' || github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-git-runners') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-git-runners' && inputs.privileged_lane == '[\"ubuntu-24.04\"]' && needs.validate_privileged_lane.result == 'success') }}"
 want_if = "${{ needs.app-key-policy.result == 'success' && (" + want_if.removeprefix("${{").removesuffix("}}").strip() + ") }}"
 want_if = "${{ " + allow_guard + " && (" + want_if.removeprefix("${{").removesuffix("}}").strip() + ") }}"
 want_runs_on = "${{ github.repository_owner != 'Verjson' && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.visibility == 'public' && 'ubuntu-24.04' || fromJSON(inputs.privileged_lane) }}"
@@ -216,7 +216,7 @@ mutations.append(non_failing_guard)
 
 widened = copy.deepcopy(workflow)
 widened["jobs"]["privileged_merge"]["if"] = widened["jobs"]["privileged_merge"]["if"].replace(
-    "github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner'",
+    "github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-git-runners'",
     "startsWith(github.repository, 'Verjson/')")
 mutations.append(widened)
 
