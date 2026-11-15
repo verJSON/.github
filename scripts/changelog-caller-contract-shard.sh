@@ -31,3 +31,25 @@ changelog_caller_case_selected() {
   fi
   return 1
 }
+
+# Predict a later selection without consuming it. Offset 0 is the next case.
+# Fixture builds use this so a shared tree is created on first selected use
+# without changing the order or number of changelog_caller_case_selected calls.
+changelog_caller_case_would_run() {
+  local offset="${1:-0}"
+  local shard="${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"
+  local width="$CHANGELOG_CALLER_CONTRACT_SHARD_WIDTH"
+  local index slot
+  [ "$shard" = all ] && return 0
+  index=$(( ${caller_case_count:-0} + offset ))
+  slot=$(( index % width + 1 ))
+  [ "$slot" = "$shard" ]
+}
+
+changelog_caller_any_upcoming() {
+  local count="$1" offset
+  for ((offset = 0; offset < count; offset++)); do
+    changelog_caller_case_would_run "$offset" && return 0
+  done
+  return 1
+}

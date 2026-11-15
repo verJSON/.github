@@ -168,6 +168,126 @@ for variable, reference in sorted(references.items()):
             break
 if leaks:
     raise SystemExit("case fixtures defined only by generator-only assertions: " + ", ".join(leaks))
+
+# Out-of-case reads of a shared adopter tree must name the selection that built
+# it. A grep of $quoted after the quoted case was skipped is a silent weaken
+# (#1978): the assertion runs, the tree was never built, and the failure is
+# either lost to a suspended pass/fail or blamed on the next selected case.
+def _skip_heredoc(index, line):
+    match = re.search(r"(?<!<)<<(?!<)-?\s*['\"]?([A-Za-z0-9_]+)", line)
+    if not match or line[: match.start()].count("'") % 2 == 1:
+        return None
+    tag = match.group(1)
+    cursor = index + 1
+    while cursor < len(lines) and lines[cursor] != tag:
+        cursor += 1
+    return cursor + 1 if cursor < len(lines) else len(lines)
+
+
+inside_function = set()
+cursor = 0
+while cursor < len(lines):
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{$", lines[cursor]):
+        depth = 1
+        cursor += 1
+        while cursor < len(lines) and depth:
+            nxt = _skip_heredoc(cursor, lines[cursor])
+            if nxt is not None:
+                inside_function.update(range(cursor, nxt))
+                cursor = nxt
+                continue
+            inside_function.add(cursor)
+            depth += lines[cursor].count("{") - lines[cursor].count("}")
+            cursor += 1
+        continue
+    cursor += 1
+
+owned_lines = set()
+prepared_lines = set()
+cursor = 0
+while cursor < len(lines):
+    if cursor in inside_function:
+        cursor += 1
+        continue
+    if re.match(r"\s*fixture_owned_here ", lines[cursor]):
+        cursor += 1
+        while cursor < len(lines) and lines[cursor] != "FIXTURE_OWNER":
+            owned_lines.add(cursor)
+            cursor += 1
+        cursor += 1
+        continue
+    indent = re.match(r"(\s*)if caller_case_prepare ", lines[cursor])
+    if indent:
+        prefix = indent.group(1)
+        cursor += 1
+        while cursor < len(lines) and not re.match("^" + re.escape(prefix) + r"fi\s*$", lines[cursor]):
+            prepared_lines.add(cursor)
+            cursor += 1
+        cursor += 1
+        continue
+    cursor += 1
+
+shared_fixtures = (
+    "adopter",
+    "quoted",
+    "artifact_adopter",
+    "private_artifact_adopter",
+    "upper_scope_adopter",
+    "generated_adopter",
+    "adr_adopter",
+    "refs_adopter",
+    "foreign_adopter",
+    "nested_adopter",
+    "multi_release_adopter",
+    "custom_adopter",
+)
+ensured_by = {
+    "ensure_pristine_adopter": "adopter",
+    "ensure_released_adopter": "adopter",
+    "ensure_artifact_adopter": "artifact_adopter",
+    "ensure_private_artifact_adopter": "private_artifact_adopter",
+    "ensure_upper_scope_adopter": "upper_scope_adopter",
+    "ensure_generated_adopter": "generated_adopter",
+    "ensure_adr_adopter": "adr_adopter",
+    "ensure_refs_adopter": "refs_adopter",
+    "ensure_foreign_adopter": "foreign_adopter",
+    "ensure_nested_adopter": "nested_adopter",
+    "ensure_multi_release_adopter": "multi_release_adopter",
+    "ensure_custom_adopter": "custom_adopter",
+}
+shared_read = re.compile(
+    r"\$\{?(?:%s)\b" % "|".join(sorted(shared_fixtures, key=len, reverse=True))
+)
+
+
+def _previous_code(index):
+    index -= 1
+    while index >= 0 and (not lines[index].strip() or lines[index].lstrip().startswith("#")):
+        index -= 1
+    return lines[index].strip() if index >= 0 else ""
+
+
+untied = []
+for index, line in enumerate(lines):
+    if index in inside_function or index in owned_lines or index in prepared_lines:
+        continue
+    if line.lstrip().startswith("#") or not shared_read.search(line):
+        continue
+    if re.match(r"\s*(if caller_case_prepare|ensure_[A-Za-z0-9_]+)", line):
+        continue
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", line) and "pass" not in line and "fail" not in line:
+        continue
+    if not re.search(r"\b(pass|fail|grep|python3)\b|^\s*\(cd ", line):
+        continue
+    previous = _previous_code(index)
+    if any(
+        previous == call and re.search(r"\$\{?%s\b" % variable, line)
+        for call, variable in ensured_by.items()
+    ):
+        continue
+    untied.append(f"{index + 1}: {line.strip()}")
+if untied:
+    raise SystemExit("untied fixture read: " + "; ".join(untied))
 LEAKS
 if python3 "$tmp/fixture-leaks.py" "$caller"; then
   pass "every case fixture is defined outside the generator-only assertions"
@@ -273,6 +393,114 @@ if [ "${#fixture_misses[@]}" -eq 0 ] && [ "$misplaced_ok" -eq 1 ] \
   pass "the fixture-leak check sees every binding form and rejects markers not bound to the gate"
 else
   fail "the fixture-leak check missed a binding or an unmarked section: ${fixture_misses[*]:-unmarked}"
+fi
+
+# A read of a shared tree outside its prepare block and outside fixture_owned_here
+# is the #1978 weaken: the assertion runs on a shard that never built the tree.
+{
+  fixture_header
+  printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\nfi\n' "$early_exit"
+  printf '# END generator-only assertions\nquoted="$tmproot/adopter-quoted"\n'
+  printf 'grep -q title "$quoted/CHANGELOG.md"\n'
+} >"$tmp/leak-untied-read.sh"
+{
+  fixture_header
+  printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\nfi\n' "$early_exit"
+  printf '# END generator-only assertions\nquoted="$tmproot/adopter-quoted"\n'
+  printf "fixture_owned_here owner_1 <<'FIXTURE_OWNER'\n"
+  printf 'grep -q title "$quoted/CHANGELOG.md"\nFIXTURE_OWNER\n'
+} >"$tmp/leak-tied-read.sh"
+if ! python3 "$tmp/fixture-leaks.py" "$tmp/leak-untied-read.sh" >/dev/null 2>"$tmp/leak.err" \
+  && grep -q 'untied fixture read' "$tmp/leak.err" \
+  && python3 "$tmp/fixture-leaks.py" "$tmp/leak-tied-read.sh" >/dev/null 2>"$tmp/leak.err"; then
+  pass "an out-of-case fixture read must name the selection that owns it"
+else
+  cat "$tmp/leak.err" >&2
+  fail "the fixture-leak check missed an untied shared-tree read or rejected a tied one"
+fi
+
+# Selection order is the sequence of changelog_caller_case_selected calls.
+# prepare consumes one, take reuses it, peek does not consume, and a shared
+# marker is created once. An owned body does not run for a selection this shard skipped.
+shard_behavior="$(
+  set -uo pipefail
+  # shellcheck source=scripts/changelog-caller-contract-shard.sh
+  source "$shard"
+  # shellcheck source=scripts/changelog-caller-contract-fixtures.sh
+  source "$repo_root/scripts/changelog-caller-contract-fixtures.sh"
+  caller_case_count=0
+  caller_case_ran=0
+  CHANGELOG_CALLER_CONTRACT_SHARD=1
+  if ! changelog_caller_case_would_run 0 || [ "$caller_case_count" -ne 0 ]; then
+    echo peek-consumed
+  fi
+  if changelog_caller_case_would_run 1; then
+    echo peek-selected-the-other-shard
+  fi
+  if ! caller_case_prepare alpha owner_a || ! caller_case_take alpha; then
+    echo first-case-skipped
+  fi
+  if [ "$caller_case_count" -ne 1 ]; then
+    echo "count-after-take:$caller_case_count"
+  fi
+  if caller_case_prepare beta || caller_case_take beta; then
+    echo second-case-ran
+  fi
+  root="$tmp/shared-tree"
+  builds=0
+  ensure_demo() {
+    if [ -e "$root.fixture-base" ]; then
+      return 0
+    fi
+    mkdir -p "$root"
+    : >"$root.fixture-base"
+    builds=$((builds + 1))
+    note_fixture_materialization
+  }
+  ensure_demo
+  ensure_demo
+  if [ "$builds" -ne 1 ] || [ "$caller_fixture_materializations" -ne 1 ]; then
+    echo "ensure-once:$builds:$caller_fixture_materializations"
+  fi
+  owned_out="$(fixture_owned_here owner_a <<'FIXTURE_OWNER'
+printf selected
+FIXTURE_OWNER
+)"
+  if [ "$owned_out" != selected ]; then
+    echo "owned-selected:$owned_out"
+  fi
+  CHANGELOG_CALLER_CONTRACT_SHARD=2
+  caller_case_count=0
+  caller_case_ran=0
+  unset caller_case_selected_ordinal
+  declare -A caller_case_selected_ordinal
+  caller_case_prepare gamma owner_c || true
+  skipped_out="$(fixture_owned_here owner_c <<'FIXTURE_OWNER'
+printf selected
+FIXTURE_OWNER
+)"
+  if [ -n "$skipped_out" ]; then
+    echo "owned-ran-unselected:$skipped_out"
+  fi
+)"
+mismatch_status=0
+(
+  set -uo pipefail
+  source "$shard"
+  source "$repo_root/scripts/changelog-caller-contract-fixtures.sh"
+  caller_case_count=0
+  caller_case_ran=0
+  CHANGELOG_CALLER_CONTRACT_SHARD=1
+  caller_case_prepare alpha
+  caller_case_take beta
+) >/dev/null 2>"$tmp/mismatch.err" || mismatch_status=$?
+if [ -z "$shard_behavior" ] && [ "$mismatch_status" -eq 1 ] \
+  && grep -q 'fixture prepared for alpha but the next case is beta' "$tmp/mismatch.err"; then
+  pass "a shard builds a shared fixture once and runs only the reads its cases own"
+else
+  printf '%s\n' "$shard_behavior" >&2
+  cat "$tmp/mismatch.err" >&2
+  fail "shard fixture scheduling changed selection order or ran an unselected read"
 fi
 
 python3 - "$caller" "$shard" "$manifest" <<'PY' || fails=$((fails + 1))
@@ -388,6 +616,8 @@ stub_root="$tmp/empty-generator"
 mkdir -p "$stub_root/scripts/ci-gate"
 cp "$caller" "$stub_root/scripts/ci-gate/changelog-caller-contract.test.sh"
 cp "$shard" "$stub_root/scripts/changelog-caller-contract-shard.sh"
+cp "$repo_root/scripts/changelog-caller-contract-fixtures.sh" \
+  "$stub_root/scripts/changelog-caller-contract-fixtures.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$stub_root/scripts/gen-changelog-caller.sh"
 chmod +x "$stub_root/scripts/gen-changelog-caller.sh"
 git -C "$stub_root" init -q

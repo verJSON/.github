@@ -11,6 +11,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 # shellcheck source=scripts/changelog-caller-contract-shard.sh
 source "$repo_root/scripts/changelog-caller-contract-shard.sh"
+# shellcheck source=scripts/changelog-caller-contract-fixtures.sh
+source "$repo_root/scripts/changelog-caller-contract-fixtures.sh"
 if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; then
   printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\n' >&2
   exit 1
@@ -1359,13 +1361,18 @@ build_adopter() {
   # two halves of one release route onto two runner pools.
   local dir="$1" with_release="${2:-yes}" caller="${3:-workflow}" release_mode="${4:-release-node}"
   # Default adopters are identical. Later cases copy the pristine snapshot instead of
-  # regenerating the caller set and committing it again (#1733).
+  # regenerating the caller set and committing it again (#1733). The snapshot is
+  # built on the first selected use, so a shard skips it when no selected case
+  # needs a default adopter (#1978).
   if [ "$with_release" = yes ] && [ "$caller" = workflow ] && [ "$release_mode" = release-node ] \
-    && [ -n "${adopter_template:-}" ] && [ -d "$adopter_template" ]; then
+    && [ "${caller_building_pristine:-}" != 1 ]; then
+    ensure_pristine_adopter
     rm -rf "$dir"
     cp -a "$adopter_template" "$dir"
+    note_fixture_materialization
     return 0
   fi
+  note_fixture_materialization
   mkdir -p "$dir/NEXT" "$dir/scripts" "$dir/.github/workflows"
   bash "$gen" codeowners "$sha" >"$dir/.github/CODEOWNERS"
   bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
@@ -1444,6 +1451,197 @@ FRAGMENT
   git -C "$dir" commit -qm initial
 }
 
+# Shared adopter trees. Each is built on the first selected use in this shard
+# and then copied, so unselected cases do not pay for generation (#1978).
+ensure_pristine_adopter() {
+  adopter="${adopter:-$tmproot/adopter}"
+  adopter_template="${adopter_template:-$tmproot/adopter-template}"
+  if [ -d "$adopter_template/.git" ]; then
+    return 0
+  fi
+  caller_building_pristine=1
+  build_adopter "$adopter"
+  caller_building_pristine=
+  cp -a "$adopter" "$adopter_template"
+  note_fixture_materialization
+}
+
+ensure_released_adopter() {
+  ensure_pristine_adopter
+  if [ -f "$adopter.fixture-released" ]; then
+    return 0
+  fi
+  python3 "$contract_src" release --repo-root "$adopter" --version v1.0.0 >/dev/null 2>&1
+  : >"$adopter.fixture-released"
+  note_fixture_materialization
+}
+
+copy_adopter_fixture() {
+  # copy_adopter_fixture <dest> <pristine|released>
+  local dest="$1" epoch="${2:-pristine}"
+  if [ "$epoch" = released ]; then
+    ensure_released_adopter
+  else
+    ensure_pristine_adopter
+  fi
+  rm -rf "$dest"
+  cp -a "$adopter" "$dest"
+  note_fixture_materialization
+}
+
+require_shared_fixture() {
+  local source="$1"
+  case "$source" in
+    "$tmproot/adopter"|"$tmproot/adopter-template") ensure_pristine_adopter ;;
+    "$tmproot/adopter-artifact") ensure_artifact_adopter ;;
+    "$tmproot/adopter-artifact-private") ensure_private_artifact_adopter ;;
+    "$tmproot/adopter-artifact-private-upper-scope") ensure_upper_scope_adopter ;;
+    "$tmproot/adopter-generated-artifacts") ensure_generated_adopter ;;
+    "$tmproot/adopter-generated-artifacts-adr") ensure_adr_adopter ;;
+    "$tmproot/adopter-refs") ensure_refs_adopter ;;
+    "$tmproot/adopter-foreign-codeowners") ensure_foreign_adopter ;;
+    "$tmproot/adopter-nested-only-release") ensure_nested_adopter ;;
+    "$tmproot/adopter-multi-release") ensure_multi_release_adopter ;;
+    "$tmproot/adopter-custom-release") ensure_custom_adopter ;;
+  esac
+}
+
+ensure_artifact_adopter() {
+  artifact_adopter="${artifact_adopter:-$tmproot/adopter-artifact}"
+  if [ -f "${artifact_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_artifact_adopter "$artifact_adopter"
+  : >"${artifact_adopter}.fixture-base"
+}
+
+ensure_private_artifact_adopter() {
+  private_artifact_adopter="${private_artifact_adopter:-$tmproot/adopter-artifact-private}"
+  if [ -f "${private_artifact_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$private_artifact_adopter"
+  bash "$gen" release-artifact "$sha" \
+  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}' \
+  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai \
+  >"$private_artifact_adopter/.github/workflows/release.yml"
+  bash "$gen" contract-test "$sha" \
+  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}' \
+  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai \
+  >"$private_artifact_adopter/scripts/changelog-contract.test.sh"
+  chmod +x "$private_artifact_adopter/scripts/changelog-contract.test.sh"
+  cat >"$private_artifact_adopter/package-lock.json" <<'LOCK'
+{"name":"private-release","lockfileVersion":3,"packages":{"":{"name":"private-release"},"node_modules/@verjson/ai":{"name":"@verjson/ai","version":"1.0.0","resolved":"https://npm.pkg.github.com/download/@verjson/ai/1.0.0/hash","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}
+LOCK
+  git -C "$private_artifact_adopter" add .github/workflows/release.yml scripts/changelog-contract.test.sh package-lock.json
+  git -C "$private_artifact_adopter" commit -qm 'enable private release dependency acquisition'
+  : >"${private_artifact_adopter}.fixture-base"
+}
+
+ensure_upper_scope_adopter() {
+  upper_scope_adopter="${upper_scope_adopter:-$tmproot/adopter-artifact-private-upper-scope}"
+  if [ -f "${upper_scope_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$upper_scope_adopter"
+  sed -i 's|download/@verjson/ai/|download/@verJSON/ai/|g' "$upper_scope_adopter/package-lock.json"
+  : >"${upper_scope_adopter}.fixture-base"
+}
+
+ensure_generated_adopter() {
+  generated_adopter="${generated_adopter:-$tmproot/adopter-generated-artifacts}"
+  if [ -f "${generated_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_adopter "$generated_adopter" no generated-artifacts
+  : >"${generated_adopter}.fixture-base"
+}
+
+ensure_adr_adopter() {
+  adr_adopter="${adr_adopter:-$tmproot/adopter-generated-artifacts-adr}"
+  if [ -f "${adr_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_adopter "$adr_adopter" no generated-artifacts-with-adr-index
+  : >"${adr_adopter}.fixture-base"
+}
+
+ensure_refs_adopter() {
+  refs_adopter="${refs_adopter:-$tmproot/adopter-refs}"
+  if [ -f "${refs_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_adopter "$refs_adopter"
+  cat >"$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" <<'FRAGMENT'
+---
+date: 2026-08-03
+issue: 5
+refs: 16
+title: 'fix(caller): an entry that links a second issue'
+---
+
+Body.
+FRAGMENT
+  commit_fixture "$refs_adopter" refs
+  : >"${refs_adopter}.fixture-base"
+}
+
+ensure_foreign_adopter() {
+  foreign_adopter="${foreign_adopter:-$tmproot/adopter-foreign-codeowners}"
+  if [ -f "${foreign_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  copy_adopter_fixture "$foreign_adopter" pristine
+  bash "$gen" codeowners "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/.github/CODEOWNERS"
+  bash "$gen" contract-test "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/scripts/changelog-contract.test.sh"
+  : >"${foreign_adopter}.fixture-base"
+}
+
+ensure_nested_adopter() {
+  nested_adopter="${nested_adopter:-$tmproot/adopter-nested-only-release}"
+  if [ -f "${nested_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_adopter "$nested_adopter"
+  bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
+  --default-prefix schema-v --default-component cli-schema \
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+  bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh" \
+  || { echo "FAIL - could not generate the nested-only contract test"; exit 1; }
+  : >"${nested_adopter}.fixture-base"
+}
+
+ensure_multi_release_adopter() {
+  multi_release_adopter="${multi_release_adopter:-$tmproot/adopter-multi-release}"
+  if [ -f "${multi_release_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_adopter "$multi_release_adopter"
+  bash "$gen" release-node "$sha" >"$multi_release_adopter/.github/workflows/release.yml"
+  bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
+  >"$multi_release_adopter/.github/workflows/release-cli-schema.yml"
+  bash "$gen" contract-test "$sha" \
+  --release-caller-package-dirs .github/workflows/release-cli-schema.yml=packages/cli-schema \
+  >"$multi_release_adopter/scripts/changelog-contract.test.sh"
+  chmod +x "$multi_release_adopter/scripts/changelog-contract.test.sh"
+  : >"${multi_release_adopter}.fixture-base"
+}
+
+ensure_custom_adopter() {
+  custom_adopter="${custom_adopter:-$tmproot/adopter-custom-release}"
+  if [ -f "${custom_adopter}.fixture-base" ]; then
+    return 0
+  fi
+  build_adopter "$custom_adopter"
+  printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
+  printf '%s\n' "$custom_contract" >"$custom_adopter/scripts/changelog-contract.test.sh"
+  chmod +x "$custom_adopter/scripts/changelog-contract.test.sh"
+  : >"${custom_adopter}.fixture-base"
+}
+
 build_split_adopter() {
   local dir="$1"
   build_adopter "$dir" no workflow
@@ -1459,12 +1657,9 @@ run_adopter() {
   local status=0 adopter_log cache_env=() case_id
   case_id="$(basename "$1")"
   if [ "${caller_case_nested:-}" != 1 ]; then
-    if ! changelog_caller_case_selected "$case_id"; then
-      caller_assertions_suspended=1
+    if ! caller_case_take "$case_id" announce; then
       return 0
     fi
-    caller_assertions_suspended=0
-    printf 'running caller contract case: %s\n' "$case_id" >&2
   fi
   # A synchronous suite keeps running beside scheduled snapshots. It does not
   # wait for them: isolation already keeps their logs off this run.out (#1733).
@@ -1589,12 +1784,9 @@ drain_adopter_jobs() {
 schedule_adopter_script() {
   local dir="$1" script="$2" seq result copy case_id
   case_id="$(basename "$dir")"
-  if ! changelog_caller_case_selected "$case_id"; then
-    caller_assertions_suspended=1
+  if ! caller_case_take "$case_id" announce; then
     return 0
   fi
-  caller_assertions_suspended=0
-  printf 'running caller contract case: %s\n' "$case_id" >&2
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/sched-result-$seq"
@@ -1648,10 +1840,12 @@ expect_scheduled_rejection() {
 }
 
 adopter="$tmproot/adopter"
-build_adopter "$adopter"
 adopter_template="$tmproot/adopter-template"
-cp -a "$adopter" "$adopter_template"
-export ADOPTER_GITHUB_OWNER=Acme
+if caller_case_prepare "$(basename "$adopter")" owner_1; then
+  build_adopter "$adopter"
+  copy_adopter_fixture "$adopter_template" pristine
+  export ADOPTER_GITHUB_OWNER=Acme
+fi
 schedule_adopter_script "$adopter" '
   if [ "$status" -ne 0 ] && grep -qF "CODEOWNERS organization does not match" "$ADOPTER_LOG"; then
     pass "default ownership rejects a foreign GitHub repository owner"
@@ -1659,35 +1853,45 @@ schedule_adopter_script "$adopter" '
 '
 unset ADOPTER_GITHUB_OWNER
 foreign_adopter="$tmproot/adopter-foreign-codeowners"
-cp -a "$adopter" "$foreign_adopter"
-bash "$gen" codeowners "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/.github/CODEOWNERS"
-bash "$gen" contract-test "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/scripts/changelog-contract.test.sh"
+if caller_case_prepare "$(basename "$foreign_adopter")" owner_2; then
+  ensure_foreign_adopter
+fi
 schedule_adopter_script "$foreign_adopter" '
   if [ "$status" -eq 0 ]; then pass "foreign generated ownership passes"; else fail "foreign generated ownership failed"; fi
 '
-printf "* @Acme/other\n" >>"$foreign_adopter/.github/CODEOWNERS"
+if caller_case_prepare "$(basename "$foreign_adopter")" owner_3; then
+  ensure_foreign_adopter
+  printf "* @Acme/other\n" >>"$foreign_adopter/.github/CODEOWNERS"
+fi
 schedule_adopter_script "$foreign_adopter" '
   if [ "$status" -ne 0 ] && grep -qF ".github/CODEOWNERS is not the generated artifact" "$ADOPTER_LOG"; then
     pass "foreign generated ownership rejects tampering"
   else fail "foreign generated ownership did not reject tampering"; fi
 '
 
+fixture_owned_here owner_1 <<'FIXTURE_OWNER'
 [ -f "$adopter/.github/workflows/release.yml" ] \
   && [ ! -e "$adopter/.github/workflows/changelog-release.yml" ] \
   && pass "generated adopter installs the canonical release caller path" \
   || fail "generated adopter does not use only .github/workflows/release.yml"
+FIXTURE_OWNER
+fixture_owned_here owner_1 <<'FIXTURE_OWNER'
 grep -q "changelog-release.yml@$sha" "$adopter/.github/workflows/release.yml" \
   && grep -qE "^ +contract_ref: $sha$" "$adopter/.github/workflows/release.yml" \
   && pass "canonical release caller pins uses and contract_ref to the same commit" \
   || fail "canonical release caller does not bind uses and contract_ref to $sha"
+FIXTURE_OWNER
+fixture_owned_here owner_1 <<'FIXTURE_OWNER'
 grep -q "release-propose.yml@$sha" "$adopter/.github/workflows/release-propose.yml" \
   && grep -qE "^ +contract_ref: $sha$" "$adopter/.github/workflows/release-propose.yml" \
   && pass "canonical release proposer pins uses and contract_ref to the same commit" \
   || fail "canonical release proposer does not bind uses and contract_ref to $sha"
+FIXTURE_OWNER
 
 stale_renovate_caller="$tmproot/adopter-stale-renovate-caller"
-cp -a "$adopter" "$stale_renovate_caller"
-cat >"$stale_renovate_caller/.github/workflows/renovate-changelog.yml" <<EOF
+if caller_case_prepare "$(basename "$stale_renovate_caller")" owner_4; then
+  copy_adopter_fixture "$stale_renovate_caller" pristine
+  cat >"$stale_renovate_caller/.github/workflows/renovate-changelog.yml" <<EOF
 name: Renovate changelog
 on:
   pull_request_target:
@@ -1696,6 +1900,7 @@ jobs:
   renovate-changelog:
     uses: Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
 EOF
+fi
 schedule_adopter_script "$stale_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a stale Renovate writer caller"
@@ -1708,8 +1913,9 @@ SCHED_SCRIPT
 )"
 
 renamed_renovate_caller="$tmproot/adopter-renamed-renovate-caller"
-cp -a "$adopter" "$renamed_renovate_caller"
-cat >"$renamed_renovate_caller/.github/workflows/dependency-helper.yaml" <<EOF
+if caller_case_prepare "$(basename "$renamed_renovate_caller")" owner_5; then
+  copy_adopter_fixture "$renamed_renovate_caller" pristine
+  cat >"$renamed_renovate_caller/.github/workflows/dependency-helper.yaml" <<EOF
 name: Dependency helper
 on:
   pull_request_target:
@@ -1718,6 +1924,7 @@ jobs:
   synchronize:
     uses: verJSON/.github/.github/workflows/renovate-changelog.yml@$sha
 EOF
+fi
 schedule_adopter_script "$renamed_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a renamed caller for the retired Renovate writer"
@@ -1730,8 +1937,9 @@ SCHED_SCRIPT
 )"
 
 escaped_renovate_caller="$tmproot/adopter-escaped-renovate-caller"
-cp -a "$adopter" "$escaped_renovate_caller"
-cat >"$escaped_renovate_caller/.github/workflows/dependency-hook.yaml" <<EOF
+if caller_case_prepare "$(basename "$escaped_renovate_caller")" owner_6; then
+  copy_adopter_fixture "$escaped_renovate_caller" pristine
+  cat >"$escaped_renovate_caller/.github/workflows/dependency-hook.yaml" <<EOF
 name: Dependency hook
 on:
   pull_request_target:
@@ -1740,9 +1948,10 @@ jobs:
   synchronize:
     uses: "Verjson/.github/.github/workflows/\u0072enovate-changelog.yml@$sha"
 EOF
-grep -qF '\u0072enovate-changelog.yml' \
-  "$escaped_renovate_caller/.github/workflows/dependency-hook.yaml" \
-  || fail "escaped Renovate caller fixture did not retain the YAML escape"
+  grep -qF '\u0072enovate-changelog.yml' \
+    "$escaped_renovate_caller/.github/workflows/dependency-hook.yaml" \
+    || fail "escaped Renovate caller fixture did not retain the YAML escape"
+fi
 schedule_adopter_script "$escaped_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a Unicode-escaped retired Renovate caller"
@@ -1755,8 +1964,9 @@ SCHED_SCRIPT
 )"
 
 quoted_key_renovate_caller="$tmproot/adopter-quoted-key-renovate-caller"
-cp -a "$adopter" "$quoted_key_renovate_caller"
-cat >"$quoted_key_renovate_caller/.github/workflows/quoted-helper.yaml" <<EOF
+if caller_case_prepare "$(basename "$quoted_key_renovate_caller")" owner_7; then
+  copy_adopter_fixture "$quoted_key_renovate_caller" pristine
+  cat >"$quoted_key_renovate_caller/.github/workflows/quoted-helper.yaml" <<EOF
 name: Quoted helper
 on:
   pull_request_target:
@@ -1765,6 +1975,7 @@ jobs:
   synchronize:
     "uses": Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
 EOF
+fi
 schedule_adopter_script "$quoted_key_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a retired caller with a quoted uses key"
@@ -1779,8 +1990,14 @@ SCHED_SCRIPT
 make_renovate_fixture() {
   local name="$1"
   local fixture="$tmproot/adopter-$name"
-  cp -a "$adopter" "$fixture"
-  cat >"$fixture/.github/workflows/$name.yaml"
+  # A command substitution cannot select: the increment would stay in the
+  # subshell and the parent would select the same case again (#1978).
+  if changelog_caller_case_would_run 0; then
+    copy_adopter_fixture "$fixture" pristine
+    cat >"$fixture/.github/workflows/$name.yaml"
+  else
+    cat >/dev/null
+  fi
   printf '%s\n' "$fixture"
 }
 
@@ -1998,8 +2215,10 @@ jobs:
           printf '%s\n' '\uD800' '\UFFFFFFFF'
 EOF
 )"
-printf '          \techo "tabbed run body"\n' \
-  >>"$clean_source_caller/.github/workflows/clean-source-syntax.yaml"
+if caller_case_prepare "$(basename "$clean_source_caller")" owner_8; then
+  printf '          \techo "tabbed run body"\n' \
+    >>"$clean_source_caller/.github/workflows/clean-source-syntax.yaml"
+fi
 schedule_adopter_script "$clean_source_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts unrelated metadata, flow syntax, tabbed run bodies, and invalid Unicode escape literals"
@@ -2047,7 +2266,8 @@ name: Workflow count limit
 jobs: {}
 EOF
 )"
-python3 - "$workflow_count_caller/.github/workflows" <<'PY'
+if caller_case_prepare "$(basename "$workflow_count_caller")" owner_9; then
+  python3 - "$workflow_count_caller/.github/workflows" <<'PY'
 from pathlib import Path
 import sys
 
@@ -2055,6 +2275,7 @@ directory = Path(sys.argv[1])
 for index in range(257):
     (directory / f"workflow-{index:03}.yaml").write_text("", encoding="utf-8")
 PY
+fi
 schedule_adopter_script "$workflow_count_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted more workflow files than the inspection limit"
@@ -2066,9 +2287,11 @@ fi
 SCHED_SCRIPT
 )"
 stale_proposer="$tmproot/adopter-stale-proposer"
-cp -a "$adopter" "$stale_proposer"
-sed -i "s/release-propose.yml@$sha/release-propose.yml@0000000000000000000000000000000000000000/" \
-  "$stale_proposer/.github/workflows/release-propose.yml"
+if caller_case_prepare "$(basename "$stale_proposer")" owner_10; then
+  copy_adopter_fixture "$stale_proposer" pristine
+  sed -i "s/release-propose.yml@$sha/release-propose.yml@0000000000000000000000000000000000000000/" \
+    "$stale_proposer/.github/workflows/release-propose.yml"
+fi
 schedule_adopter_script "$stale_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release proposer on another pin"
@@ -2081,9 +2304,11 @@ SCHED_SCRIPT
 )"
 
 overprivileged_proposer="$tmproot/adopter-overprivileged-proposer"
-cp -a "$adopter" "$overprivileged_proposer"
-sed -i '/^      issues: write$/a\      actions: write' \
-  "$overprivileged_proposer/.github/workflows/release-propose.yml"
+if caller_case_prepare "$(basename "$overprivileged_proposer")" owner_11; then
+  copy_adopter_fixture "$overprivileged_proposer" pristine
+  sed -i '/^      issues: write$/a\      actions: write' \
+    "$overprivileged_proposer/.github/workflows/release-propose.yml"
+fi
 schedule_adopter_script "$overprivileged_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted both issue and dispatch authority in propose mode"
@@ -2096,9 +2321,11 @@ SCHED_SCRIPT
 )"
 
 event_selected_proposer="$tmproot/adopter-event-selected-proposer"
-cp -a "$adopter" "$event_selected_proposer"
-sed -i '/^      contract_ref:/a\      autonomy: ${{ inputs.autonomy }}' \
-  "$event_selected_proposer/.github/workflows/release-propose.yml"
+if caller_case_prepare "$(basename "$event_selected_proposer")" owner_12; then
+  copy_adopter_fixture "$event_selected_proposer" pristine
+  sed -i '/^      contract_ref:/a\      autonomy: ${{ inputs.autonomy }}' \
+    "$event_selected_proposer/.github/workflows/release-propose.yml"
+fi
 schedule_adopter_script "$event_selected_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted event-selected release autonomy"
@@ -2114,13 +2341,9 @@ SCHED_SCRIPT
 # generator failure must abort every shard, never be suspended with the case
 # that precedes it, or an empty release.yml would read as a valid rejection.
 nested_adopter="$tmproot/adopter-nested-only-release"
-build_adopter "$nested_adopter"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
-bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh" \
-  || { echo "FAIL - could not generate the nested-only contract test"; exit 1; }
+if caller_case_prepare "$(basename "$nested_adopter")" owner_13; then
+  ensure_nested_adopter
+fi
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "nested-only release and contract agree on component defaults without selecting root (#1286, #1565)"
@@ -2129,8 +2352,11 @@ else
 fi
 SCHED_SCRIPT
 )"
-sed -i "s/default: 'schema-v'/default: v/" \
-  "$nested_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$nested_adopter")" owner_14; then
+  ensure_nested_adopter
+  sed -i "s/default: 'schema-v'/default: v/" \
+    "$nested_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "component release contract accepted a mutated default prefix"
@@ -2141,12 +2367,15 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
-sed -i "s/default: 'cli-schema'/default: ''/" \
-  "$nested_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$nested_adopter")" owner_15; then
+  ensure_nested_adopter
+  bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
+    --default-prefix schema-v --default-component cli-schema \
+    >"$nested_adopter/.github/workflows/release.yml" \
+    || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+  sed -i "s/default: 'cli-schema'/default: ''/" \
+    "$nested_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "component release contract accepted a mutated default component"
@@ -2157,11 +2386,14 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
-sed -i 's/package_dirs=(packages\/cli-schema)/package_dirs=(. packages\/cli-schema)/' "$nested_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$nested_adopter")" owner_16; then
+  ensure_nested_adopter
+  bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
+    --default-prefix schema-v --default-component cli-schema \
+    >"$nested_adopter/.github/workflows/release.yml" \
+    || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+  sed -i 's/package_dirs=(packages\/cli-schema)/package_dirs=(. packages\/cli-schema)/' "$nested_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "nested-only contract accepted an extra root verification stamp"
@@ -2172,11 +2404,14 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
-sed -i 's/\["packages\/cli-schema"\]/[".","packages\/cli-schema"]/' "$nested_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$nested_adopter")" owner_17; then
+  ensure_nested_adopter
+  bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
+    --default-prefix schema-v --default-component cli-schema \
+    >"$nested_adopter/.github/workflows/release.yml" \
+    || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+  sed -i 's/\["packages\/cli-schema"\]/[".","packages\/cli-schema"]/' "$nested_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "nested-only contract accepted root publication"
@@ -2189,14 +2424,9 @@ SCHED_SCRIPT
 )"
 
 multi_release_adopter="$tmproot/adopter-multi-release"
-build_adopter "$multi_release_adopter"
-bash "$gen" release-node "$sha" >"$multi_release_adopter/.github/workflows/release.yml"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  >"$multi_release_adopter/.github/workflows/release-cli-schema.yml"
-bash "$gen" contract-test "$sha" \
-  --release-caller-package-dirs .github/workflows/release-cli-schema.yml=packages/cli-schema \
-  >"$multi_release_adopter/scripts/changelog-contract.test.sh"
-chmod +x "$multi_release_adopter/scripts/changelog-contract.test.sh"
+if caller_case_prepare "$(basename "$multi_release_adopter")" owner_18; then
+  ensure_multi_release_adopter
+fi
 schedule_adopter_script "$multi_release_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "generated contract validates multiple release callers with distinct package selections"
@@ -2205,8 +2435,11 @@ else
 fi
 SCHED_SCRIPT
 )"
-sed -i '0,/^  workflow_dispatch:$/s//  push:/' \
-  "$multi_release_adopter/.github/workflows/release-cli-schema.yml"
+if caller_case_prepare "$(basename "$multi_release_adopter")" owner_19; then
+  ensure_multi_release_adopter
+  sed -i '0,/^  workflow_dispatch:$/s//  push:/' \
+    "$multi_release_adopter/.github/workflows/release-cli-schema.yml"
+fi
 schedule_adopter_script "$multi_release_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "generated contract accepted a push trigger on the first of multiple release callers"
@@ -2216,16 +2449,17 @@ fi
 SCHED_SCRIPT
 )"
 sync_last_rejection
+fixture_owned_here owner_19 <<'FIXTURE_OWNER'
 grep -qF "$multi_release_adopter/.github/workflows/release-cli-schema.yml declares no readable top-level" \
   "$tmproot/run.out" \
   && pass "multi-release trigger failure names the non-final caller" \
   || fail "multi-release trigger failure did not identify the non-final caller: $(tail -2 "$tmproot/run.out")"
+FIXTURE_OWNER
 
 custom_adopter="$tmproot/adopter-custom-release"
-build_adopter "$custom_adopter"
-printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
-printf '%s\n' "$custom_contract" >"$custom_adopter/scripts/changelog-contract.test.sh"
-chmod +x "$custom_adopter/scripts/changelog-contract.test.sh"
+if caller_case_prepare "$(basename "$custom_adopter")" owner_20; then
+  ensure_custom_adopter
+fi
 schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "custom release caller and contract test accept the same parameters (#520)"
@@ -2234,8 +2468,11 @@ else
 fi
 SCHED_SCRIPT
 )"
-sed -i 's/--package-dir compat/--package-dir ignored --only-package-dir . --only-package-dir compat/' \
-  "$custom_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$custom_adopter")" owner_21; then
+  ensure_custom_adopter
+  sed -i 's/--package-dir compat/--package-dir ignored --only-package-dir . --only-package-dir compat/' \
+    "$custom_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "custom contract accepted mixed additive and exact package selection flags"
@@ -2246,8 +2483,11 @@ else
 fi
 SCHED_SCRIPT
 )"
-printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
-sed -i 's/compat/other/g' "$custom_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$custom_adopter")" owner_22; then
+  ensure_custom_adopter
+  printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
+  sed -i 's/compat/other/g' "$custom_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "custom contract accepted a coordinated package-selection change"
@@ -2258,9 +2498,12 @@ else
 fi
 SCHED_SCRIPT
 )"
-printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
-sed -i "s/scope: '@acme'/scope: '@other'/" \
-  "$custom_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$custom_adopter")" owner_23; then
+  ensure_custom_adopter
+  printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
+  sed -i "s/scope: '@acme'/scope: '@other'/" \
+    "$custom_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'release.yml does not use npm scope @acme consistently; regenerate release-node and contract-test with the same --scope (#520)' \
   "custom contract rejects release parameter drift (#520)" \
@@ -2269,12 +2512,14 @@ SCHED_SCRIPT
 )"
 
 omitted_stamp_adopter="$tmproot/adopter-omitted-secondary-stamp"
-build_adopter "$omitted_stamp_adopter"
-printf '%s\n' "$custom_release" >"$omitted_stamp_adopter/.github/workflows/release.yml"
-printf '%s\n' "$custom_contract" >"$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
-chmod +x "$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
-sed -i 's/package_dirs=(. compat)/package_dirs=(.)/' \
-  "$omitted_stamp_adopter/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$omitted_stamp_adopter")" owner_24; then
+  build_adopter "$omitted_stamp_adopter"
+  printf '%s\n' "$custom_release" >"$omitted_stamp_adopter/.github/workflows/release.yml"
+  printf '%s\n' "$custom_contract" >"$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
+  chmod +x "$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
+  sed -i 's/package_dirs=(. compat)/package_dirs=(.)/' \
+    "$omitted_stamp_adopter/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$omitted_stamp_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'release.yml does not stamp every package directory selected for publication (#557)' \
   "custom contract rejects a verification stamp that omits a published package (#557)" \
@@ -2283,7 +2528,9 @@ SCHED_SCRIPT
 )"
 
 generated_adopter="$tmproot/adopter-generated-artifacts"
-build_adopter "$generated_adopter" no generated-artifacts
+if caller_case_prepare "$(basename "$generated_adopter")" owner_25; then
+  ensure_generated_adopter
+fi
 schedule_adopter_script "$generated_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts the generated-artifacts caller"
@@ -2294,11 +2541,13 @@ SCHED_SCRIPT
 )"
 
 retired_adopter="$tmproot/adopter-retired-changelog-workflow"
-build_adopter "$retired_adopter" no workflow
-sed -i \
-  -e "s#generated-artifacts.yml@$sha#changelog-validate.yml@$sha#" \
-  -e '/^      changelog: true$/d' \
-  "$retired_adopter/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$retired_adopter")" owner_26; then
+  build_adopter "$retired_adopter" no workflow
+  sed -i \
+    -e "s#generated-artifacts.yml@$sha#changelog-validate.yml@$sha#" \
+    -e '/^      changelog: true$/d' \
+    "$retired_adopter/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$retired_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml does not call generated-artifacts.yml at the shared pin' \
   "emitted suite requires the generated workflow behind the required context (#835)" \
@@ -2307,15 +2556,17 @@ SCHED_SCRIPT
 )"
 
 cross_job_adopter="$tmproot/adopter-cross-job-generated-artifacts-caller"
-build_adopter "$cross_job_adopter" no workflow
-sed -i 's/^  changelog:$/  generated-artifacts:/' \
-  "$cross_job_adopter/.github/workflows/changelog.yml"
-cat >>"$cross_job_adopter/.github/workflows/changelog.yml" <<'YAML'
+if caller_case_prepare "$(basename "$cross_job_adopter")" owner_27; then
+  build_adopter "$cross_job_adopter" no workflow
+  sed -i 's/^  changelog:$/  generated-artifacts:/' \
+    "$cross_job_adopter/.github/workflows/changelog.yml"
+  cat >>"$cross_job_adopter/.github/workflows/changelog.yml" <<'YAML'
   changelog:
     runs-on: ubuntu-24.04
     steps:
       - run: 'true'
 YAML
+fi
 schedule_adopter_script "$cross_job_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
   "emitted suite binds the canonical caller fields to the changelog job (#835)" \
@@ -2324,9 +2575,12 @@ SCHED_SCRIPT
 )"
 
 named_job_adopter="$tmproot/adopter-named-changelog-job"
-cp -a "$generated_adopter" "$named_job_adopter"
-sed -i '/^  changelog:$/a\    name: renamed required check' \
-  "$named_job_adopter/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$named_job_adopter")" owner_28; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$named_job_adopter"
+  sed -i '/^  changelog:$/a\    name: renamed required check' \
+    "$named_job_adopter/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$named_job_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden' \
   "emitted suite rejects a job-level name that changes the required context (#835)" \
@@ -2335,9 +2589,12 @@ SCHED_SCRIPT
 )"
 
 matrix_job_adopter="$tmproot/adopter-matrix-changelog-job"
-cp -a "$generated_adopter" "$matrix_job_adopter"
-sed -i '/^  changelog:$/a\    strategy:\n      matrix:\n        shard: [one, two]' \
-  "$matrix_job_adopter/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$matrix_job_adopter")" owner_29; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$matrix_job_adopter"
+  sed -i '/^  changelog:$/a\    strategy:\n      matrix:\n        shard: [one, two]' \
+    "$matrix_job_adopter/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$matrix_job_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden' \
   "emitted suite rejects strategy fields that suffix the required context (#835)" \
@@ -2346,9 +2603,12 @@ SCHED_SCRIPT
 )"
 
 secrets_job_adopter="$tmproot/adopter-secrets-changelog-job"
-cp -a "$generated_adopter" "$secrets_job_adopter"
-sed -i 's/^    with:$/    secrets:/' \
-  "$secrets_job_adopter/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$secrets_job_adopter")" owner_30; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$secrets_job_adopter"
+  sed -i 's/^    with:$/    secrets:/' \
+    "$secrets_job_adopter/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$secrets_job_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
   "emitted suite binds changelog inputs to the canonical with mapping (#835)" \
@@ -2357,9 +2617,12 @@ SCHED_SCRIPT
 )"
 
 typo_job_adopter="$tmproot/adopter-typo-changelog-job"
-cp -a "$generated_adopter" "$typo_job_adopter"
-sed -i 's/^    with:$/    wiht:/' \
-  "$typo_job_adopter/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$typo_job_adopter")" owner_31; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$typo_job_adopter"
+  sed -i 's/^    with:$/    wiht:/' \
+    "$typo_job_adopter/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$typo_job_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
   "emitted suite rejects a typo in the canonical with mapping (#835)" \
@@ -2368,9 +2631,12 @@ SCHED_SCRIPT
 )"
 
 extra_input_adopter="$tmproot/adopter-extra-changelog-input"
-cp -a "$generated_adopter" "$extra_input_adopter"
-sed -i '/^      contract_ref:/a\      unexpected_input: true' \
-  "$extra_input_adopter/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$extra_input_adopter")" owner_32; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$extra_input_adopter"
+  sed -i '/^      contract_ref:/a\      unexpected_input: true' \
+    "$extra_input_adopter/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$extra_input_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'changelog.yml changelog inputs must be exactly changelog and contract_ref, plus optional canonical adr-index' \
   "emitted suite enforces the exact changelog caller input set (#835)" \
@@ -2379,7 +2645,9 @@ SCHED_SCRIPT
 )"
 
 split_adopter="$tmproot/adopter-split-generated-artifacts"
-build_split_adopter "$split_adopter"
+if caller_case_prepare "$(basename "$split_adopter")" owner_33; then
+  build_split_adopter "$split_adopter"
+fi
 schedule_adopter_script "$split_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
   "emitted suite retires the ambiguous split caller topology (#835)" \
@@ -2388,9 +2656,12 @@ SCHED_SCRIPT
 )"
 
 renamed_duplicate_adopter="$tmproot/adopter-renamed-duplicate-changelog"
-cp -a "$generated_adopter" "$renamed_duplicate_adopter"
-cp "$renamed_duplicate_adopter/.github/workflows/changelog.yml" \
-  "$renamed_duplicate_adopter/.github/workflows/docs-validation.yml"
+if caller_case_prepare "$(basename "$renamed_duplicate_adopter")" owner_34; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$renamed_duplicate_adopter"
+  cp "$renamed_duplicate_adopter/.github/workflows/changelog.yml" \
+    "$renamed_duplicate_adopter/.github/workflows/docs-validation.yml"
+fi
 schedule_adopter_script "$renamed_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
   "emitted suite scans every workflow for renamed duplicate callers (#835)" \
@@ -2399,8 +2670,10 @@ SCHED_SCRIPT
 )"
 
 legacy_duplicate_adopter="$tmproot/adopter-legacy-duplicate-changelog"
-cp -a "$generated_adopter" "$legacy_duplicate_adopter"
-cat >"$legacy_duplicate_adopter/.github/workflows/legacy-validation.yml" <<YAML
+if caller_case_prepare "$(basename "$legacy_duplicate_adopter")" owner_35; then
+  ensure_generated_adopter
+  cp -a "$generated_adopter" "$legacy_duplicate_adopter"
+  cat >"$legacy_duplicate_adopter/.github/workflows/legacy-validation.yml" <<YAML
 name: legacy validation
 on:
   pull_request:
@@ -2410,6 +2683,7 @@ jobs:
     with:
       contract_ref: $sha
 YAML
+fi
 schedule_adopter_script "$legacy_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
   "emitted suite rejects an additional changelog-validate caller (#835)" \
@@ -2418,7 +2692,9 @@ SCHED_SCRIPT
 )"
 
 adr_adopter="$tmproot/adopter-generated-artifacts-adr"
-build_adopter "$adr_adopter" no generated-artifacts-with-adr-index
+if caller_case_prepare "$(basename "$adr_adopter")" owner_36; then
+  ensure_adr_adopter
+fi
 schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts ADR checking with the acquired pinned generator"
@@ -2431,8 +2707,11 @@ SCHED_SCRIPT
 # A repository that acquired the generator but kept a hand-written suite is the
 # state #1380 found across the fleet. It must not read as conformant.
 missing_adr_test_adopter="$tmproot/adopter-adr-without-suite"
-cp -a "$adr_adopter" "$missing_adr_test_adopter"
-rm -f "$missing_adr_test_adopter/scripts/gen-adr-index.test.sh"
+if caller_case_prepare "$(basename "$missing_adr_test_adopter")" owner_37; then
+  ensure_adr_adopter
+  cp -a "$adr_adopter" "$missing_adr_test_adopter"
+  rm -f "$missing_adr_test_adopter/scripts/gen-adr-index.test.sh"
+fi
 schedule_adopter_script "$missing_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'adr-index: true requires the pinned scripts/gen-adr-index.test.sh.' \
   "emitted suite rejects ADR checking without its pinned generator suite (#1380)" \
@@ -2441,16 +2720,22 @@ SCHED_SCRIPT
 )"
 
 handwritten_adr_test_adopter="$tmproot/adopter-handwritten-adr-suite"
-cp -a "$adr_adopter" "$handwritten_adr_test_adopter"
-printf '#!/usr/bin/env bash\necho "ok - looks like a test"\n' \
-  >"$handwritten_adr_test_adopter/scripts/gen-adr-index.test.sh"
+if caller_case_prepare "$(basename "$handwritten_adr_test_adopter")" owner_38; then
+  ensure_adr_adopter
+  cp -a "$adr_adopter" "$handwritten_adr_test_adopter"
+  printf '#!/usr/bin/env bash\necho "ok - looks like a test"\n' \
+    >"$handwritten_adr_test_adopter/scripts/gen-adr-index.test.sh"
+fi
 schedule_adopter_script "$handwritten_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'scripts/gen-adr-index.test.sh declares 0 generator-mode headers' \
   "emitted suite rejects a hand-written ADR generator suite (#1380)" \
   "emitted suite accepts a hand-written ADR generator suite"
 SCHED_SCRIPT
 )"
-rm -f "$adr_adopter/scripts/gen-adr-index.sh"
+if caller_case_prepare "$(basename "$adr_adopter")" owner_39; then
+  ensure_adr_adopter
+  rm -f "$adr_adopter/scripts/gen-adr-index.sh"
+fi
 schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepts adr-index: true without scripts/gen-adr-index.sh"
@@ -2461,9 +2746,12 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" adr-index-generator "$sha" >"$adr_adopter/scripts/gen-adr-index.sh"
-chmod +x "$adr_adopter/scripts/gen-adr-index.sh"
-printf '\n# local drift\n' >>"$adr_adopter/scripts/gen-adr-index.sh"
+if caller_case_prepare "$(basename "$adr_adopter")" owner_40; then
+  ensure_adr_adopter
+  bash "$gen" adr-index-generator "$sha" >"$adr_adopter/scripts/gen-adr-index.sh"
+  chmod +x "$adr_adopter/scripts/gen-adr-index.sh"
+  printf '\n# local drift\n' >>"$adr_adopter/scripts/gen-adr-index.sh"
+fi
 schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepts a divergent ADR index generator"
@@ -2476,10 +2764,12 @@ SCHED_SCRIPT
 )"
 
 optional_generator_adopter="$tmproot/adopter-optional-adr-generator"
-build_adopter "$optional_generator_adopter" yes generated-artifacts
-bash "$gen" adr-index-generator "$sha" >"$optional_generator_adopter/scripts/gen-adr-index.sh"
-chmod +x "$optional_generator_adopter/scripts/gen-adr-index.sh"
-printf '\n# local payload drift with current pin\n' >>"$optional_generator_adopter/scripts/gen-adr-index.sh"
+if caller_case_prepare "$(basename "$optional_generator_adopter")" owner_41; then
+  build_adopter "$optional_generator_adopter" yes generated-artifacts
+  bash "$gen" adr-index-generator "$sha" >"$optional_generator_adopter/scripts/gen-adr-index.sh"
+  chmod +x "$optional_generator_adopter/scripts/gen-adr-index.sh"
+  printf '\n# local payload drift with current pin\n' >>"$optional_generator_adopter/scripts/gen-adr-index.sh"
+fi
 schedule_adopter_script "$optional_generator_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "changelog-only caller accepts stale optional ADR generator payload with current pin"
@@ -2491,9 +2781,11 @@ fi
 SCHED_SCRIPT
 )"
 optional_adr_test_adopter="$tmproot/adopter-optional-adr-test"
-build_adopter "$optional_adr_test_adopter" yes generated-artifacts
-bash "$gen" adr-index-test "$sha" >"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
-printf '\n# local payload drift with current pin\n' >>"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
+if caller_case_prepare "$(basename "$optional_adr_test_adopter")" owner_42; then
+  build_adopter "$optional_adr_test_adopter" yes generated-artifacts
+  bash "$gen" adr-index-test "$sha" >"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
+  printf '\n# local payload drift with current pin\n' >>"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
+fi
 schedule_adopter_script "$optional_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "changelog-only caller accepts stale optional ADR test payload with current pin"
@@ -2505,12 +2797,14 @@ fi
 SCHED_SCRIPT
 )"
 
-python3 "$contract_src" release --repo-root "$adopter" --version v1.0.0 >/dev/null 2>&1
-{ [ -f "$adopter/CHANGELOG/v1.0.0.md" ] && [ -e "$adopter/CHANGELOG.md" ]; } \
-  && pass "fixture release really consumed NEXT/ and wrote released history" \
-  || fail "fixture release produced no released tree; the next check would be vacuous"
+if caller_case_prepare "$(basename "$adopter")" owner_43; then
+  ensure_released_adopter
+  { [ -f "$adopter/CHANGELOG/v1.0.0.md" ] && [ -e "$adopter/CHANGELOG.md" ]; } \
+    && pass "fixture release really consumed NEXT/ and wrote released history" \
+    || fail "fixture release produced no released tree; the next check would be vacuous"
 
-# The regression. Nothing in the hand-copied shape survived this step.
+  # The regression. Nothing in the hand-copied shape survived this step.
+fi
 schedule_adopter_script "$adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite still passes AFTER a real release (#309)"
@@ -2557,8 +2851,10 @@ BROKEN
 # A. Fragments present and the renderer broken: this must FAIL. It is the whole
 #    defect — before the fix the suite reported success here.
 broken="$tmproot/adopter-broken-renderer"
-build_adopter "$broken"
-break_renderer "$broken"
+if caller_case_prepare "$(basename "$broken")" owner_44; then
+  build_adopter "$broken"
+  break_renderer "$broken"
+fi
 schedule_adopter_script "$broken" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "#399: a broken renderer with fragments still in NEXT/ reported success"
@@ -2580,13 +2876,15 @@ SCHED_SCRIPT
 #    by failing on every non-zero exit — which would break every adopter the
 #    moment they released, the exact regression the guard was added to avoid.
 released_broken="$tmproot/adopter-released-broken"
-build_adopter "$released_broken"
-python3 "$contract_src" release --repo-root "$released_broken" --version v1.0.0 >/dev/null 2>&1
-[ -z "$(find "$released_broken/NEXT" -maxdepth 1 -type f -name '*.md' \
-    ! -name 'README.md' ! -name '0000-archive.md' 2>/dev/null)" ] \
-  && pass "#399 fixture: the release really emptied NEXT/, so case B is not vacuous" \
-  || fail "#399 fixture: NEXT/ still holds fragments; case B would prove nothing"
-break_renderer "$released_broken"
+if caller_case_prepare "$(basename "$released_broken")" owner_45; then
+  build_adopter "$released_broken"
+  python3 "$contract_src" release --repo-root "$released_broken" --version v1.0.0 >/dev/null 2>&1
+  [ -z "$(find "$released_broken/NEXT" -maxdepth 1 -type f -name '*.md' \
+      ! -name 'README.md' ! -name '0000-archive.md' 2>/dev/null)" ] \
+    && pass "#399 fixture: the release really emptied NEXT/, so case B is not vacuous" \
+    || fail "#399 fixture: NEXT/ still holds fragments; case B would prove nothing"
+  break_renderer "$released_broken"
+fi
 schedule_adopter_script "$released_broken" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "#399: an emptied NEXT/ still tolerates a non-zero renderer exit"
@@ -2635,8 +2933,10 @@ PY
 
 for failure in renderer download digest python; do
   failing="$tmproot/adopter-$failure-failure"
-  build_adopter "$failing"
-  inject_render_failure "$failing" "$failure"
+  if caller_case_prepare "$(basename "$failing")" owner_46; then
+    build_adopter "$failing"
+    inject_render_failure "$failing" "$failure"
+  fi
   schedule_adopter_script "$failing" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'render-next failed for a reason other than an emptied NEXT/' \
   "a $failure failure with renderable NEXT/ fragments fails closed" \
@@ -2645,9 +2945,11 @@ SCHED_SCRIPT
 )"
 
   emptied="$tmproot/adopter-$failure-empty"
-  build_adopter "$emptied"
-  python3 "$contract_src" release --repo-root "$emptied" --version v1.0.0 >/dev/null 2>&1
-  inject_render_failure "$emptied" "$failure"
+  if caller_case_prepare "$(basename "$emptied")" owner_47; then
+    build_adopter "$emptied"
+    python3 "$contract_src" release --repo-root "$emptied" --version v1.0.0 >/dev/null 2>&1
+    inject_render_failure "$emptied" "$failure"
+  fi
   schedule_adopter_script "$emptied" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "a genuinely emptied NEXT/ remains distinct from a $failure failure"
@@ -2660,7 +2962,9 @@ done
 
 # An adopter with nothing to publish has no release.yml; `agents` and
 # `github-runner` are in exactly that shape and must not be forced to invent one.
-build_adopter "$tmproot/adopter-norelease" no
+if caller_case_prepare "$(basename "$tmproot/adopter-norelease")" owner_48; then
+  build_adopter "$tmproot/adopter-norelease" no
+fi
 schedule_adopter_script "$tmproot/adopter-norelease" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite tolerates an adopter with no release workflow"
@@ -2768,11 +3072,9 @@ expect_rejection() {
   [ -n "$reason" ] || { echo "FAIL - expect_rejection '$label' names no expected reason"; exit 1; }
   pass_msg="${pass_msg:-emitted suite rejects $label for its stated reason}"
   fail_msg="${fail_msg:-emitted suite rejected $label for another reason}"
-  if ! changelog_caller_case_selected "$label"; then
-    caller_assertions_suspended=1
+  if ! caller_case_take "$label"; then
     return 0
   fi
-  caller_assertions_suspended=0
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/reject-result-$seq"
@@ -2820,11 +3122,9 @@ expect_release_mode_rejection_body() {
 
 expect_release_mode_rejection() {
   local release_mode="$1" label="$2" mutator="$3" expected="$4" seq result
-  if ! changelog_caller_case_selected "$label"; then
-    caller_assertions_suspended=1
+  if ! caller_case_take "$label"; then
     return 0
   fi
-  caller_assertions_suspended=0
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/reject-result-$seq"
@@ -4499,12 +4799,12 @@ assert_mutable_verification_path_rejected() {
   source="$1"
   label="$2"
   slug="$3"
-  if ! changelog_caller_case_selected "$slug"; then
-    caller_assertions_suspended=1
+  if ! caller_case_take "$slug"; then
     return 0
   fi
-  caller_assertions_suspended=0
   dir="$tmproot/$slug"
+  require_shared_fixture "$source"
+  note_fixture_materialization
   cp -a "$source" "$dir"
   use_mutable_path_for_release_verification "$dir"
   if caller_case_nested=1 run_adopter "$dir"; then
@@ -4522,12 +4822,12 @@ assert_release_path_mutation_rejected() {
   slug="$3"
   mutator="$4"
   expected="$5"
-  if ! changelog_caller_case_selected "$slug"; then
-    caller_assertions_suspended=1
+  if ! caller_case_take "$slug"; then
     return 0
   fi
-  caller_assertions_suspended=0
   dir="$tmproot/$slug"
+  require_shared_fixture "$source"
+  note_fixture_materialization
   cp -a "$source" "$dir"
   if ! "$mutator" "$dir"; then
     fail "$label path mutation fixture did not apply"
@@ -4896,10 +5196,12 @@ expect_release_mode_rejection release-artifact \
   build_matrix_extra_key \
   'build job is not the generated release-artifact build job (#975)'
 commented_build_adopter="$tmproot/adopter-artifact-commented-build"
-build_adopter "$commented_build_adopter" yes workflow release-artifact
-sed -i 's|^    timeout-minutes: 45$|    # Raised only by regenerating with a reviewed generator change.\n    timeout-minutes: 45|' \
-  "$commented_build_adopter/.github/workflows/release.yml"
-git -C "$commented_build_adopter" commit -aqm 'comment the generated build job'
+if caller_case_prepare "$(basename "$commented_build_adopter")" owner_49; then
+  build_adopter "$commented_build_adopter" yes workflow release-artifact
+  sed -i 's|^    timeout-minutes: 45$|    # Raised only by regenerating with a reviewed generator change.\n    timeout-minutes: 45|' \
+    "$commented_build_adopter/.github/workflows/release.yml"
+  git -C "$commented_build_adopter" commit -aqm 'comment the generated build job'
+fi
 schedule_adopter_script "$commented_build_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts a YAML comment beside the generated build job wiring"
@@ -4911,8 +5213,9 @@ SCHED_SCRIPT
 # A comment after a block scalar header is a comment like any other: the scan
 # blanks it rather than reading its text as an expression.
 header_comment_adopter="$tmproot/adopter-block-header-comment"
-build_adopter "$header_comment_adopter" yes workflow
-python3 - "$header_comment_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$header_comment_adopter")" owner_50; then
+  build_adopter "$header_comment_adopter" yes workflow
+  python3 - "$header_comment_adopter/.github/workflows/release.yml" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -4922,7 +5225,8 @@ at = lines.index("        run: |\n", start)
 lines[at] = "        run: | # never ${{ secrets.NPM_TOKEN }}\n"
 open(path, "w", encoding="utf-8").write("".join(lines))
 PY
-git -C "$header_comment_adopter" commit -aqm 'comment a generated block scalar header'
+  git -C "$header_comment_adopter" commit -aqm 'comment a generated block scalar header'
+fi
 schedule_adopter_script "$header_comment_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite blanks a comment after a block scalar header"
@@ -5298,8 +5602,10 @@ expect_rejection --reason 'does not match the approved release verification scri
   --fail "a removed verification failure handler was rejected for another reason" \
   "release verification failure handler removed (#1717)" remove_release_verification_failure_handler
 quoted_checkout="$tmproot/adopter-quoted-checkout"
-cp -a "$adopter" "$quoted_checkout"
-quote_checkout_reference "$quoted_checkout"
+if caller_case_prepare "$(basename "$quoted_checkout")" owner_51; then
+  copy_adopter_fixture "$quoted_checkout" released
+  quote_checkout_reference "$quoted_checkout"
+fi
 schedule_adopter_script "$quoted_checkout" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "the generated suite accepts a quoted checkout reference with credentials disabled"
@@ -5309,8 +5615,10 @@ fi
 SCHED_SCRIPT
 )"
 inline_checkout="$tmproot/adopter-inline-checkout"
-cp -a "$adopter" "$inline_checkout"
-inline_checkout_with_persist_credentials "$inline_checkout"
+if caller_case_prepare "$(basename "$inline_checkout")" owner_52; then
+  copy_adopter_fixture "$inline_checkout" released
+  inline_checkout_with_persist_credentials "$inline_checkout"
+fi
 schedule_adopter_script "$inline_checkout" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "the generated suite accepts an inline checkout mapping with credentials disabled"
@@ -5336,8 +5644,10 @@ expect_rejection --reason 'cannot safely inspect flow-style release workflow ste
   --fail "flow-style release steps were rejected for another reason" \
   "release job hides steps in a flow-style sequence (#1717)" add_flow_style_checkout_step
 reindented_adopter="$tmproot/adopter-reindented-jobs"
-cp -a "$adopter" "$reindented_adopter"
-reindent_release_job_fields "$reindented_adopter"
+if caller_case_prepare "$(basename "$reindented_adopter")" owner_53; then
+  copy_adopter_fixture "$reindented_adopter" released
+  reindent_release_job_fields "$reindented_adopter"
+fi
 schedule_adopter_script "$reindented_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "the generated suite finds release steps with valid noncanonical job indentation"
@@ -5505,7 +5815,9 @@ grep -q 'publish-package.yml' "$tmproot/run.out" \
 # The shape ~21 repositories carry today. If the emitted suite accepted it,
 # regenerating would change nothing an adopter could observe.
 legacy_release="$tmproot/adopter-legacy-release"
-build_adopter "$legacy_release" legacy
+if caller_case_prepare "$(basename "$legacy_release")" owner_54; then
+  build_adopter "$legacy_release" legacy
+fi
 schedule_adopter_script "$legacy_release" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted the hand-copied verjson-payments release shape"
@@ -5544,9 +5856,11 @@ sync_last_rejection
 # comment next to a correct wiring, so a guard matching the raw line would break
 # the build of everyone who followed the documentation.
 commented="$tmproot/adopter-commented"
-build_adopter "$commented"
-sed -i 's|^      release_environment:|      # ORG_ADMIN_TOKEN and push_token are retired by ADR 0099.\n      release_environment:|' \
-  "$commented/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$commented")" owner_55; then
+  build_adopter "$commented"
+  sed -i 's|^      release_environment:|      # ORG_ADMIN_TOKEN and push_token are retired by ADR 0099.\n      release_environment:|' \
+    "$commented/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$commented" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite ignores retired-token names in comments"
@@ -5561,8 +5875,9 @@ SCHED_SCRIPT
 # unquoting rule branches on which quote opened the scalar and a parser can be
 # right about one of them.
 quoted="$tmproot/adopter-quoted"
-build_adopter "$quoted"
-cat >"$quoted/NEXT/2026-08-02-issue-8-quoted.md" <<'FRAGMENT'
+if caller_case_prepare "$(basename "$quoted")" owner_56; then
+  build_adopter "$quoted"
+  cat >"$quoted/NEXT/2026-08-02-issue-8-quoted.md" <<'FRAGMENT'
 ---
 date: 2026-08-02
 issue: 8
@@ -5575,8 +5890,9 @@ The lead paragraph, which is what a release note carries.
 
 The argument beneath it, which a release note does not.
 FRAGMENT
-git -C "$quoted" add -A >/dev/null 2>&1
-git -C "$quoted" -c user.email=t@t -c user.name=t commit -qm quoted >/dev/null 2>&1
+  git -C "$quoted" add -A >/dev/null 2>&1
+  git -C "$quoted" -c user.email=t@t -c user.name=t commit -qm quoted >/dev/null 2>&1
+fi
 schedule_adopter_script "$quoted" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts the quoted titles YAML requires of conventional commits"
@@ -5598,18 +5914,9 @@ commit_fixture() {
 # one combination the contract validates and renders correctly was rejected by
 # the generated test — which adopters wire into `npm test` and may not edit (#461).
 refs_adopter="$tmproot/adopter-refs"
-build_adopter "$refs_adopter"
-cat >"$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" <<'FRAGMENT'
----
-date: 2026-08-03
-issue: 5
-refs: 16
-title: 'fix(caller): an entry that links a second issue'
----
-
-Body.
-FRAGMENT
-commit_fixture "$refs_adopter" refs
+if caller_case_prepare "$(basename "$refs_adopter")" owner_57; then
+  ensure_refs_adopter
+fi
 schedule_adopter_script "$refs_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts an issue-form fragment carrying refs (#461)"
@@ -5619,8 +5926,11 @@ fi
 SCHED_SCRIPT
 )"
 refs_released="$tmproot/adopter-refs-released"
-cp -a "$refs_adopter" "$refs_released"
-python3 "$contract_src" release --repo-root "$refs_released" --version v1.0.0 >/dev/null 2>&1
+if caller_case_prepare "$(basename "$refs_released")" owner_58; then
+  ensure_refs_adopter
+  cp -a "$refs_adopter" "$refs_released"
+  python3 "$contract_src" release --repo-root "$refs_released" --version v1.0.0 >/dev/null 2>&1
+fi
 schedule_adopter_script "$refs_released" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite still accepts refs metadata after the exact release path"
@@ -5632,8 +5942,9 @@ SCHED_SCRIPT
 
 # Two refs, because one leaves the repeated group in the pattern unproven.
 multi_refs="$tmproot/adopter-refs-multi"
-build_adopter "$multi_refs"
-cat >"$multi_refs/NEXT/2026-08-04-issue-6-multi-refs.md" <<'FRAGMENT'
+if caller_case_prepare "$(basename "$multi_refs")" owner_59; then
+  build_adopter "$multi_refs"
+  cat >"$multi_refs/NEXT/2026-08-04-issue-6-multi-refs.md" <<'FRAGMENT'
 ---
 date: 2026-08-04
 issue: 6
@@ -5643,7 +5954,8 @@ title: 'fix(caller): an entry that links two other issues'
 
 Body.
 FRAGMENT
-commit_fixture "$multi_refs" multi-refs
+  commit_fixture "$multi_refs" multi-refs
+fi
 schedule_adopter_script "$multi_refs" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts a fragment refs-ing several issues (#461)"
@@ -5679,10 +5991,13 @@ expect_backlink_rejection() {
   local label="$1" dir
   reject_seq=$((reject_seq + 1))
   dir="$tmproot/backlink-$reject_seq"
-  build_adopter "$dir"
-  cp "$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" "$dir/NEXT/"
-  commit_fixture "$dir" backlink
-  corrupt_render "$dir" "$2"
+  if caller_case_prepare "$(basename "$dir")"; then
+    ensure_refs_adopter
+    build_adopter "$dir"
+    cp "$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" "$dir/NEXT/"
+    commit_fixture "$dir" backlink
+    corrupt_render "$dir" "$2"
+  fi
   schedule_adopter_script "$dir" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted $label"
@@ -5706,6 +6021,7 @@ expect_backlink_rejection "a declared refs linkage the render dropped" 's/; refs
 # policy diagnostic, never a producer-side Broken pipe made fatal by pipefail.
 large_backlink="$tmproot/backlink-large"
 build_adopter "$large_backlink"
+ensure_refs_adopter
 cp "$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" "$large_backlink/NEXT/"
 python3 - "$large_backlink/NEXT/2026-08-03-issue-5-refs.md" <<'PY'
 import sys
@@ -5734,14 +6050,17 @@ done
 # cannot produce it leaves only "skip the review" or "edit a generated artifact",
 # and the contract forbids the second (#443).
 released_out="$tmproot/as-released.out"
+fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 if (cd "$quoted" && ./scripts/render-next.sh --as-released) >"$released_out" 2>&1; then
   pass "the generated renderer accepts --as-released"
 else
   fail "the generated renderer rejected --as-released: $(head -1 "$released_out")"
 fi
+FIXTURE_OWNER
 
 # Distinguishes pass-through from a flag that is merely tolerated and dropped:
 # the released form omits everything after the lead paragraph.
+fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 if grep -q '^## feat(caller): a double-quoted title$' "$released_out" \
   && grep -q '^The lead paragraph, which is what a release note carries\.$' "$released_out" \
   && ! grep -q '^## Why$' "$released_out"; then
@@ -5761,7 +6080,9 @@ title: Python stream
 Python-only release note.
 FRAGMENT
 commit_fixture "$quoted" component
+FIXTURE_OWNER
 component_out="$tmproot/component.out"
+fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 if (cd "$quoted" && ./scripts/render-next.sh --component python) \
     >"$component_out" 2>&1 \
     && grep -q '^## Python stream$' "$component_out" \
@@ -5770,6 +6091,7 @@ if (cd "$quoted" && ./scripts/render-next.sh --component python) \
 else
   fail "the generated renderer does not isolate an explicit component stream"
 fi
+FIXTURE_OWNER
 
 # Still a renderer, not a front end to a pinned engine: anything else is refused
 # so a caller cannot reach subcommands the contract does not sanction.
@@ -5777,6 +6099,7 @@ fi
 # renderer's exit 2 and its own line show the renderer refused it.
 renderer_refusal_err="$tmproot/renderer-refusal.err"
 renderer_refusal_status=0
+fixture_owned_here owner_56 <<'FIXTURE_OWNER'
 (cd "$quoted" && ./scripts/render-next.sh release --version v9.9.9) >/dev/null 2>"$renderer_refusal_err" \
   || renderer_refusal_status=$?
 if [ "$renderer_refusal_status" -eq 0 ]; then
@@ -5787,12 +6110,15 @@ elif [ "$renderer_refusal_status" -eq 2 ] \
 else
   fail "the generated renderer's refusal of an unsanctioned argument is not its own (exit $renderer_refusal_status): $(head -c 300 "$renderer_refusal_err" | tr '\n' ' ')"
 fi
+FIXTURE_OWNER
 
 # Only reachable after a release, so it needs a released fixture.
 edited="$tmproot/adopter-edited"
-build_adopter "$edited"
-python3 "$contract_src" release --repo-root "$edited" --version v1.0.0 >/dev/null 2>&1
-printf '\nhand-written addition\n' >>"$edited/CHANGELOG.md"
+if caller_case_prepare "$(basename "$edited")" owner_60; then
+  build_adopter "$edited"
+  python3 "$contract_src" release --repo-root "$edited" --version v1.0.0 >/dev/null 2>&1
+  printf '\nhand-written addition\n' >>"$edited/CHANGELOG.md"
+fi
 schedule_adopter_script "$edited" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'CHANGELOG.md was hand-edited; it must equal the rendered released snapshots' \
   "emitted suite rejects a hand-edited CHANGELOG.md" \
@@ -5940,7 +6266,9 @@ FRAGMENT
 }
 
 artifact_adopter="$tmproot/adopter-artifact"
-build_artifact_adopter "$artifact_adopter"
+if caller_case_prepare "$(basename "$artifact_adopter")" owner_61; then
+  ensure_artifact_adopter
+fi
 schedule_adopter_script "$artifact_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts a generated release-artifact caller"
@@ -5958,21 +6286,9 @@ assert_release_path_mutation_rejected "$artifact_adopter" release-artifact artif
   move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
 
 private_artifact_adopter="$tmproot/adopter-artifact-private"
-cp -a "$artifact_adopter" "$private_artifact_adopter"
-bash "$gen" release-artifact "$sha" \
-  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}' \
-  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai \
-  >"$private_artifact_adopter/.github/workflows/release.yml"
-bash "$gen" contract-test "$sha" \
-  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}' \
-  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai \
-  >"$private_artifact_adopter/scripts/changelog-contract.test.sh"
-chmod +x "$private_artifact_adopter/scripts/changelog-contract.test.sh"
-cat >"$private_artifact_adopter/package-lock.json" <<'LOCK'
-{"name":"private-release","lockfileVersion":3,"packages":{"":{"name":"private-release"},"node_modules/@verjson/ai":{"name":"@verjson/ai","version":"1.0.0","resolved":"https://npm.pkg.github.com/download/@verjson/ai/1.0.0/hash","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}
-LOCK
-git -C "$private_artifact_adopter" add .github/workflows/release.yml scripts/changelog-contract.test.sh package-lock.json
-git -C "$private_artifact_adopter" commit -qm 'enable private release dependency acquisition'
+if caller_case_prepare "$(basename "$private_artifact_adopter")" owner_62; then
+  ensure_private_artifact_adopter
+fi
 schedule_adopter_script "$private_artifact_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts credential-separated private release acquisition"
@@ -5983,8 +6299,10 @@ SCHED_SCRIPT
 )"
 
 unbound_build_adopter="$tmproot/adopter-artifact-unbound-build"
-cp -a "$artifact_adopter" "$unbound_build_adopter"
-python3 - "$unbound_build_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$unbound_build_adopter")" owner_63; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$unbound_build_adopter"
+  python3 - "$unbound_build_adopter/.github/workflows/release.yml" <<'PY'
 from pathlib import Path
 import sys
 
@@ -5994,6 +6312,7 @@ binding = '    runs-on: ${{ matrix.os }}'
 assert source.count(binding) == 1
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
+fi
 schedule_adopter_script "$unbound_build_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'release.yml build job does not run on its approved OS matrix' \
   "emitted suite rejects a build job detached from its approved OS matrix" \
@@ -6002,8 +6321,10 @@ SCHED_SCRIPT
 )"
 
 unbound_acquisition_adopter="$tmproot/adopter-artifact-unbound-acquisition"
-cp -a "$private_artifact_adopter" "$unbound_acquisition_adopter"
-python3 - "$unbound_acquisition_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$unbound_acquisition_adopter")" owner_64; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$unbound_acquisition_adopter"
+  python3 - "$unbound_acquisition_adopter/.github/workflows/release.yml" <<'PY'
 from pathlib import Path
 import sys
 
@@ -6013,6 +6334,7 @@ binding = '    runs-on: ${{ matrix.os }}'
 assert source.count(binding) == 2
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
+fi
 schedule_adopter_script "$unbound_acquisition_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'release.yml acquisition job does not run on its approved OS matrix' \
   "emitted suite rejects acquisition detached from its approved OS matrix" \
@@ -6021,6 +6343,7 @@ SCHED_SCRIPT
 )"
 
 sync_last_rejection
+fixture_owned_here owner_62 <<'FIXTURE_OWNER'
 if python3 "$repo_root/scripts/ci-gate/hosted-selector-policy.py" \
   --consumer-policy "$private_artifact_adopter/.github/workflows" >"$tmproot/run.out" 2>&1; then
   pass "generated private artifact caller satisfies canonical runner selector policy"
@@ -6028,9 +6351,13 @@ else
 sync_last_rejection
   fail "generated private artifact caller violates runner selector policy: $(tail -2 "$tmproot/run.out")"
 fi
+FIXTURE_OWNER
 
 private_lock_validator="$tmproot/private-lock-validator.js"
 sync_last_rejection
+# wrong_package below always runs and executes this validator, so the private
+# tree is a shared fixture of that check, not only of the private case (#1978).
+ensure_private_artifact_adopter
 if python3 - "$private_artifact_adopter/.github/workflows/release.yml" "$private_lock_validator" >"$tmproot/run.out" 2>&1 <<'PY'
 from pathlib import Path
 import re
@@ -6065,18 +6392,20 @@ sync_last_rejection
 fi
 
 upper_scope_adopter="$tmproot/adopter-artifact-private-upper-scope"
-cp -a "$private_artifact_adopter" "$upper_scope_adopter"
-sed -i 's|download/@verjson/ai/|download/@verJSON/ai/|g' "$upper_scope_adopter/package-lock.json"
-sync_last_rejection
-grep -qF 'download/@verJSON/ai/' "$upper_scope_adopter/package-lock.json" \
-  || fail "upper-scope fixture did not retain its authentic registry URL"
-sync_last_rejection
+if caller_case_prepare "$(basename "$upper_scope_adopter")" owner_65; then
+  ensure_upper_scope_adopter
+  sync_last_rejection
+  grep -qF 'download/@verJSON/ai/' "$upper_scope_adopter/package-lock.json" \
+    || fail "upper-scope fixture did not retain its authentic registry URL"
+  sync_last_rejection
+fi
 run_adopter "$upper_scope_adopter" \
   && (cd "$upper_scope_adopter" && APPROVED_INTERNAL_PACKAGES=@verjson/ai node "$private_lock_validator") >"$tmproot/run.out" 2>&1 \
   && pass "generated private lock checks accept the authentic organization URL spelling" \
   || fail "generated private lock checks reject the authentic organization URL spelling: $(tail -2 "$tmproot/run.out")"
 
 wrong_package_adopter="$tmproot/adopter-artifact-private-wrong-package"
+ensure_upper_scope_adopter
 cp -a "$upper_scope_adopter" "$wrong_package_adopter"
 sed -i 's|download/@verJSON/ai/|download/@verJSON/wrong/|g' "$wrong_package_adopter/package-lock.json"
 sync_last_rejection
@@ -6090,10 +6419,12 @@ sync_last_rejection
 fi
 
 private_allowlist_adopter="$tmproot/adopter-artifact-private-allowlist"
-cp -a "$private_artifact_adopter" "$private_allowlist_adopter"
-sed -i "s/APPROVED_INTERNAL_PACKAGES: '@verjson\/ai'/APPROVED_INTERNAL_PACKAGES: '@verjson\/ai,@verjson\/ai-gguf'/" \
-  "$private_allowlist_adopter/.github/workflows/release.yml"
-node - "$private_allowlist_adopter/package-lock.json" <<'NODE'
+if caller_case_prepare "$(basename "$private_allowlist_adopter")" owner_66; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_allowlist_adopter"
+  sed -i "s/APPROVED_INTERNAL_PACKAGES: '@verjson\/ai'/APPROVED_INTERNAL_PACKAGES: '@verjson\/ai,@verjson\/ai-gguf'/" \
+    "$private_allowlist_adopter/.github/workflows/release.yml"
+  node - "$private_allowlist_adopter/package-lock.json" <<'NODE'
 const fs = require('fs');
 const path = process.argv[2];
 const lock = JSON.parse(fs.readFileSync(path, 'utf8'));
@@ -6104,7 +6435,8 @@ lock.packages['node_modules/@verjson/ai-gguf'] = {
 };
 fs.writeFileSync(path, JSON.stringify(lock));
 NODE
-git -C "$private_allowlist_adopter" commit -aqm 'widen generated private package allowlist'
+  git -C "$private_allowlist_adopter" commit -aqm 'widen generated private package allowlist'
+fi
 schedule_adopter_script "$private_allowlist_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a consumer-widened private package allowlist"
@@ -6117,8 +6449,10 @@ SCHED_SCRIPT
 )"
 
 private_lock_adopter="$tmproot/adopter-artifact-private-lock"
-cp -a "$private_artifact_adopter" "$private_lock_adopter"
-node - "$private_lock_adopter/package-lock.json" <<'NODE'
+if caller_case_prepare "$(basename "$private_lock_adopter")" owner_67; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_lock_adopter"
+  node - "$private_lock_adopter/package-lock.json" <<'NODE'
 const fs = require('fs');
 const path = process.argv[2];
 const lock = JSON.parse(fs.readFileSync(path, 'utf8'));
@@ -6129,7 +6463,8 @@ lock.packages['node_modules/@verjson/ai-gguf'] = {
 };
 fs.writeFileSync(path, JSON.stringify(lock));
 NODE
-git -C "$private_lock_adopter" commit -aqm 'add unauthorized private lock entry'
+  git -C "$private_lock_adopter" commit -aqm 'add unauthorized private lock entry'
+fi
 schedule_adopter_script "$private_lock_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an unauthorized private lock entry"
@@ -6142,10 +6477,13 @@ SCHED_SCRIPT
 )"
 
 private_static_cache_adopter="$tmproot/adopter-artifact-private-static-cache"
-cp -a "$private_artifact_adopter" "$private_static_cache_adopter"
-sed -i 's/release-dependencies-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.dependency-index }}/release-dependencies-shared/g' \
-  "$private_static_cache_adopter/.github/workflows/release.yml"
-git -C "$private_static_cache_adopter" commit -aqm 'share dependency cache across runs'
+if caller_case_prepare "$(basename "$private_static_cache_adopter")" owner_68; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_static_cache_adopter"
+  sed -i 's/release-dependencies-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.dependency-index }}/release-dependencies-shared/g' \
+    "$private_static_cache_adopter/.github/workflows/release.yml"
+  git -C "$private_static_cache_adopter" commit -aqm 'share dependency cache across runs'
+fi
 schedule_adopter_script "$private_static_cache_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a shared static dependency cache key"
@@ -6158,10 +6496,13 @@ SCHED_SCRIPT
 )"
 
 private_mismatched_cache_adopter="$tmproot/adopter-artifact-private-mismatched-cache"
-cp -a "$private_artifact_adopter" "$private_mismatched_cache_adopter"
-sed -i '/^  build:/,/^  publish:/ s/matrix.dependency-index/matrix.os/' \
-  "$private_mismatched_cache_adopter/.github/workflows/release.yml"
-git -C "$private_mismatched_cache_adopter" commit -aqm 'mismatch restored dependency cache key'
+if caller_case_prepare "$(basename "$private_mismatched_cache_adopter")" owner_69; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_mismatched_cache_adopter"
+  sed -i '/^  build:/,/^  publish:/ s/matrix.dependency-index/matrix.os/' \
+    "$private_mismatched_cache_adopter/.github/workflows/release.yml"
+  git -C "$private_mismatched_cache_adopter" commit -aqm 'mismatch restored dependency cache key'
+fi
 schedule_adopter_script "$private_mismatched_cache_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted mismatched acquisition and build cache keys"
@@ -6174,10 +6515,13 @@ SCHED_SCRIPT
 )"
 
 private_lane_preflight_adopter="$tmproot/adopter-artifact-private-lane-preflight"
-cp -a "$private_artifact_adopter" "$private_lane_preflight_adopter"
-sed -i 's/must be a non-empty JSON runner-label array/must contain labels/g' \
-  "$private_lane_preflight_adopter/.github/workflows/release.yml"
-git -C "$private_lane_preflight_adopter" commit -aqm 'remove fail-loud lane diagnostic'
+if caller_case_prepare "$(basename "$private_lane_preflight_adopter")" owner_70; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_lane_preflight_adopter"
+  sed -i 's/must be a non-empty JSON runner-label array/must contain labels/g' \
+    "$private_lane_preflight_adopter/.github/workflows/release.yml"
+  git -C "$private_lane_preflight_adopter" commit -aqm 'remove fail-loud lane diagnostic'
+fi
 schedule_adopter_script "$private_lane_preflight_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a weakened OS lane preflight"
@@ -6190,10 +6534,13 @@ SCHED_SCRIPT
 )"
 
 private_noop_lane_preflight_adopter="$tmproot/adopter-artifact-private-noop-lane-preflight"
-cp -a "$private_artifact_adopter" "$private_noop_lane_preflight_adopter"
-sed -i '/for lane_name in /c\          for lane_name in; do' \
-  "$private_noop_lane_preflight_adopter/.github/workflows/release.yml"
-git -C "$private_noop_lane_preflight_adopter" commit -aqm 'make lane preflight a no-op'
+if caller_case_prepare "$(basename "$private_noop_lane_preflight_adopter")" owner_71; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_noop_lane_preflight_adopter"
+  sed -i '/for lane_name in /c\          for lane_name in; do' \
+    "$private_noop_lane_preflight_adopter/.github/workflows/release.yml"
+  git -C "$private_noop_lane_preflight_adopter" commit -aqm 'make lane preflight a no-op'
+fi
 schedule_adopter_script "$private_noop_lane_preflight_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a no-op OS lane preflight"
@@ -6206,10 +6553,13 @@ SCHED_SCRIPT
 )"
 
 private_timeout_adopter="$tmproot/adopter-artifact-private-timeout"
-cp -a "$private_artifact_adopter" "$private_timeout_adopter"
-sed -i '/^  build:/,/^  publish:/ s/timeout-minutes: 45/timeout-minutes: 60/' \
-  "$private_timeout_adopter/.github/workflows/release.yml"
-git -C "$private_timeout_adopter" commit -aqm 'widen metered build timeout'
+if caller_case_prepare "$(basename "$private_timeout_adopter")" owner_72; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_timeout_adopter"
+  sed -i '/^  build:/,/^  publish:/ s/timeout-minutes: 45/timeout-minutes: 60/' \
+    "$private_timeout_adopter/.github/workflows/release.yml"
+  git -C "$private_timeout_adopter" commit -aqm 'widen metered build timeout'
+fi
 schedule_adopter_script "$private_timeout_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a build timeout above ADR 0103"
@@ -6222,10 +6572,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_timeout_adopter="$tmproot/adopter-artifact-private-acquisition-timeout"
-cp -a "$private_artifact_adopter" "$private_acquisition_timeout_adopter"
-sed -i '/^  acquire-private-dependencies:/,/^  build:/ s/timeout-minutes: 45/timeout-minutes: 60/' \
-  "$private_acquisition_timeout_adopter/.github/workflows/release.yml"
-git -C "$private_acquisition_timeout_adopter" commit -aqm 'widen metered acquisition timeout'
+if caller_case_prepare "$(basename "$private_acquisition_timeout_adopter")" owner_73; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_timeout_adopter"
+  sed -i '/^  acquire-private-dependencies:/,/^  build:/ s/timeout-minutes: 45/timeout-minutes: 60/' \
+    "$private_acquisition_timeout_adopter/.github/workflows/release.yml"
+  git -C "$private_acquisition_timeout_adopter" commit -aqm 'widen metered acquisition timeout'
+fi
 schedule_adopter_script "$private_acquisition_timeout_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an acquisition timeout above ADR 0103"
@@ -6238,10 +6591,13 @@ SCHED_SCRIPT
 )"
 
 private_lifecycle_adopter="$tmproot/adopter-artifact-private-lifecycle"
-cp -a "$private_artifact_adopter" "$private_lifecycle_adopter"
-sed -i 's/npm ci --ignore-scripts --prefer-offline --audit=false --fund=false/npm ci --prefer-offline --audit=false --fund=false/' \
-  "$private_lifecycle_adopter/.github/workflows/release.yml"
-git -C "$private_lifecycle_adopter" commit -aqm 'execute lifecycle scripts beside package credential'
+if caller_case_prepare "$(basename "$private_lifecycle_adopter")" owner_74; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_lifecycle_adopter"
+  sed -i 's/npm ci --ignore-scripts --prefer-offline --audit=false --fund=false/npm ci --prefer-offline --audit=false --fund=false/' \
+    "$private_lifecycle_adopter/.github/workflows/release.yml"
+  git -C "$private_lifecycle_adopter" commit -aqm 'execute lifecycle scripts beside package credential'
+fi
 schedule_adopter_script "$private_lifecycle_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted lifecycle execution inside credentialed acquisition"
@@ -6254,10 +6610,13 @@ SCHED_SCRIPT
 )"
 
 private_extra_secret_adopter="$tmproot/adopter-artifact-private-extra-secret"
-cp -a "$private_artifact_adopter" "$private_extra_secret_adopter"
-sed -i '/^  acquire-private-dependencies:/,/^  build:/ s/NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}/NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
-  "$private_extra_secret_adopter/.github/workflows/release.yml"
-git -C "$private_extra_secret_adopter" commit -aqm 'expose another secret during acquisition'
+if caller_case_prepare "$(basename "$private_extra_secret_adopter")" owner_75; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_extra_secret_adopter"
+  sed -i '/^  acquire-private-dependencies:/,/^  build:/ s/NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}/NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
+    "$private_extra_secret_adopter/.github/workflows/release.yml"
+  git -C "$private_extra_secret_adopter" commit -aqm 'expose another secret during acquisition'
+fi
 schedule_adopter_script "$private_extra_secret_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a second acquisition secret"
@@ -6270,8 +6629,10 @@ SCHED_SCRIPT
 )"
 
 private_contract_ref_adopter="$tmproot/adopter-artifact-private-contract-ref"
-cp -a "$private_artifact_adopter" "$private_contract_ref_adopter"
-python3 - "$private_contract_ref_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$private_contract_ref_adopter")" owner_76; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_contract_ref_adopter"
+  python3 - "$private_contract_ref_adopter/.github/workflows/release.yml" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -6284,7 +6645,8 @@ if text.index("  build:\n", job) < ref:
     raise SystemExit("private acquisition contract checkout fixture no longer matches generated output")
 open(path, "w", encoding="utf-8").write(text[:ref] + "ref: main" + text[line_end:])
 PY
-git -C "$private_contract_ref_adopter" commit -aqm 'run acquisition from an unpinned contract branch'
+  git -C "$private_contract_ref_adopter" commit -aqm 'run acquisition from an unpinned contract branch'
+fi
 schedule_adopter_script "$private_contract_ref_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an unpinned private acquisition contract checkout"
@@ -6297,10 +6659,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_unscoped_install_adopter="$tmproot/adopter-artifact-private-unscoped-install"
-cp -a "$private_artifact_adopter" "$private_acquisition_unscoped_install_adopter"
-mutate_private_acquisition "$private_acquisition_unscoped_install_adopter/.github/workflows/release.yml" drop-scope-mapping \
-  || fail "the drop-scope-mapping private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_unscoped_install_adopter" commit -aqm 'an install that lets an unlocked @verjson package resolve from the public registry'
+if caller_case_prepare "$(basename "$private_acquisition_unscoped_install_adopter")" owner_77; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_unscoped_install_adopter"
+  mutate_private_acquisition "$private_acquisition_unscoped_install_adopter/.github/workflows/release.yml" drop-scope-mapping \
+    || fail "the drop-scope-mapping private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_unscoped_install_adopter" commit -aqm 'an install that lets an unlocked @verjson package resolve from the public registry'
+fi
 schedule_adopter_script "$private_acquisition_unscoped_install_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an install that lets an unlocked @verjson package resolve from the public registry"
@@ -6313,10 +6678,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_install_extra_command_adopter="$tmproot/adopter-artifact-private-install-extra-command"
-cp -a "$private_artifact_adopter" "$private_acquisition_install_extra_command_adopter"
-mutate_private_acquisition "$private_acquisition_install_extra_command_adopter/.github/workflows/release.yml" extra-install-command \
-  || fail "the extra-install-command private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_install_extra_command_adopter" commit -aqm 'an extra command in the tokenless private install'
+if caller_case_prepare "$(basename "$private_acquisition_install_extra_command_adopter")" owner_78; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_install_extra_command_adopter"
+  mutate_private_acquisition "$private_acquisition_install_extra_command_adopter/.github/workflows/release.yml" extra-install-command \
+    || fail "the extra-install-command private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_install_extra_command_adopter" commit -aqm 'an extra command in the tokenless private install'
+fi
 schedule_adopter_script "$private_acquisition_install_extra_command_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an extra command in the tokenless private install"
@@ -6329,10 +6697,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_foreign_contract_checkout_adopter="$tmproot/adopter-artifact-private-foreign-contract-checkout"
-cp -a "$private_artifact_adopter" "$private_acquisition_foreign_contract_checkout_adopter"
-mutate_private_acquisition "$private_acquisition_foreign_contract_checkout_adopter/.github/workflows/release.yml" foreign-contract-checkout \
-  || fail "the foreign-contract-checkout private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_foreign_contract_checkout_adopter" commit -aqm 'a private acquisition contract checkout through a foreign action'
+if caller_case_prepare "$(basename "$private_acquisition_foreign_contract_checkout_adopter")" owner_79; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_foreign_contract_checkout_adopter"
+  mutate_private_acquisition "$private_acquisition_foreign_contract_checkout_adopter/.github/workflows/release.yml" foreign-contract-checkout \
+    || fail "the foreign-contract-checkout private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_foreign_contract_checkout_adopter" commit -aqm 'a private acquisition contract checkout through a foreign action'
+fi
 schedule_adopter_script "$private_acquisition_foreign_contract_checkout_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a private acquisition contract checkout through a foreign action"
@@ -6345,10 +6716,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_extra_uses_step_adopter="$tmproot/adopter-artifact-private-extra-uses-step"
-cp -a "$private_artifact_adopter" "$private_acquisition_extra_uses_step_adopter"
-mutate_private_acquisition "$private_acquisition_extra_uses_step_adopter/.github/workflows/release.yml" extra-uses-step \
-  || fail "the extra-uses-step private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_extra_uses_step_adopter" commit -aqm 'an extra action in private acquisition'
+if caller_case_prepare "$(basename "$private_acquisition_extra_uses_step_adopter")" owner_80; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_extra_uses_step_adopter"
+  mutate_private_acquisition "$private_acquisition_extra_uses_step_adopter/.github/workflows/release.yml" extra-uses-step \
+    || fail "the extra-uses-step private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_extra_uses_step_adopter" commit -aqm 'an extra action in private acquisition'
+fi
 schedule_adopter_script "$private_acquisition_extra_uses_step_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an extra action in private acquisition"
@@ -6361,10 +6735,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_npmrc_refusal_dropped_adopter="$tmproot/adopter-artifact-private-npmrc-refusal-dropped"
-cp -a "$private_artifact_adopter" "$private_acquisition_npmrc_refusal_dropped_adopter"
-mutate_private_acquisition "$private_acquisition_npmrc_refusal_dropped_adopter/.github/workflows/release.yml" drop-npmrc-refusal \
-  || fail "the drop-npmrc-refusal private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_npmrc_refusal_dropped_adopter" commit -aqm 'private acquisition without its repository npm configuration refusal'
+if caller_case_prepare "$(basename "$private_acquisition_npmrc_refusal_dropped_adopter")" owner_81; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_npmrc_refusal_dropped_adopter"
+  mutate_private_acquisition "$private_acquisition_npmrc_refusal_dropped_adopter/.github/workflows/release.yml" drop-npmrc-refusal \
+    || fail "the drop-npmrc-refusal private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_npmrc_refusal_dropped_adopter" commit -aqm 'private acquisition without its repository npm configuration refusal'
+fi
 schedule_adopter_script "$private_acquisition_npmrc_refusal_dropped_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted private acquisition without its repository npm configuration refusal"
@@ -6377,10 +6754,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_job_container_adopter="$tmproot/adopter-artifact-private-job-container"
-cp -a "$private_artifact_adopter" "$private_acquisition_job_container_adopter"
-mutate_private_acquisition "$private_acquisition_job_container_adopter/.github/workflows/release.yml" job-container \
-  || fail "the job-container private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_job_container_adopter" commit -aqm 'a private acquisition job run inside a caller-chosen container'
+if caller_case_prepare "$(basename "$private_acquisition_job_container_adopter")" owner_82; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_job_container_adopter"
+  mutate_private_acquisition "$private_acquisition_job_container_adopter/.github/workflows/release.yml" job-container \
+    || fail "the job-container private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_job_container_adopter" commit -aqm 'a private acquisition job run inside a caller-chosen container'
+fi
 schedule_adopter_script "$private_acquisition_job_container_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a private acquisition job run inside a caller-chosen container"
@@ -6393,10 +6773,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_contract_path_guard_dropped_adopter="$tmproot/adopter-artifact-private-contract-path-guard-dropped"
-cp -a "$private_artifact_adopter" "$private_acquisition_contract_path_guard_dropped_adopter"
-mutate_private_acquisition "$private_acquisition_contract_path_guard_dropped_adopter/.github/workflows/release.yml" drop-contract-path-guard \
-  || fail "the drop-contract-path-guard private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_contract_path_guard_dropped_adopter" commit -aqm 'private acquisition without its reserved contract path refusal'
+if caller_case_prepare "$(basename "$private_acquisition_contract_path_guard_dropped_adopter")" owner_83; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_contract_path_guard_dropped_adopter"
+  mutate_private_acquisition "$private_acquisition_contract_path_guard_dropped_adopter/.github/workflows/release.yml" drop-contract-path-guard \
+    || fail "the drop-contract-path-guard private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_contract_path_guard_dropped_adopter" commit -aqm 'private acquisition without its reserved contract path refusal'
+fi
 schedule_adopter_script "$private_acquisition_contract_path_guard_dropped_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted private acquisition without its reserved contract path refusal"
@@ -6409,10 +6792,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_ungated_job_adopter="$tmproot/adopter-artifact-private-ungated-job"
-cp -a "$private_artifact_adopter" "$private_acquisition_ungated_job_adopter"
-mutate_private_acquisition "$private_acquisition_ungated_job_adopter/.github/workflows/release.yml" ungated-job \
-  || fail "the ungated-job private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_ungated_job_adopter" commit -aqm 'run private acquisition without a verified selection'
+if caller_case_prepare "$(basename "$private_acquisition_ungated_job_adopter")" owner_84; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_ungated_job_adopter"
+  mutate_private_acquisition "$private_acquisition_ungated_job_adopter/.github/workflows/release.yml" ungated-job \
+    || fail "the ungated-job private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_ungated_job_adopter" commit -aqm 'run private acquisition without a verified selection'
+fi
 schedule_adopter_script "$private_acquisition_ungated_job_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a private acquisition job that runs without a verified selection"
@@ -6425,8 +6811,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_outside_node_modules_adopter="$tmproot/adopter-artifact-private-lock-outside-node-modules"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_outside_node_modules_adopter"
-python3 - "$private_acquisition_lock_outside_node_modules_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_outside_node_modules_adopter")" owner_85; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_outside_node_modules_adopter"
+  python3 - "$private_acquisition_lock_outside_node_modules_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6439,8 +6827,9 @@ lock["packages"]["vendor/x"] = {
 }
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_outside_node_modules_adopter" add -A
-git -C "$private_acquisition_lock_outside_node_modules_adopter" commit -qm 'lock a GitHub Packages download outside node_modules'
+  git -C "$private_acquisition_lock_outside_node_modules_adopter" add -A
+  git -C "$private_acquisition_lock_outside_node_modules_adopter" commit -qm 'lock a GitHub Packages download outside node_modules'
+fi
 schedule_adopter_script "$private_acquisition_lock_outside_node_modules_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a GitHub Packages download outside node_modules"
@@ -6453,8 +6842,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_backslash_authority_adopter="$tmproot/adopter-artifact-private-lock-backslash-authority"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_backslash_authority_adopter"
-python3 - "$private_acquisition_lock_backslash_authority_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_backslash_authority_adopter")" owner_86; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_backslash_authority_adopter"
+  python3 - "$private_acquisition_lock_backslash_authority_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6467,8 +6858,9 @@ lock["packages"]["node_modules/innocent"] = {
 }
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_backslash_authority_adopter" add -A
-git -C "$private_acquisition_lock_backslash_authority_adopter" commit -qm 'lock a backslash-authority GitHub Packages download'
+  git -C "$private_acquisition_lock_backslash_authority_adopter" add -A
+  git -C "$private_acquisition_lock_backslash_authority_adopter" commit -qm 'lock a backslash-authority GitHub Packages download'
+fi
 schedule_adopter_script "$private_acquisition_lock_backslash_authority_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a backslash-authority GitHub Packages download"
@@ -6481,8 +6873,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_shrinkwrap_adopter="$tmproot/adopter-artifact-private-lock-shrinkwrap"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_shrinkwrap_adopter"
-python3 - "$private_acquisition_lock_shrinkwrap_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_shrinkwrap_adopter")" owner_87; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_shrinkwrap_adopter"
+  python3 - "$private_acquisition_lock_shrinkwrap_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6497,8 +6891,9 @@ shrinkwrap["packages"]["node_modules/@verjson/secret"] = {
 json.dump(shrinkwrap, open(path.replace("package-lock.json", "npm-shrinkwrap.json"), "w", encoding="utf-8"))
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_shrinkwrap_adopter" add -A
-git -C "$private_acquisition_lock_shrinkwrap_adopter" commit -qm 'lock an npm-shrinkwrap.json beside the validated package-lock.json'
+  git -C "$private_acquisition_lock_shrinkwrap_adopter" add -A
+  git -C "$private_acquisition_lock_shrinkwrap_adopter" commit -qm 'lock an npm-shrinkwrap.json beside the validated package-lock.json'
+fi
 schedule_adopter_script "$private_acquisition_lock_shrinkwrap_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an npm-shrinkwrap.json beside the validated package-lock.json"
@@ -6511,10 +6906,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_script_allowlist_adopter="$tmproot/adopter-artifact-private-script-allowlist"
-cp -a "$private_artifact_adopter" "$private_acquisition_script_allowlist_adopter"
-mutate_private_acquisition "$private_acquisition_script_allowlist_adopter/.github/workflows/release.yml" drop-script-allowlist \
-  || fail "the drop-script-allowlist private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_script_allowlist_adopter" commit -aqm 'acquire without the script allowlist'
+if caller_case_prepare "$(basename "$private_acquisition_script_allowlist_adopter")" owner_88; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_script_allowlist_adopter"
+  mutate_private_acquisition "$private_acquisition_script_allowlist_adopter/.github/workflows/release.yml" drop-script-allowlist \
+    || fail "the drop-script-allowlist private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_script_allowlist_adopter" commit -aqm 'acquire without the script allowlist'
+fi
 schedule_adopter_script "$private_acquisition_script_allowlist_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted private acquisition without the script allowlist"
@@ -6527,8 +6925,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_root_resolved_adopter="$tmproot/adopter-artifact-private-lock-root-resolved"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_root_resolved_adopter"
-python3 - "$private_acquisition_lock_root_resolved_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_root_resolved_adopter")" owner_89; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_root_resolved_adopter"
+  python3 - "$private_acquisition_lock_root_resolved_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6538,8 +6938,9 @@ lock["packages"][""]["resolved"] = "https://npm.pkg.github.com/download/@verjson
 lock["packages"][""]["integrity"] = "sha512-" + "A" * 86 + "=="
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_root_resolved_adopter" add -A
-git -C "$private_acquisition_lock_root_resolved_adopter" commit -qm 'lock a resolved root lock entry'
+  git -C "$private_acquisition_lock_root_resolved_adopter" add -A
+  git -C "$private_acquisition_lock_root_resolved_adopter" commit -qm 'lock a resolved root lock entry'
+fi
 schedule_adopter_script "$private_acquisition_lock_root_resolved_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a resolved root lock entry"
@@ -6552,8 +6953,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_full_width_host_adopter="$tmproot/adopter-artifact-private-lock-full-width-host"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_full_width_host_adopter"
-python3 - "$private_acquisition_lock_full_width_host_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_full_width_host_adopter")" owner_90; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_full_width_host_adopter"
+  python3 - "$private_acquisition_lock_full_width_host_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6566,8 +6969,9 @@ lock["packages"]["node_modules/innocent"] = {
 }
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_full_width_host_adopter" add -A
-git -C "$private_acquisition_lock_full_width_host_adopter" commit -qm 'lock a full-width-dot GitHub Packages host'
+  git -C "$private_acquisition_lock_full_width_host_adopter" add -A
+  git -C "$private_acquisition_lock_full_width_host_adopter" commit -qm 'lock a full-width-dot GitHub Packages host'
+fi
 schedule_adopter_script "$private_acquisition_lock_full_width_host_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a full-width-dot GitHub Packages host"
@@ -6580,10 +6984,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_comment_private_adopter="$tmproot/adopter-artifact-private-comment-private"
-cp -a "$private_artifact_adopter" "$private_acquisition_comment_private_adopter"
-mutate_private_acquisition "$private_acquisition_comment_private_adopter/.github/workflows/release.yml" comment-private \
-  || fail "the comment-private private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_comment_private_adopter" commit -aqm 'a widened script allowlist hidden behind a comment'
+if caller_case_prepare "$(basename "$private_acquisition_comment_private_adopter")" owner_91; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_comment_private_adopter"
+  mutate_private_acquisition "$private_acquisition_comment_private_adopter/.github/workflows/release.yml" comment-private \
+    || fail "the comment-private private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_comment_private_adopter" commit -aqm 'a widened script allowlist hidden behind a comment'
+fi
 schedule_adopter_script "$private_acquisition_comment_private_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a widened script allowlist hidden behind a comment"
@@ -6596,10 +7003,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_comment_internal_adopter="$tmproot/adopter-artifact-private-comment-internal"
-cp -a "$private_artifact_adopter" "$private_acquisition_comment_internal_adopter"
-mutate_private_acquisition "$private_acquisition_comment_internal_adopter/.github/workflows/release.yml" comment-internal \
-  || fail "the comment-internal private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_comment_internal_adopter" commit -aqm 'a widened lock allowlist hidden behind a comment'
+if caller_case_prepare "$(basename "$private_acquisition_comment_internal_adopter")" owner_92; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_comment_internal_adopter"
+  mutate_private_acquisition "$private_acquisition_comment_internal_adopter/.github/workflows/release.yml" comment-internal \
+    || fail "the comment-internal private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_comment_internal_adopter" commit -aqm 'a widened lock allowlist hidden behind a comment'
+fi
 schedule_adopter_script "$private_acquisition_comment_internal_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a widened lock allowlist hidden behind a comment"
@@ -6612,10 +7022,13 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_comment_both_adopter="$tmproot/adopter-artifact-private-comment-both"
-cp -a "$private_artifact_adopter" "$private_acquisition_comment_both_adopter"
-mutate_private_acquisition "$private_acquisition_comment_both_adopter/.github/workflows/release.yml" comment-both \
-  || fail "the comment-both private acquisition fixture no longer matches generated output"
-git -C "$private_acquisition_comment_both_adopter" commit -aqm 'both allowlists widened behind comments'
+if caller_case_prepare "$(basename "$private_acquisition_comment_both_adopter")" owner_93; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_comment_both_adopter"
+  mutate_private_acquisition "$private_acquisition_comment_both_adopter/.github/workflows/release.yml" comment-both \
+    || fail "the comment-both private acquisition fixture no longer matches generated output"
+  git -C "$private_acquisition_comment_both_adopter" commit -aqm 'both allowlists widened behind comments'
+fi
 schedule_adopter_script "$private_acquisition_comment_both_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted both allowlists widened behind comments"
@@ -6628,8 +7041,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_trailing_dot_host_adopter="$tmproot/adopter-artifact-private-lock-trailing-dot-host"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_trailing_dot_host_adopter"
-python3 - "$private_acquisition_lock_trailing_dot_host_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_trailing_dot_host_adopter")" owner_94; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_trailing_dot_host_adopter"
+  python3 - "$private_acquisition_lock_trailing_dot_host_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6642,8 +7057,9 @@ lock["packages"]["node_modules/innocent"] = {
 }
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_trailing_dot_host_adopter" add -A
-git -C "$private_acquisition_lock_trailing_dot_host_adopter" commit -qm 'lock a trailing-dot GitHub Packages host'
+  git -C "$private_acquisition_lock_trailing_dot_host_adopter" add -A
+  git -C "$private_acquisition_lock_trailing_dot_host_adopter" commit -qm 'lock a trailing-dot GitHub Packages host'
+fi
 schedule_adopter_script "$private_acquisition_lock_trailing_dot_host_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a trailing-dot GitHub Packages host"
@@ -6656,8 +7072,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_lock_tab_in_path_adopter="$tmproot/adopter-artifact-private-lock-tab-in-path"
-cp -a "$private_artifact_adopter" "$private_acquisition_lock_tab_in_path_adopter"
-python3 - "$private_acquisition_lock_tab_in_path_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_lock_tab_in_path_adopter")" owner_95; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_lock_tab_in_path_adopter"
+  python3 - "$private_acquisition_lock_tab_in_path_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6667,8 +7085,9 @@ entry = lock["packages"]["node_modules/@verjson/ai"]
 entry["resolved"] = entry["resolved"].replace("/hash", "/ha\tsh")
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_lock_tab_in_path_adopter" add -A
-git -C "$private_acquisition_lock_tab_in_path_adopter" commit -qm 'lock a tab in an approved GitHub Packages download path'
+  git -C "$private_acquisition_lock_tab_in_path_adopter" add -A
+  git -C "$private_acquisition_lock_tab_in_path_adopter" commit -qm 'lock a tab in an approved GitHub Packages download path'
+fi
 schedule_adopter_script "$private_acquisition_lock_tab_in_path_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a tab in an approved GitHub Packages download path"
@@ -6681,8 +7100,10 @@ SCHED_SCRIPT
 )"
 
 private_acquisition_alias_adopter="$tmproot/adopter-artifact-private-alias"
-cp -a "$private_artifact_adopter" "$private_acquisition_alias_adopter"
-python3 - "$private_acquisition_alias_adopter/package-lock.json" <<'PY'
+if caller_case_prepare "$(basename "$private_acquisition_alias_adopter")" owner_96; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_acquisition_alias_adopter"
+  python3 - "$private_acquisition_alias_adopter/package-lock.json" <<'PY'
 import json
 import sys
 
@@ -6698,7 +7119,8 @@ lock["packages"]["node_modules/innocent"] = {
 }
 json.dump(lock, open(path, "w", encoding="utf-8"))
 PY
-git -C "$private_acquisition_alias_adopter" commit -aqm 'alias an unapproved private package'
+  git -C "$private_acquisition_alias_adopter" commit -aqm 'alias an unapproved private package'
+fi
 schedule_adopter_script "$private_acquisition_alias_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an aliased unapproved private package"
@@ -6711,8 +7133,10 @@ SCHED_SCRIPT
 )"
 
 acquisition_github_token_adopter="$tmproot/adopter-artifact-acquisition-github-token"
-cp -a "$private_artifact_adopter" "$acquisition_github_token_adopter"
-python3 - "$acquisition_github_token_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$acquisition_github_token_adopter")" owner_97; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$acquisition_github_token_adopter"
+  python3 - "$acquisition_github_token_adopter/.github/workflows/release.yml" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -6727,7 +7151,8 @@ replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ format('{{{0}}}', gi
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
-git -C "$acquisition_github_token_adopter" commit -aqm 'leak github.token into private acquisition'
+  git -C "$acquisition_github_token_adopter" commit -aqm 'leak github.token into private acquisition'
+fi
 schedule_adopter_script "$acquisition_github_token_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact acquisition step receiving github.token"
@@ -6740,10 +7165,13 @@ SCHED_SCRIPT
 )"
 
 private_selector_adopter="$tmproot/adopter-artifact-private-selector"
-cp -a "$private_artifact_adopter" "$private_selector_adopter"
-sed -i "s/- os: \${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}/- os: 'vars.CI_LANE_TRUSTED_WINDOWS'/g" \
-  "$private_selector_adopter/.github/workflows/release.yml"
-git -C "$private_selector_adopter" commit -aqm 'replace runner expression with silent literal typo'
+if caller_case_prepare "$(basename "$private_selector_adopter")" owner_98; then
+  ensure_private_artifact_adopter
+  cp -a "$private_artifact_adopter" "$private_selector_adopter"
+  sed -i "s/- os: \${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}/- os: 'vars.CI_LANE_TRUSTED_WINDOWS'/g" \
+    "$private_selector_adopter/.github/workflows/release.yml"
+  git -C "$private_selector_adopter" commit -aqm 'replace runner expression with silent literal typo'
+fi
 schedule_adopter_script "$private_selector_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a silent variable-name runner literal"
@@ -6756,10 +7184,13 @@ SCHED_SCRIPT
 )"
 
 broken_artifact_adopter="$tmproot/adopter-artifact-broken-build-gate"
-cp -a "$artifact_adopter" "$broken_artifact_adopter"
-sed -i 's/needs: \[verify, snapshot\]$/needs: verify/' \
-  "$broken_artifact_adopter/.github/workflows/release.yml"
-git -C "$broken_artifact_adopter" commit -aqm 'drop the build job ordering gate'
+if caller_case_prepare "$(basename "$broken_artifact_adopter")" owner_99; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$broken_artifact_adopter"
+  sed -i 's/needs: \[verify, snapshot\]$/needs: verify/' \
+    "$broken_artifact_adopter/.github/workflows/release.yml"
+  git -C "$broken_artifact_adopter" commit -aqm 'drop the build job ordering gate'
+fi
 schedule_adopter_script "$broken_artifact_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build job dropped needs: [verify, snapshot]"
@@ -6777,24 +7208,27 @@ SCHED_SCRIPT
 # tokens — since scripts/release-build.sh runs adopter-owned (potentially
 # third-party) build tooling on caller-chosen runners (#975 review finding).
 escalated_permissions_adopter="$tmproot/adopter-artifact-escalated-permissions"
-cp -a "$artifact_adopter" "$escalated_permissions_adopter"
-awk '
-  /^  build:[[:space:]]*$/ { in_build = 1 }
-  in_build && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $0 !~ /^  build:/ { in_build = 0 }
-  in_build && /^    permissions:[[:space:]]*$/ { print; getline; sub(/contents: read/, "contents: write"); print; next }
-  { print }
-' "$escalated_permissions_adopter/.github/workflows/release.yml" \
-  >"$escalated_permissions_adopter/.github/workflows/release.yml.new"
-mv "$escalated_permissions_adopter/.github/workflows/release.yml.new" \
-  "$escalated_permissions_adopter/.github/workflows/release.yml"
-awk '
-  /^  build:[[:space:]]*$/ { in_build = 1 }
-  in_build && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $0 !~ /^  build:/ { in_build = 0 }
-  in_build { print }
-' "$escalated_permissions_adopter/.github/workflows/release.yml" \
-  | grep -F 'contents: write' >/dev/null \
-  || fail "test setup did not actually escalate the build job's permissions to contents: write"
-git -C "$escalated_permissions_adopter" commit -aqm 'escalate the build job to contents: write'
+if caller_case_prepare "$(basename "$escalated_permissions_adopter")" owner_100; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$escalated_permissions_adopter"
+  awk '
+    /^  build:[[:space:]]*$/ { in_build = 1 }
+    in_build && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $0 !~ /^  build:/ { in_build = 0 }
+    in_build && /^    permissions:[[:space:]]*$/ { print; getline; sub(/contents: read/, "contents: write"); print; next }
+    { print }
+  ' "$escalated_permissions_adopter/.github/workflows/release.yml" \
+    >"$escalated_permissions_adopter/.github/workflows/release.yml.new"
+  mv "$escalated_permissions_adopter/.github/workflows/release.yml.new" \
+    "$escalated_permissions_adopter/.github/workflows/release.yml"
+  awk '
+    /^  build:[[:space:]]*$/ { in_build = 1 }
+    in_build && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $0 !~ /^  build:/ { in_build = 0 }
+    in_build { print }
+  ' "$escalated_permissions_adopter/.github/workflows/release.yml" \
+    | grep -F 'contents: write' >/dev/null \
+    || fail "test setup did not actually escalate the build job's permissions to contents: write"
+  git -C "$escalated_permissions_adopter" commit -aqm 'escalate the build job to contents: write'
+fi
 schedule_adopter_script "$escalated_permissions_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build job was escalated to contents: write"
@@ -6807,14 +7241,17 @@ SCHED_SCRIPT
 )"
 
 leaked_secret_adopter="$tmproot/adopter-artifact-leaked-secret"
-cp -a "$artifact_adopter" "$leaked_secret_adopter"
-sed -i \
-  's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
-  "$leaked_secret_adopter/.github/workflows/release.yml"
-grep -qF 'RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}' \
-  "$leaked_secret_adopter/.github/workflows/release.yml" \
-  || fail "test setup did not actually inject RELEASE_APP_PRIVATE_KEY into the build step's env"
-git -C "$leaked_secret_adopter" commit -aqm 'leak the release App private key into the build step env'
+if caller_case_prepare "$(basename "$leaked_secret_adopter")" owner_101; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$leaked_secret_adopter"
+  sed -i \
+    's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
+    "$leaked_secret_adopter/.github/workflows/release.yml"
+  grep -qF 'RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}' \
+    "$leaked_secret_adopter/.github/workflows/release.yml" \
+    || fail "test setup did not actually inject RELEASE_APP_PRIVATE_KEY into the build step's env"
+  git -C "$leaked_secret_adopter" commit -aqm 'leak the release App private key into the build step env'
+fi
 schedule_adopter_script "$leaked_secret_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build step env leaked RELEASE_APP_PRIVATE_KEY"
@@ -6833,14 +7270,17 @@ SCHED_SCRIPT
 # rejected too (#975 review finding, round 2).
 
 bracket_secret_adopter="$tmproot/adopter-artifact-bracket-secret"
-cp -a "$artifact_adopter" "$bracket_secret_adopter"
-sed -i \
-  "s/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: \${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}/" \
-  "$bracket_secret_adopter/.github/workflows/release.yml"
-grep -qF "RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}" \
-  "$bracket_secret_adopter/.github/workflows/release.yml" \
-  || fail "test setup did not actually inject a bracket-syntax secrets[...] reference into the build step's env"
-git -C "$bracket_secret_adopter" commit -aqm 'leak the release App private key via secrets[...] bracket syntax'
+if caller_case_prepare "$(basename "$bracket_secret_adopter")" owner_102; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$bracket_secret_adopter"
+  sed -i \
+    "s/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: \${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}/" \
+    "$bracket_secret_adopter/.github/workflows/release.yml"
+  grep -qF "RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}" \
+    "$bracket_secret_adopter/.github/workflows/release.yml" \
+    || fail "test setup did not actually inject a bracket-syntax secrets[...] reference into the build step's env"
+  git -C "$bracket_secret_adopter" commit -aqm 'leak the release App private key via secrets[...] bracket syntax'
+fi
 schedule_adopter_script "$bracket_secret_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build step env leaked a secret via bracket syntax (secrets['NAME'])"
@@ -6853,14 +7293,17 @@ SCHED_SCRIPT
 )"
 
 tojson_secret_adopter="$tmproot/adopter-artifact-tojson-secret"
-cp -a "$artifact_adopter" "$tojson_secret_adopter"
-sed -i \
-  's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          ALL_SECRETS: ${{ toJSON(secrets) }}/' \
-  "$tojson_secret_adopter/.github/workflows/release.yml"
-grep -qF 'ALL_SECRETS: ${{ toJSON(secrets) }}' \
-  "$tojson_secret_adopter/.github/workflows/release.yml" \
-  || fail "test setup did not actually inject a toJSON(secrets) dump into the build step's env"
-git -C "$tojson_secret_adopter" commit -aqm 'dump every secret into the build step env via toJSON(secrets)'
+if caller_case_prepare "$(basename "$tojson_secret_adopter")" owner_103; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$tojson_secret_adopter"
+  sed -i \
+    's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          ALL_SECRETS: ${{ toJSON(secrets) }}/' \
+    "$tojson_secret_adopter/.github/workflows/release.yml"
+  grep -qF 'ALL_SECRETS: ${{ toJSON(secrets) }}' \
+    "$tojson_secret_adopter/.github/workflows/release.yml" \
+    || fail "test setup did not actually inject a toJSON(secrets) dump into the build step's env"
+  git -C "$tojson_secret_adopter" commit -aqm 'dump every secret into the build step env via toJSON(secrets)'
+fi
 schedule_adopter_script "$tojson_secret_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build step env dumped the entire secrets context via toJSON(secrets)"
@@ -6873,8 +7316,10 @@ SCHED_SCRIPT
 )"
 
 github_token_build_adopter="$tmproot/adopter-artifact-github-token-build"
-cp -a "$artifact_adopter" "$github_token_build_adopter"
-python3 - "$github_token_build_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$github_token_build_adopter")" owner_104; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$github_token_build_adopter"
+  python3 - "$github_token_build_adopter/.github/workflows/release.yml" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -6889,10 +7334,11 @@ replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ format('{{{0}}}', gi
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
-grep -qF "PRIVATE_GITHUB_TOKEN: \${{ format('{{{0}}}', github.token) }}" \
-  "$github_token_build_adopter/.github/workflows/release.yml" \
-  || fail "test setup did not inject a wrapped github.token into the release-artifact build job"
-git -C "$github_token_build_adopter" commit -aqm 'leak wrapped github.token into build environment'
+  grep -qF "PRIVATE_GITHUB_TOKEN: \${{ format('{{{0}}}', github.token) }}" \
+    "$github_token_build_adopter/.github/workflows/release.yml" \
+    || fail "test setup did not inject a wrapped github.token into the release-artifact build job"
+  git -C "$github_token_build_adopter" commit -aqm 'leak wrapped github.token into build environment'
+fi
 schedule_adopter_script "$github_token_build_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller exposing github.token to its build job"
@@ -6905,8 +7351,10 @@ SCHED_SCRIPT
 )"
 
 github_context_build_adopter="$tmproot/adopter-artifact-github-context-build"
-cp -a "$artifact_adopter" "$github_context_build_adopter"
-python3 - "$github_context_build_adopter/.github/workflows/release.yml" <<'PY'
+if caller_case_prepare "$(basename "$github_context_build_adopter")" owner_105; then
+  ensure_artifact_adopter
+  cp -a "$artifact_adopter" "$github_context_build_adopter"
+  python3 - "$github_context_build_adopter/.github/workflows/release.yml" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -6921,10 +7369,11 @@ replacement = needle + "          PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}\
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
-grep -qF 'PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}' \
-  "$github_context_build_adopter/.github/workflows/release.yml" \
-  || fail "test setup did not inject a serialized github context into the release-artifact build job"
-git -C "$github_context_build_adopter" commit -aqm 'leak github context into build environment'
+  grep -qF 'PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}' \
+    "$github_context_build_adopter/.github/workflows/release.yml" \
+    || fail "test setup did not inject a serialized github context into the release-artifact build job"
+  git -C "$github_context_build_adopter" commit -aqm 'leak github context into build environment'
+fi
 schedule_adopter_script "$github_context_build_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller serializing the github context in its build job"
@@ -6937,6 +7386,7 @@ SCHED_SCRIPT
 )"
 
 toplevel_env_secret_adopter="$tmproot/adopter-artifact-toplevel-env-secret"
+ensure_artifact_adopter
 cp -a "$artifact_adopter" "$toplevel_env_secret_adopter"
 awk '
   /^jobs:[[:space:]]*$/ && !done {
@@ -6970,7 +7420,9 @@ build_job_slice="$(awk '
 ' "$toplevel_env_secret_adopter/.github/workflows/release.yml")"
 ! grep -q 'secrets' <<<"$build_job_slice" \
   || fail "test setup leaked the literal word secrets into the build job block, which would make this test pass for the wrong reason"
-git -C "$toplevel_env_secret_adopter" commit -aqm 'leak the release App private key via a workflow-level env: indirection'
+if caller_case_prepare "$(basename "$toplevel_env_secret_adopter")" owner_106; then
+  git -C "$toplevel_env_secret_adopter" commit -aqm 'leak the release App private key via a workflow-level env: indirection'
+fi
 schedule_adopter_script "$toplevel_env_secret_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller smuggling a secret through a workflow-level env: block"
@@ -7216,9 +7668,11 @@ grep -Fqx "$expected_release_fallback" "$emitted" \
   || fail "release-specific unknown-provenance fallback diverged or included an unapproved command"
 
 unknown_release="$tmproot/adopter-unrecognized-release"
-build_adopter "$unknown_release" yes generated-artifacts-with-adr-index
-sed -i '/^# Generated by verJSON\/\.github scripts\/gen-changelog-caller\.sh release-node /d' \
-  "$unknown_release/.github/workflows/release.yml"
+if caller_case_prepare "$(basename "$unknown_release")" owner_107; then
+  build_adopter "$unknown_release" yes generated-artifacts-with-adr-index
+  sed -i '/^# Generated by verJSON\/\.github scripts\/gen-changelog-caller\.sh release-node /d' \
+    "$unknown_release/.github/workflows/release.yml"
+fi
 schedule_adopter_script "$unknown_release" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release workflow without recognized provenance"
@@ -7285,8 +7739,9 @@ else
 fi
 
 stripped_guard_adopter="$tmproot/adopter-stripped-private-guard"
-build_adopter "$stripped_guard_adopter"
-WORKFLOW="$stripped_guard_adopter/.github/workflows/release.yml" python3 - <<'PY'
+if caller_case_prepare "$(basename "$stripped_guard_adopter")" owner_108; then
+  build_adopter "$stripped_guard_adopter"
+  WORKFLOW="$stripped_guard_adopter/.github/workflows/release.yml" python3 - <<'PY'
 import os
 
 path = os.environ["WORKFLOW"]
@@ -7301,6 +7756,7 @@ end = next(
 )
 open(path, "w", encoding="utf-8").writelines(lines[:start] + lines[end:])
 PY
+fi
 schedule_adopter_script "$stripped_guard_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'release.yml does not refuse a private, unpublishable package before the snapshot is tagged (#1206)' \
   "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)" \
@@ -7442,8 +7898,10 @@ done <<<"$contract_generator_output_paths"
 # Repair guidance cannot safely reproduce every adopter mode and option.
 # Require a verified mode hint and full-set instructions, with no command.
 known_remedy="$tmproot/adopter-changelog-remedy"
-build_adopter "$known_remedy" yes generated-artifacts-with-adr-index
-stale_pin "$known_remedy" .github/workflows/changelog.yml
+if caller_case_prepare "$(basename "$known_remedy")" owner_109; then
+  build_adopter "$known_remedy" yes generated-artifacts-with-adr-index
+  stale_pin "$known_remedy" .github/workflows/changelog.yml
+fi
 run_adopter "$known_remedy"
 sync_last_rejection
 known_finding="$(grep -F '.github/workflows/changelog.yml is still at' "$tmproot/run.out")"
@@ -7454,8 +7912,10 @@ expected_known_guidance='mode hint: generated-artifacts-with-adr-index; verify i
   || fail "known-mode repair guidance diverged: $known_guidance"
 
 unknown_remedy="$tmproot/adopter-changelog-remedy-unknown"
-build_adopter "$unknown_remedy" yes generated-artifacts-with-adr-index
-rm -f "$unknown_remedy/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$unknown_remedy")" owner_110; then
+  build_adopter "$unknown_remedy" yes generated-artifacts-with-adr-index
+  rm -f "$unknown_remedy/.github/workflows/changelog.yml"
+fi
 run_adopter "$unknown_remedy"
 sync_last_rejection
 unknown_finding="$(grep -F '.github/workflows/changelog.yml is absent' "$tmproot/run.out")"
@@ -7619,22 +8079,24 @@ remedy_first_arm_line="$(grep -n 'generated_set_note ' <<<"$generated_set_check_
 
 remedy_scan="$tmproot/remedy-scan.out"
 sync_last_rejection
-cat "$tmproot/run.out" >"$remedy_scan"
-
 custom_modes="$tmproot/adopter-remedy-custom-modes"
-build_adopter "$custom_modes" yes generated-artifacts-with-adr-index
-bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
-  >"$custom_modes/.github/workflows/release.yml"
-bash "$gen" pr-gate "$sha" --untrusted-runner linux-x64 \
-  >"$custom_modes/.github/workflows/changelog-contract.yml"
-grep -qF -- '--build-runner ubuntu-24.04' "$custom_modes/.github/workflows/release.yml" \
-  && pass "custom release-artifact fixture records its build-runner option" \
-  || fail "custom release-artifact fixture lost its build-runner option"
-grep -qF 'runs-on: [linux-x64]' "$custom_modes/.github/workflows/changelog-contract.yml" \
-  && pass "custom pr-gate fixture records its untrusted-runner option" \
-  || fail "custom pr-gate fixture lost its untrusted-runner option"
-stale_pin "$custom_modes" .github/workflows/release.yml
-stale_pin "$custom_modes" .github/workflows/changelog-contract.yml
+if caller_case_prepare "$(basename "$custom_modes")" owner_111; then
+  cat "$tmproot/run.out" >"$remedy_scan"
+
+  build_adopter "$custom_modes" yes generated-artifacts-with-adr-index
+  bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
+    >"$custom_modes/.github/workflows/release.yml"
+  bash "$gen" pr-gate "$sha" --untrusted-runner linux-x64 \
+    >"$custom_modes/.github/workflows/changelog-contract.yml"
+  grep -qF -- '--build-runner ubuntu-24.04' "$custom_modes/.github/workflows/release.yml" \
+    && pass "custom release-artifact fixture records its build-runner option" \
+    || fail "custom release-artifact fixture lost its build-runner option"
+  grep -qF 'runs-on: [linux-x64]' "$custom_modes/.github/workflows/changelog-contract.yml" \
+    && pass "custom pr-gate fixture records its untrusted-runner option" \
+    || fail "custom pr-gate fixture lost its untrusted-runner option"
+  stale_pin "$custom_modes" .github/workflows/release.yml
+  stale_pin "$custom_modes" .github/workflows/changelog-contract.yml
+fi
 schedule_adopter_script "$custom_modes" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted custom release callers with stale pins"
@@ -7653,9 +8115,11 @@ SCHED_SCRIPT
 )"
 
 paste_modes="$tmproot/adopter-remedy-paste-modes"
-build_adopter "$paste_modes" yes generated-artifacts-with-adr-index
-stale_pin "$paste_modes" .github/workflows/changelog.yml
-sed -i '/^# Generated by verJSON\/\.github scripts\/gen-changelog-caller\.sh /d' "$paste_modes/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$paste_modes")" owner_112; then
+  build_adopter "$paste_modes" yes generated-artifacts-with-adr-index
+  stale_pin "$paste_modes" .github/workflows/changelog.yml
+  sed -i '/^# Generated by verJSON\/\.github scripts\/gen-changelog-caller\.sh /d' "$paste_modes/.github/workflows/changelog.yml"
+fi
 schedule_adopter_script "$paste_modes" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a generated caller with unknown mode provenance"
@@ -7671,8 +8135,10 @@ SCHED_SCRIPT
 )"
 
 paste_self="$tmproot/adopter-remedy-paste-self"
-build_adopter "$paste_self" yes generated-artifacts-with-adr-index
-duplicate_pin_line "$paste_self/scripts/changelog-contract.test.sh"
+if caller_case_prepare "$(basename "$paste_self")" owner_113; then
+  build_adopter "$paste_self" yes generated-artifacts-with-adr-index
+  duplicate_pin_line "$paste_self/scripts/changelog-contract.test.sh"
+fi
 schedule_adopter_script "$paste_self" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted its own duplicate pin"
@@ -7695,10 +8161,12 @@ SCHED_SCRIPT
 # per-member assertions reject this adopter either way, so the assertion is on
 # the SET-LEVEL verdict, not on the suite's exit status.
 forged_mode="$tmproot/adopter-forged-mode-header"
-build_adopter "$forged_mode"
-sed -i -E \
-  's|^(# Generated by verJSON/\.github scripts/gen-changelog-caller\.sh )[a-z][a-z-]*( [0-9a-f]{40})|\1pr-gate\2|' \
-  "$forged_mode/.github/workflows/changelog.yml"
+if caller_case_prepare "$(basename "$forged_mode")" owner_114; then
+  build_adopter "$forged_mode"
+  sed -i -E \
+    's|^(# Generated by verJSON/\.github scripts/gen-changelog-caller\.sh )[a-z][a-z-]*( [0-9a-f]{40})|\1pr-gate\2|' \
+    "$forged_mode/.github/workflows/changelog.yml"
+fi
 run_adopter "$forged_mode"
 sync_last_rejection
 { ! grep -qF "every generated member of the adopter set pins $sha" "$tmproot/run.out" \
@@ -7715,10 +8183,12 @@ for member_mode in \
   wrong_mode_adopter="$tmproot/adopter-wrong-mode-${member##*/}"
   caller=workflow
   [ "$member" = scripts/gen-adr-index.test.sh ] && caller=generated-artifacts-with-adr-index
-  build_adopter "$wrong_mode_adopter" yes "$caller"
-  sed -i -E \
-    "s|^(# Generated by verJSON/\\.github scripts/gen-changelog-caller\\.sh )${expected_mode}( [0-9a-f]{40})|\\1${wrong_mode}\\2|" \
-    "$wrong_mode_adopter/$member"
+  if caller_case_prepare "$(basename "$wrong_mode_adopter")" owner_115; then
+    build_adopter "$wrong_mode_adopter" yes "$caller"
+    sed -i -E \
+      "s|^(# Generated by verJSON/\\.github scripts/gen-changelog-caller\\.sh )${expected_mode}( [0-9a-f]{40})|\\1${wrong_mode}\\2|" \
+      "$wrong_mode_adopter/$member"
+  fi
   run_adopter "$wrong_mode_adopter"
 sync_last_rejection
   if grep -qF "$member declares generator mode '$wrong_mode'" "$tmproot/run.out"; then
@@ -7733,7 +8203,9 @@ done
 # asserted positively: a check that only ever reddens proves nothing about the
 # state it is supposed to accept.
 atomic_adopter="$tmproot/adopter-atomic-set"
-build_adopter "$atomic_adopter"
+if caller_case_prepare "$(basename "$atomic_adopter")" owner_116; then
+  build_adopter "$atomic_adopter"
+fi
 schedule_adopter_script "$atomic_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ] && grep -qF "every generated member of the adopter set pins $sha" "$ADOPTER_LOG"; then
   pass "a whole-set regeneration passes and says so"
@@ -7748,9 +8220,11 @@ SCHED_SCRIPT
 # check exists to replace: a human fixing one member and re-running should not
 # have to discover the second on the next iteration.
 two_stale="$tmproot/adopter-two-stale-members"
-build_adopter "$two_stale"
-stale_pin "$two_stale" scripts/render-next.sh
-stale_pin "$two_stale" .github/workflows/changelog-contract.yml
+if caller_case_prepare "$(basename "$two_stale")" owner_117; then
+  build_adopter "$two_stale"
+  stale_pin "$two_stale" scripts/render-next.sh
+  stale_pin "$two_stale" .github/workflows/changelog-contract.yml
+fi
 schedule_adopter_script "$two_stale" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted two members left at an earlier contract commit"
@@ -7783,11 +8257,9 @@ expect_unestablished_pin() {
   # picks the member up and reports it anyway. An arm that only changes the
   # message needs the message asserted or it is not covered at all.
   local label="$1" member="$2" mutator="$3" phrase="${4:-}" seq result
-  if ! changelog_caller_case_selected "$label"; then
-    caller_assertions_suspended=1
+  if ! caller_case_take "$label"; then
     return 0
   fi
-  caller_assertions_suspended=0
   malformed_seq=$((malformed_seq + 1))
   seq="$malformed_seq"
   result="$tmproot/malformed-result-$seq"
@@ -7972,10 +8444,11 @@ expect_unestablished_pin "the suite itself declaring two different pins" \
 # command substitution and asserts both halves: the suite refuses it, and the
 # planted command leaves no trace of having run.
 injection_adopter="$tmproot/adopter-header-injection"
-build_adopter "$injection_adopter"
 injection_witness="$tmproot/header-injection-witness"
-rm -f "$injection_witness"
-python3 - "$injection_adopter/scripts/render-next.sh" "$injection_witness" <<'INJECT'
+if caller_case_prepare "$(basename "$injection_adopter")" owner_118; then
+  build_adopter "$injection_adopter"
+  rm -f "$injection_witness"
+  python3 - "$injection_adopter/scripts/render-next.sh" "$injection_witness" <<'INJECT'
 import sys
 
 path, witness = sys.argv[1], sys.argv[2]
@@ -7988,6 +8461,7 @@ else:
     raise SystemExit("fixture has no CONTRACT_REF line to replace")
 open(path, "w", encoding="utf-8").writelines(lines)
 INJECT
+fi
 schedule_adopter_script "$injection_adopter" "$(cat <<'SCHED_SCRIPT'
 expect_scheduled_rejection 'scripts/render-next.sh declares no contract pin this suite can read' \
   "emitted suite refuses a header whose pin is a command substitution" \
@@ -8058,9 +8532,11 @@ expect_rejection --reason "differs from the PR gate pr-gate writes" "a second PR
 expect_rejection --reason "differs from the PR gate pr-gate writes" "a YAML merge key in the PR gate" pr_gate_merge_key
 
 isolated_gate_adopter="$tmproot/adopter-isolated-pr-gate"
-build_adopter "$isolated_gate_adopter"
-bash "$gen" pr-gate "$sha" --untrusted-runner self-hosted,isolated \
-  >"$isolated_gate_adopter/.github/workflows/changelog-contract.yml"
+if caller_case_prepare "$(basename "$isolated_gate_adopter")" owner_119; then
+  build_adopter "$isolated_gate_adopter"
+  bash "$gen" pr-gate "$sha" --untrusted-runner self-hosted,isolated \
+    >"$isolated_gate_adopter/.github/workflows/changelog-contract.yml"
+fi
 schedule_adopter_script "$isolated_gate_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts a PR gate generated with --untrusted-runner"
