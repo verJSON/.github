@@ -114,6 +114,43 @@ rc="$(run_submit "$blocking" false false cafebabe)"
   && pass "a validator-confirmed stale-head verdict is retained without authorizing the replacement head" \
   || fail "stale-head verdict evidence was lost or mis-authorized ($rc)"
 
+export PRIMARY_TRANSPORT_FAILURE=pre_token_http PRIMARY_HTTP_STATUS_FAMILY=4xx PRIMARY_FAILURE_CLASS=quota
+export PRIMARY_HTTP_STATUS=429 AUTOMATIC_FALLBACK_SUPPRESSED=true PASS_CAP_EXHAUSTED=false REVIEW_PASS_COUNT=1
+rc="$(run_submit '')"
+{ [ "$rc" = rc=0 ] && has_comment 'provider transport failed' && has_comment '`quota`' && has_comment '`4xx`' \
+  && has_comment '`429`' && has_comment 'not a semantic verdict' && has_comment 'Human approval remains available' \
+  && has_output outcome=provider_transport && ! has_comment 'two-pass maximum reached' && ! has_action REVIEW; } \
+  && pass "identical pre-token HTTP failure names the status class and preserves the second pass" \
+  || fail "pre-token HTTP failure was silent or consumed the advisory as a semantic verdict ($rc)"
+
+export PRIMARY_HTTP_STATUS_FAMILY='4xx private-body-sentinel'
+export PRIMARY_FAILURE_CLASS='quota private-key-sentinel'
+export PRIMARY_HTTP_STATUS='429 private-reason-sentinel'
+rc="$(run_submit '')"
+{ [ "$rc" = rc=0 ] && has_comment '`unclassified`' && has_output outcome=provider_transport \
+  && ! has_comment 'private-body-sentinel' && ! has_comment 'private-key-sentinel' && ! has_comment 'private-reason-sentinel'; } \
+  && pass "transport advisory drops untrusted status text" \
+  || fail "transport advisory published unsanitized provider text ($rc)"
+
+export PRIMARY_HTTP_STATUS_FAMILY=4xx PRIMARY_FAILURE_CLASS=quota PRIMARY_HTTP_STATUS=429
+rc="$(run_submit "$approved")"
+{ [ "$rc" = rc=0 ] && has_comment 'non-blocking verdict' && ! has_comment 'provider transport failed' && ! has_output outcome=provider_transport; } \
+  && pass "a real verdict still publishes when a stale transport flag is present" \
+  || fail "transport classification overrode a real verdict ($rc)"
+
+export PRIMARY_TRANSPORT_FAILURE=pre_token_http PRIMARY_HTTP_STATUS_FAMILY=4xx PRIMARY_FAILURE_CLASS=not_found
+export PRIMARY_HTTP_STATUS=404 FALLBACK_TRANSPORT_FAILURE=pre_token_http FALLBACK_HTTP_STATUS_FAMILY=4xx
+export FALLBACK_FAILURE_CLASS=not_found FALLBACK_HTTP_STATUS=404 AUTOMATIC_FALLBACK_SUPPRESSED=false
+export PASS_CAP_EXHAUSTED=true REVIEW_PASS_COUNT=2
+rc="$(run_submit '')"
+{ [ "$rc" = rc=0 ] && has_comment 'two-pass maximum reached' && has_comment '`not_found`' && has_comment '`404`' \
+  && has_output outcome=inconclusive && ! has_output outcome=provider_transport; } \
+  && pass "a model-specific HTTP cascade that consumes both passes stays a two-pass advisory" \
+  || fail "model-specific HTTP failure hid the two-pass cap ($rc)"
+unset PRIMARY_TRANSPORT_FAILURE PRIMARY_HTTP_STATUS_FAMILY PRIMARY_FAILURE_CLASS PRIMARY_HTTP_STATUS
+unset FALLBACK_TRANSPORT_FAILURE FALLBACK_HTTP_STATUS_FAMILY FALLBACK_FAILURE_CLASS FALLBACK_HTTP_STATUS
+unset AUTOMATIC_FALLBACK_SUPPRESSED PASS_CAP_EXHAUSTED REVIEW_PASS_COUNT
+
 grep -q -- '--request-changes' "$tmp/submit.sh" \
   && fail "AI advisory still submits a blocking review" \
   || pass "AI advisory never submits CHANGES_REQUESTED"

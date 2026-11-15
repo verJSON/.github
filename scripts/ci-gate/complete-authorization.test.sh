@@ -75,6 +75,7 @@ def valid(document):
         and run.count("conclusion=success") == 1
         and "AI advisory blocking; human path ready" in run
         and "AI review inconclusive; human path ready" in run
+        and "AI review provider transport failed; human path ready" in run
         and "AI review skipped; human path ready" in run
         and "AI advisory non-blocking; human path ready" in run
         and "AI approval persisted for exact head" in run
@@ -357,6 +358,16 @@ if [ "$?" -eq 0 ] && grep -q 'conclusion=neutral' "$CALLS" \
    && grep -q 'ai_authorized=false' "$GITHUB_OUTPUT"; then
   pass "blocking advisory is visibly neutral and leaves the human path ready"
 else fail "blocking advisory was green or vetoed the human path"; fi
+
+: >"$CALLS"; : >"$GITHUB_OUTPUT"; REVIEW_AUTHORITY=ai-merge REVIEW_OUTCOME=provider_transport run_complete >"$tmp/out" 2>&1
+if [ "$?" -eq 0 ] && grep -q 'conclusion=neutral' "$CALLS" \
+   && grep -q 'output\[title\]=AI review provider transport failed; human path ready' "$CALLS" \
+   && grep -Fq 'output[summary]=DeepSeek failed before any completion tokens.' "$CALLS" \
+   && ! grep -q 'conclusion=success' "$CALLS" \
+   && ! grep -q 'api --method POST' "$CALLS" \
+   && grep -q 'ai_authorized=false' "$GITHUB_OUTPUT"; then
+  pass "pre-token transport failure is a neutral human fallback without AI authority"
+else fail "pre-token transport failure minted authority or blocked the human path"; fi
 
 : >"$CALLS"; : >"$GITHUB_OUTPUT"; REVIEW_AUTHORITY=ai-merge REVIEW_OUTCOME=inconclusive run_complete >"$tmp/out" 2>&1
 if [ "$?" -eq 0 ] && grep -q 'conclusion=neutral' "$CALLS" \

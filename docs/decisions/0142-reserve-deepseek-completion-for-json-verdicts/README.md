@@ -78,3 +78,13 @@ and executes the actual provider step scripts against stubbed GitHub and provide
 boundaries, including head changes between reservation and invocation and failed
 lookups. This corrects orchestration around the existing bounded-review decision;
 it does not restore thinking mode or relax verdict verification.
+
+### 2026-11-15 — Identical pre-token failures are not fallback verdicts (#2124)
+
+The 2026-09-09 rule still admits fallback after a failed or inconclusive primary
+that reached a completed response, and after a model-specific HTTP rejection.
+It does not admit fallback after an identical pre-token HTTP or transport
+failure. The non-secret status classification and the neutral
+`provider_transport` advisory are the 2026-11-15 amendment to
+[ADR 0090](../0090-human-first-opt-in-ai-review/README.md). Real verdict
+fail-closed behavior is unchanged.
