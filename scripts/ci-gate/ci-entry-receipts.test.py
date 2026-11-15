@@ -2081,6 +2081,35 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         launcher._owned_close.side_effect = close
         return launcher
 
+    def slot_child(
+        self,
+        *,
+        pidfd: int = 50,
+        ready: int = 14,
+        gate: int = 17,
+        error: int = 18,
+        stdin: int = 11,
+        stdout: int = 12,
+        close=None,
+    ):
+        closed: list[int] = []
+
+        def default_close(pointer):
+            descriptor = pointer[0]
+            if descriptor >= 0:
+                closed.append(descriptor)
+            pointer[0] = -1
+            return 0
+
+        owner = artifacts.AtomicDescriptorSlots(MagicMock(), close or default_close)
+        owner._slots[1] = stdin
+        owner._slots[2] = stdout
+        owner._slots[4] = ready
+        owner._slots[7] = gate
+        owner._slots[8] = error
+        owner._slots[10] = pidfd
+        return artifacts.SlotAtomicPidfdProcess(owner), closed
+
     def test_supervisor_owns_status_pipe_when_creation_is_interrupted(self) -> None:
         launcher = self.mock_launcher()
         closed = []
@@ -2157,7 +2186,7 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
                 kill_group.assert_not_called()
 
     def test_supervisor_conversion_preserves_unavailable_cancellation_evidence(self) -> None:
-        child = artifacts.AtomicPidfdProcess(MagicMock(), MagicMock(), 50, 14, 17, 18)
+        child, _closed = self.slot_child()
         failure = artifacts.IntegrityError("cancellation evidence unavailable")
         failure.cancellation_evidence_unavailable = True
         with (
@@ -2179,39 +2208,8 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         send_signal.assert_not_called()
         kill_group.assert_not_called()
 
-    def test_interruption_immediately_after_publication_leaves_resources_with_owner(self) -> None:
-        class PublishThenInterrupt(artifacts.AtomicLaunchOwner):
-            def __setattr__(self, name, value):
-                object.__setattr__(self, name, value)
-                if name == "child" and value is not None:
-                    raise KeyboardInterrupt
-
-        owner = PublishThenInterrupt()
-        def native(pidfd_pointer, *_arguments):
-            ctypes.cast(pidfd_pointer, ctypes.POINTER(ctypes.c_int)).contents.value = 50
-            return 0
-
-        with (
-            patch.object(artifacts.os, "pipe2", side_effect=[(10, 11), (12, 13), (14, 15), (16, 17), (18, 19)]),
-            patch.object(artifacts.os, "close") as close,
-            patch.object(artifacts.subprocess, "Popen") as popen,
-            patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
-            patch.object(artifacts.os, "killpg") as kill_group,
-            patch.object(artifacts, "_reap_pinned_supervisor") as reap,
-        ):
-            with self.assertRaises(KeyboardInterrupt):
-                artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native, owner)
-        self.assertIsNotNone(owner.child)
-        self.assertEqual((owner.child.pidfd, owner.child.ready_fd, owner.child.gate_fd, owner.child.error_fd), (50, 14, 17, 18))
-        self.assertEqual((owner.child.stdin.fileno(), owner.child.stdout.fileno()), (11, 12))
-        self.assertEqual({call.args[0] for call in close.call_args_list}, {10, 13, 15, 16, 19})
-        popen.assert_not_called()
-        send_signal.assert_not_called()
-        kill_group.assert_not_called()
-        reap.assert_not_called()
-
     def test_interruption_during_return_handoff_reaps_published_child(self) -> None:
-        child = artifacts.AtomicPidfdProcess(MagicMock(), MagicMock(), 50, 14, 17, 18)
+        child, closed = self.slot_child()
 
         def interrupted_spawn(*args):
             args[6].child = child
@@ -2230,20 +2228,31 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
             with self.assertRaises(artifacts.ScriptCandidateTerminal):
                 artifacts.run_supervised_bubblewrap(["/usr/bin/true"], environment={}, pass_fds=(), _atomic_launcher=self.mock_launcher())
         self.assertEqual(reap.call_args.args[1:], (50, 1))
-        self.assertIn((17,), [call.args for call in close.call_args_list])
-        self.assertIn((50,), [call.args for call in close.call_args_list])
+        self.assertIn(17, closed)
+        self.assertNotIn(50, [call.args[0] for call in close.call_args_list])
         popen.assert_not_called()
         send_signal.assert_not_called()
         kill_group.assert_not_called()
 
     def test_pre_release_close_failure_still_closes_gate_and_reaps(self) -> None:
-        stdin, stdout = MagicMock(), MagicMock()
-        stdin.close.side_effect = [OSError(errno.EIO, "close failure"), None]
-        child = artifacts.AtomicPidfdProcess(stdin, stdout, 50, 14, 17, 18)
+        failed = {"stdin": False}
+        closed: list[int] = []
+
+        def close(pointer):
+            descriptor = pointer[0]
+            if descriptor == 11 and not failed["stdin"]:
+                failed["stdin"] = True
+                raise OSError(errno.EIO, "close failure")
+            if descriptor >= 0:
+                closed.append(descriptor)
+            pointer[0] = -1
+            return 0
+
+        child, _closed = self.slot_child(close=close)
         with (
             patch.object(artifacts.os, "pipe", return_value=(20, 21)),
             patch.object(artifacts.os, "set_blocking"),
-            patch.object(artifacts.os, "close") as close,
+            patch.object(artifacts.os, "close"),
             patch.object(artifacts, "_spawn_slot_atomic_supervisor", return_value=child),
             patch.object(artifacts, "_await_atomic_launcher_ready", side_effect=artifacts.ScriptPlanInterrupted(signal.SIGTERM)),
             patch.object(artifacts, "_reap_pinned_supervisor") as reap,
@@ -2256,23 +2265,27 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         self.assertEqual(caught.exception.host_cancellation_signal, signal.SIGTERM)
         self.assertEqual(caught.exception.cleanup_status, "unverified")
         self.assertTrue(caught.exception.infrastructure_failure)
-        self.assertIn((17,), [call.args for call in close.call_args_list])
+        self.assertIn(17, closed)
         self.assertEqual(reap.call_args.args[1:], (50, 1))
         popen.assert_not_called()
         send_signal.assert_not_called()
         kill_group.assert_not_called()
 
     def test_interruption_while_publishing_atomic_pidfd_still_reaps(self) -> None:
-        class InterruptedPidfd(artifacts.AtomicPidfdProcess):
-            first_read = True
+        class InterruptedPidfd(artifacts.SlotAtomicPidfdProcess):
+            def __init__(self, owner):
+                super().__init__(owner)
+                self._pidfd_reads = 0
 
-            def __getattribute__(self, name):
-                if name == "pidfd" and object.__getattribute__(self, "first_read"):
-                    object.__setattr__(self, "first_read", False)
+            @property
+            def pidfd(self) -> int:
+                self._pidfd_reads += 1
+                if self._pidfd_reads == 1:
                     raise KeyboardInterrupt
-                return super().__getattribute__(name)
+                return self.owner.descriptor(10)
 
-        child = InterruptedPidfd(MagicMock(), MagicMock(), 50, 14, 17, 18)
+        child, _closed = self.slot_child()
+        child = InterruptedPidfd(child.owner)
         with (
             patch.object(artifacts.os, "pipe", return_value=(20, 21)),
             patch.object(artifacts.os, "set_blocking"),
@@ -2286,19 +2299,20 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
             with self.assertRaises(artifacts.ScriptCandidateTerminal):
                 artifacts.run_supervised_bubblewrap(["/usr/bin/true"], environment={}, pass_fds=(), _atomic_launcher=self.mock_launcher())
         self.assertEqual(reap.call_args.args[1:], (50, 1))
-        self.assertIn((50,), [call.args for call in close.call_args_list])
+        self.assertNotIn(50, [call.args[0] for call in close.call_args_list])
         popen.assert_not_called()
         send_signal.assert_not_called()
         kill_group.assert_not_called()
 
     def test_readiness_rejects_simultaneous_error_channel_eof(self) -> None:
-        child = artifacts.AtomicPidfdProcess(None, None, 50, 14, 17, 18)
+        child, _closed = self.slot_child()
         host_signals = MagicMock()
         host_signals.poll.return_value = None
         with (
             patch.object(artifacts.subprocess, "Popen") as popen,
             patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
             patch.object(artifacts.os, "read", return_value=b"") as read,
+            patch.object(artifacts.fcntl, "fcntl", return_value=os.O_NONBLOCK),
             patch.object(artifacts.select, "select", return_value=([14, 18], [], [])),
             patch.object(artifacts.time, "monotonic", return_value=1),
         ):
@@ -2309,13 +2323,14 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         send_signal.assert_not_called()
 
     def test_readiness_rejects_extra_bytes(self) -> None:
-        child = artifacts.AtomicPidfdProcess(None, None, 50, 14, 17, 18)
+        child, _closed = self.slot_child()
         host_signals = MagicMock()
         host_signals.poll.return_value = None
         with (
             patch.object(artifacts.subprocess, "Popen"),
             patch.object(artifacts.signal, "pidfd_send_signal"),
             patch.object(artifacts.os, "read", return_value=b"RR"),
+            patch.object(artifacts.fcntl, "fcntl", return_value=os.O_NONBLOCK),
             patch.object(artifacts.select, "select", return_value=([14], [], [])),
             patch.object(artifacts.time, "monotonic", return_value=1),
         ):
@@ -2323,7 +2338,7 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
                 artifacts._await_atomic_launcher_ready(child, host_signals, 5)
 
     def test_cancellation_precedes_waiting_for_launcher_readiness(self) -> None:
-        child = artifacts.AtomicPidfdProcess(None, None, 50, 14, 17, 18)
+        child, _closed = self.slot_child()
         host_signals = MagicMock()
         host_signals.poll.return_value = signal.SIGTERM
         with (
@@ -2336,7 +2351,7 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         select_call.assert_not_called()
 
     def test_exec_error_is_reported_only_after_complete_error_frame(self) -> None:
-        child = artifacts.AtomicPidfdProcess(None, None, 50, 14, 17, 18)
+        child, _closed = self.slot_child()
         host_signals = MagicMock()
         host_signals.poll.return_value = None
         frame = struct.pack("@ii", 7, errno.ENOENT)
@@ -2344,6 +2359,7 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
             patch.object(artifacts.subprocess, "Popen") as popen,
             patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
             patch.object(artifacts.os, "read", side_effect=[frame[:3], frame[3:], b""]),
+            patch.object(artifacts.fcntl, "fcntl", return_value=os.O_NONBLOCK),
             patch.object(artifacts.select, "select", return_value=([18], [], [])),
             patch.object(artifacts.time, "monotonic", return_value=1),
         ):
@@ -2353,13 +2369,14 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         send_signal.assert_not_called()
 
     def test_truncated_exec_error_frame_is_rejected(self) -> None:
-        child = artifacts.AtomicPidfdProcess(None, None, 50, 14, 17, 18)
+        child, _closed = self.slot_child()
         host_signals = MagicMock()
         host_signals.poll.return_value = None
         with (
             patch.object(artifacts.subprocess, "Popen") as popen,
             patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
             patch.object(artifacts.os, "read", side_effect=[b"bad", b""]),
+            patch.object(artifacts.fcntl, "fcntl", return_value=os.O_NONBLOCK),
             patch.object(artifacts.select, "select", return_value=([18], [], [])),
             patch.object(artifacts.time, "monotonic", return_value=1),
         ):
@@ -2367,119 +2384,6 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
                 artifacts._await_atomic_launcher_error_channel(child, host_signals, 5)
         popen.assert_not_called()
         send_signal.assert_not_called()
-
-    def test_pipe_wrapper_setup_failure_closes_endpoints_and_reaps_child(self) -> None:
-        pipes = [(10, 11), (12, 13), (14, 15), (16, 17), (18, 19)]
-        input_stream = MagicMock()
-
-        def native(pidfd_pointer, *_arguments):
-            ctypes.cast(pidfd_pointer, ctypes.POINTER(ctypes.c_int)).contents.value = 50
-            return 0
-
-        with (
-            patch.object(artifacts.os, "pipe2", side_effect=pipes),
-            patch.object(artifacts.os, "close") as close,
-            patch.object(artifacts, "AtomicPipe", side_effect=[input_stream, OSError(errno.EMFILE, "limit")]),
-            patch.object(artifacts.subprocess, "Popen") as popen,
-            patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
-            patch.object(artifacts.os, "killpg") as kill_group,
-            patch.object(artifacts, "_reap_pinned_supervisor") as reap,
-        ):
-            with self.assertRaises(OSError) as raised:
-                artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
-        self.assertEqual((raised.exception.errno, raised.exception.strerror), (errno.EMFILE, "limit"))
-        input_stream.close.assert_not_called()
-        send_signal.assert_called_once_with(50, signal.SIGKILL)
-        self.assertEqual(reap.call_args.args[1:], (50, 5))
-        self.assertEqual({call.args[0] for call in close.call_args_list}, set(range(10, 20)) | {50})
-        popen.assert_not_called()
-        kill_group.assert_not_called()
-
-    def test_interrupted_signal_during_failed_launch_still_reaps_and_preserves_failure(self) -> None:
-        pipes = [(10, 11), (12, 13), (14, 15), (16, 17), (18, 19)]
-
-        def native(pidfd_pointer, *_arguments):
-            ctypes.cast(pidfd_pointer, ctypes.POINTER(ctypes.c_int)).contents.value = 50
-            raise RuntimeError("injected native failure")
-
-        with (
-            patch.object(artifacts.os, "pipe2", side_effect=pipes),
-            patch.object(artifacts.os, "close") as close,
-            patch.object(artifacts.subprocess, "Popen") as popen,
-            patch.object(artifacts.signal, "pidfd_send_signal", side_effect=KeyboardInterrupt),
-            patch.object(artifacts.os, "killpg") as kill_group,
-            patch.object(artifacts, "_reap_pinned_supervisor") as reap,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "injected native failure") as caught:
-                artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
-        self.assertTrue(any("KeyboardInterrupt" in note for note in caught.exception.__notes__))
-        self.assertEqual(reap.call_args.args[1:], (50, 5))
-        self.assertEqual({call.args[0] for call in close.call_args_list}, set(range(10, 20)) | {50})
-        popen.assert_not_called()
-        kill_group.assert_not_called()
-
-    def test_partial_pipe_allocation_is_closed_without_starting_a_process(self) -> None:
-        with (
-            patch.object(artifacts.os, "pipe2", side_effect=[(10, 11), OSError(errno.EMFILE, "limit")]),
-            patch.object(artifacts.os, "close") as close,
-            patch.object(artifacts.subprocess, "Popen") as popen,
-            patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
-            patch.object(artifacts.os, "killpg") as kill_group,
-        ):
-            native = MagicMock()
-            with self.assertRaises(OSError) as raised:
-                artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
-        self.assertEqual((raised.exception.errno, raised.exception.strerror), (errno.EMFILE, "limit"))
-        self.assertEqual({call.args[0] for call in close.call_args_list}, {10, 11})
-        native.assert_not_called()
-        popen.assert_not_called()
-        send_signal.assert_not_called()
-        kill_group.assert_not_called()
-
-    def test_failure_after_clone_terminates_and_reaps_only_the_pinned_child(self) -> None:
-        pipes = [(10, 11), (12, 13), (14, 15), (16, 17), (18, 19)]
-
-        def native(pidfd_pointer, *_arguments):
-            ctypes.cast(pidfd_pointer, ctypes.POINTER(ctypes.c_int)).contents.value = 50
-            return -errno.EIO
-
-        with (
-            patch.object(artifacts.os, "pipe2", side_effect=pipes),
-            patch.object(artifacts.os, "close") as close,
-            patch.object(artifacts.subprocess, "Popen") as popen,
-            patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
-            patch.object(artifacts.os, "killpg") as kill_group,
-            patch.object(artifacts, "_reap_pinned_supervisor") as reap,
-        ):
-            with self.assertRaisesRegex(artifacts.IntegrityError, "errno 5"):
-                artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
-        send_signal.assert_called_once_with(50, signal.SIGKILL)
-        self.assertEqual(reap.call_args.args[1:], (50, 5))
-        self.assertEqual({call.args[0] for call in close.call_args_list}, set(range(10, 20)) | {50})
-        self.assertEqual(close.call_args_list[0].args, (17,))
-        popen.assert_not_called()
-        kill_group.assert_not_called()
-
-    def test_success_transfers_only_parent_endpoints_to_the_child_wrapper(self) -> None:
-        pipes = [(10, 11), (12, 13), (14, 15), (16, 17), (18, 19)]
-        def native(pidfd_pointer, *_arguments):
-            ctypes.cast(pidfd_pointer, ctypes.POINTER(ctypes.c_int)).contents.value = 50
-            return 0
-
-        with (
-            patch.object(artifacts.os, "pipe2", side_effect=pipes),
-            patch.object(artifacts.os, "close") as close,
-            patch.object(artifacts.subprocess, "Popen") as popen,
-            patch.object(artifacts.signal, "pidfd_send_signal") as send_signal,
-            patch.object(artifacts.os, "killpg") as kill_group,
-        ):
-            child = artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
-        self.assertEqual((child.stdin.fileno(), child.stdout.fileno()), (11, 12))
-        self.assertEqual((child.pidfd, child.ready_fd, child.gate_fd, child.error_fd), (50, 14, 17, 18))
-        self.assertEqual({call.args[0] for call in close.call_args_list}, {10, 13, 15, 16, 19})
-        popen.assert_not_called()
-        send_signal.assert_not_called()
-        kill_group.assert_not_called()
 
 
 def _cause_chain(error: BaseException) -> list[BaseException]:
