@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -51,14 +52,21 @@ class SecretlessAbsentCompatibilityTargetTests(unittest.TestCase):
             item for item in steps
             if item.get("name") == "Run runtime-resolved compatibility lanes without credentials"
         )
-        cls.runner_text = step["run"]
+        if 'exec /usr/bin/python3 -I "$helper" run' not in step["run"]:
+            raise AssertionError("compatibility lanes do not execute the pinned helper")
+        cls.helper_text = (
+            ROOT / "scripts/ci_secretless_compatibility_lanes.py"
+        ).read_text(encoding="utf-8")
+        cls.runner_text = cls.helper_text
         cls.temp_root = Path(tempfile.mkdtemp(prefix="node-ci-absent-compat-"))
         cls.runner_home = cls.temp_root / "runner-home"
         cls.runner_home.mkdir()
         cls.host_home_sentinel = cls.runner_home / ".host-runner-sentinel"
         cls.host_home_sentinel.write_text("runner home must stay hidden\n", encoding="utf-8")
+        cls.helper_path = cls.temp_root / "ci_secretless_compatibility_lanes.py"
+        cls.helper_path.write_text(cls.helper_text, encoding="utf-8")
         cls.runner = cls.temp_root / "run-lanes.sh"
-        cls.runner.write_text(cls.runner_text, encoding="utf-8")
+        cls.runner.write_text(cls.wrapper(cls.helper_path), encoding="utf-8")
         cls.tool_cache = cls.temp_root / "tool-cache"
         cls.tool_bin = cls.tool_cache / "node" / "test" / "x64" / "bin"
         cls.tool_bin.mkdir(parents=True)
@@ -236,10 +244,21 @@ if (process.env.TEST_FAIL === 'true') process.exit(42);
         env.update(updates)
         return env
 
+    @staticmethod
+    def wrapper(helper: Path) -> str:
+        return (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY\n"
+            f"exec /usr/bin/python3 -I {shlex.quote(str(helper))} run\n"
+        )
+
     def instrument_runner(self, name, needle, replacement):
         self.assertEqual(1, self.runner_text.count(needle))
+        helper = self.fixture / f"{name}.py"
+        helper.write_text(self.runner_text.replace(needle, replacement), encoding="utf-8")
         runner = self.fixture / name
-        runner.write_text(self.runner_text.replace(needle, replacement), encoding="utf-8")
+        runner.write_text(self.wrapper(helper), encoding="utf-8")
         return runner
 
     def run_lane(self, runner=None, **updates):

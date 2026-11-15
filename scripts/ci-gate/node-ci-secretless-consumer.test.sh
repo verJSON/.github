@@ -204,13 +204,18 @@ compatibility = next(
     step for step in build["steps"]
     if step.get("name") == "Run runtime-resolved compatibility lanes without credentials"
 )
-assert '"--tmpfs", "/"' in compatibility["run"]
-assert '"--ro-bind", "/", "/"' not in compatibility["run"]
-assert '"--ro-bind", "/usr", "/usr"' in compatibility["run"]
+compatibility_runtime = (
+    Path(sys.argv[3]) / "scripts/ci_secretless_compatibility_lanes.py"
+).read_text(encoding="utf-8")
+assert '"--tmpfs", "/"' in compatibility_runtime
+assert '"--ro-bind", "/", "/"' not in compatibility_runtime
+assert '"--ro-bind", "/usr", "/usr"' in compatibility_runtime
 assert "unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY" in compatibility["run"]
-assert "exec /usr/bin/python3 -I - <<'PY'" in compatibility["run"]
+assert 'helper="$RUNNER_TEMP/ci_secretless_compatibility_lanes.py"' in compatibility["run"]
+assert 'exec /usr/bin/python3 -I "$helper" run' in compatibility["run"]
+assert "${JOB_WORKFLOW_SHA}/scripts/ci_secretless_compatibility_lanes.py" in compatibility["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
-    assert f'"{command_file}"' in compatibility["run"]
+    assert f'"{command_file}"' in compatibility_runtime
 assert "RUN_DEFAULTS" not in plan["env"]
 assert 'run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"' in plan["run"]
 assert plan["env"]["SCRIPT_PLAN_DEFAULT_PLAN"] == "${{ steps.node-ci-script-plan.outputs.default-plan }}"
@@ -330,7 +335,7 @@ assert "git_metadata" in protected_plan_source and "git_mount_args" in protected
 assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in protected_plan_source
 assert '"COREPACK_ENABLE_NETWORK": "0"' in protected_plan_source
 assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in protected_plan_source
-assert 'from urllib.parse import parse_qsl, unquote, urlsplit' in compatibility["run"]
+assert 'from urllib.parse import parse_qsl, unquote, urlsplit' in compatibility_runtime
 assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in protected_plan_source
 assert "BASH_ENV" in protected_plan_source
 assert "env.BASH_ENV" not in protected_plan_source

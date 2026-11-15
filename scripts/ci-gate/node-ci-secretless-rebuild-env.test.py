@@ -1297,6 +1297,12 @@ def main():
             for candidate in build["steps"]
             if candidate.get("name") == "Run runtime-resolved compatibility lanes without credentials"
         )
+        compatibility_step = {
+            **compatibility_step,
+            "run": (ROOT / "scripts/ci_secretless_compatibility_lanes.py").read_text(
+                encoding="utf-8"
+            ),
+        }
         service_plan_source = service_plan_step["run"]
         if "blocked_service_env = {" not in service_plan_source:
             assert 'python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan' in service_plan_source
