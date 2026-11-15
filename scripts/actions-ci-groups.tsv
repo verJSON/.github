@@ -81,7 +81,7 @@ platform	bash scripts/ci-gate/ui-ci-untrusted-execution.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
-platform	@budget=120 RUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	@budget=150 RUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py
 platform	@budget=90 RUNNER_ISOLATION_TEST_PART=probes-r8-r10 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
 platform	@budget=90 RUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
 platform	python3 scripts/ci-gate/public-pr-runner-isolation-parts.test.py

@@ -2236,9 +2236,10 @@ expected = shards | {
     "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
-    # #1972: in-process checker + lean probe fixtures. Local core ~64s, probes
-    # ~15s/~12s; floor is 90s (multiples of 30 in 90..600).
-    "platform\tRUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 120,
+    # #1972: in-process checker + lean probe fixtures. Hosted core 63s on run
+    # 43669973375 → twice rounded up is 150 (ADR 0225); probes 13s/11s stay on
+    # the 90s floor.
+    "platform\tRUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 150,
     "platform\tRUNNER_ISOLATION_TEST_PART=probes-r8-r10 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 90,
     "platform\tRUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 90,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
