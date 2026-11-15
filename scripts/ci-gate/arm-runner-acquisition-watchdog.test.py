@@ -250,15 +250,16 @@ def caller_invocation(path):
 
 
 def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None, invocation=None,
-                 caller_environment=None):
+                 caller_environment=None, job_definition=None):
     """Run the job's steps in order, honoring each step's `if` the way the runner would.
 
     `preset_outputs` runs every step unconditionally with those step outputs, to exercise a
     step's own guard in isolation. `invocation` overrides the default required invocation.
     `caller_environment` replaces the process environment the harness starts from.
+    `job_definition` defaults to the gate-rearm watchdog; pass the merge watchdog to drive it.
     """
     caller_environment = os.environ if caller_environment is None else caller_environment
-    job_definition = watchdog_job()
+    job_definition = watchdog_job() if job_definition is None else job_definition
     with tempfile.TemporaryDirectory() as directory:
         stub_dir = Path(directory)
         bin_dir = stub_dir / "bin"
@@ -660,6 +661,72 @@ def main():
         raise SystemExit(f"{failures} of {len(tests)} watchdog behaviors failed")
     print(f"all {len(tests)} watchdog behaviors passed")
 
+MERGE = ROOT / ".github/workflows/ai-review-merge.yml"
+
+
+def merge_watchdog_job():
+    return load(MERGE)["jobs"][WATCHDOG]
+
+
+def test_merge_workflow_carries_the_same_acquisition_bound():
+    """ADR 0230 follow-up (#1763): ai-review-merge gets the same stall bound."""
+    arm = watchdog_job()
+    merge = merge_watchdog_job()
+    for key in ("ACQUISITION_LIMIT_SECONDS", "POLL_INTERVAL_SECONDS", "CANCEL_GRACE_SECONDS", "TZ"):
+        assert merge["env"][key] == arm["env"][key], key
+    assert merge["continue-on-error"] is True
+    assert merge["permissions"] == {"actions": "write"}
+    assert merge["timeout-minutes"] == arm["timeout-minutes"]
+    assert merge["needs"] == "title-policy"
+    assert 'test("(^| / )gate$")' in merge["env"]["ACQUISITION_VERDICT"]
+    assert "github.event.repository.private != true && 'ubuntu-24.04'" in merge["runs-on"]
+    for step in merge["steps"]:
+        assert step["env"]["RUNNER_ENVIRONMENT"] == "${{ runner.environment }}", step["name"]
+        assert step["run"].splitlines()[0].startswith(RUNNER_GUARD), step["name"]
+
+
+def test_merge_watchdog_is_issued_only_on_the_hosted_untrusted_lane():
+    merge = merge_watchdog_job()
+    cases = [
+        ("private hosted lane", {"vars.CI_LANE_UNTRUSTED": HOSTED_LANE}, "pull_request_target", True, True),
+        ("private persistent lane is skipped", {"vars.CI_LANE_UNTRUSTED": '["self-hosted","general"]'}, "pull_request_target", True, False),
+        ("public pull_request_target is skipped", {}, "pull_request_target", False, False),
+        ("dispatch on hosted default", {}, "workflow_dispatch", True, True),
+    ]
+    for name, variables, event_name, private, expected in cases:
+        context = {
+            **variables,
+            "github.event_name": event_name,
+            "github.event.repository.private": private,
+            "true": True,
+        }
+        admitted = evaluate(merge["if"], context)
+        assert admitted is expected, (name, admitted, merge["if"])
+
+
+
+def test_merge_watchdog_cancels_a_stalled_gate_job():
+    """Drive the merge watchdog's real steps against a gate still waiting for a runner."""
+    stalled = {
+        "total_count": 4,
+        "jobs": [
+            job("title-policy", "completed", labels=("ubuntu-24.04",)),
+            job("app-key-policy / validate-ai-review-key", "completed", 5, ("ubuntu-24.04",)),
+            job("gate", "queued", 0),
+            job(WATCHDOG, "in_progress", 3, ("ubuntu-24.04",)),
+        ],
+    }
+    completed, calls, elapsed = run_watchdog(
+        [stalled],
+        job_definition=merge_watchdog_job(),
+        invocation=caller_invocation(".github/workflows/ai-review-merge.yml"),
+    )
+    assert completed.returncode != 0
+    assert cancellations(calls) == ["cancel", "force-cancel"], calls
+    assert "::error title=Runner acquisition stalled::" in completed.stdout
+    assert "gate" in completed.stdout
+    assert "AI review merge run" in completed.stdout
+    assert elapsed >= limit_seconds(), elapsed
 
 if __name__ == "__main__":
     main()

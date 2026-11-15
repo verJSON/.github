@@ -44,6 +44,9 @@ expected = {
     "reject-public-pull-request-caller": {},
     # Permissionless event-time title classification.
     "title-policy": {},
+    # ADR 0230 follow-up (#1763): hosted-only acquisition bound; actions: write
+    # is limited to cancelling this run. continue-on-error keeps it non-veto.
+    "runner-acquisition-watchdog": {"actions": "write"},
     # Reusable app-key policy callee; reads its own workflow metadata only.
     # Nested reusable App-key policy calls receive this explicit read-only
     # boundary from the caller.

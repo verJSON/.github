@@ -173,3 +173,19 @@ stall in both UTC and `America/New_York` and requires the cancel on the first po
 Deleting `TZ: UTC` fails that test on a UTC host (1 of 25 behaviors) and fails 5 of 25
 on an `America/New_York` host, where the exact-timing cancellation tests also see the
 hour of delay. The decision itself is unchanged: this restores the bound it records.
+
+## Amendment 2026-11-15 — the same acquisition bound on `ai-review-merge.yml`
+
+ADR 0230 left extending the watchdog to `ai-review-merge.yml` as follow-up: that
+workflow nests the same `app-key-policy` call and can hold a private review run
+on an unreachable trusted-lane `gate` job. The review run is dispatched rather
+than ruleset-required, but an indefinite queue still blocks the PR's review and
+any later retry until an operator cancels it ([#1763](https://github.com/verJSON/.github/issues/1763)).
+
+`ai-review-merge.yml` now carries a `runner-acquisition-watchdog` job beside
+`title-policy` with the same 900 s stall bound, hosted-only token placement,
+dormancy guards, and non-veto `continue-on-error` wiring as `gate-rearm.yml`.
+The acquisition verdict treats a `gate` job that holds a runner as acquired
+(instead of `arm`). Recovery text names the AI review merge run. Structural and
+behavioral coverage lives in
+`scripts/ci-gate/arm-runner-acquisition-watchdog.test.py`.
