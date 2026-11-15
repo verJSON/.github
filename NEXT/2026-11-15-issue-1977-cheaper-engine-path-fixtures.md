@@ -15,4 +15,7 @@ were 3.26s to 2.98s for the 16 dependency paths and 1.01s to 0.89s for the
 five executable YAML paths: about 0.4s per full emitted run, with no
 diagnostic mismatches. Part of #1977. Moving `scan_retired_callers` earlier
 would change which diagnostic a dual-fault adopter sees and still needs an
-ADR 0224 decision, so that placement is unchanged.
+ADR 0224 decision, so that placement is unchanged. The shared-base generator
+change also rebinds the #1831 relay backlog digests for
+`capability-floor-observe` and `release.yml` `verify`, which sparse-check out
+`scripts/gen-changelog-caller.sh`.
