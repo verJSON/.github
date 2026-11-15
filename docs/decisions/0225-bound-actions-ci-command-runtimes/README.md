@@ -76,3 +76,27 @@ Pull-request runs that uploaded no records were all runs where `shell-test-group
 
 - Consumers can now expect a records artifact for `docs` and `locale-collation` wherever the job's log announces the group. The 2026-10-17 amendment's statement that those groups produce no records no longer holds.
 - Per-case cost is recorded only for cases that have their own row. A case that becomes a hot spot gets its own part, and the part's partition test pins that it runs once.
+
+## Amendment (2026-11-15) — drop exclusive on privileged-merge conformance (#1998)
+
+- **Issue:** [verJSON/.github#1998](https://github.com/verJSON/.github/issues/1998)
+
+The Consequences list above marked `privileged-merge-conformance` `@exclusive`
+with the required-checks audit after the first concurrent actions-ci run
+(#1736 / #1746). Hosted merge-gate (parallelism 4) measured that row alone at
+16–29s (slowest 29s on main run 43603205428; 25s on 43673676634; 24s on
+43623577812). It is single-threaded, so the reservation held every core for
+that prefix (25s of run 43673676634's 128s command wall, 03:44:51Z–03:46:59Z).
+
+Local remeasure on 4 CPUs, the merge-gate lane width: 72.9s alone, and 72.9s
+under the first-wave siblings (`review-caller-bootstrap`,
+`assert-mergeable-head`, `arm-receipt`), exit 0. Contention did not move it.
+Hosted alone is already under half of `@budget=120`, and the local ratio is
+1.0, so the row stays inside that budget without the reservation. Drop
+`@exclusive`. Keep `@budget=120` until a hosted non-exclusive record shows it
+running well under half. The required-checks audit row stays exclusive.
+
+`review-caller-bootstrap` is no longer the 173s serial row. After #2009 its
+slowest hosted measurement is 50s (main run 43603205428; 49s on 43673676634;
+43s on 43623577812). Twice 50s, rounded up to 30s, is 120. A declaration of 90
+only covered the 43s sample.

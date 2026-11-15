@@ -151,7 +151,7 @@ merge-gate	python3 scripts/ci-gate/review-provider-conformance.test.py
 merge-gate	python3 scripts/ci-gate/review-policy.test.py
 merge-gate	python3 scripts/ci-gate/review-policy-envelope.test.py
 merge-gate	bash scripts/ci-gate/review-policy-bootstrap.test.sh
-merge-gate	@budget=360 python3 scripts/ci-gate/review-caller-bootstrap.test.py
+merge-gate	@budget=120 python3 scripts/ci-gate/review-caller-bootstrap.test.py
 merge-gate	python3 scripts/ci-gate/review-authority.test.py
 merge-gate	python3 scripts/ci-gate/promotion-policy.test.py
 merge-gate	bash scripts/ci-gate/promotion-retry-eligibility.test.sh
@@ -183,11 +183,13 @@ merge-gate	bash scripts/ci-gate/elide-lockfiles.test.sh
 merge-gate	bash scripts/ci-gate/rereview-skip.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-target-guard.test.sh
 merge-gate	bash scripts/ci-gate/target-visibility.test.sh
-# @exclusive: on the first concurrent actions-ci run this row and the required-checks
-# audit were the two CPU-heavy rows that exceeded the command budget while competing
-# with sibling rows, so each reserves the whole runner (ADR 0225 Context and Decision
-# 1; #1736, PR #1746). Re-measure under sibling load before dropping it.
-merge-gate	@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
+# Was @exclusive with required-checks-audit after #1736/#1746 (ADR 0225).
+# Hosted alone 16–29s (slowest 29s, main run 43603205428). Local 4-CPU
+# remeasure: 72.9s alone and 72.9s beside bootstrap, assert-mergeable-head,
+# and arm-receipt (exit 0), so sibling load does not move it. Drop the
+# reservation; it was 25s of run 43673676634's 128s command wall. @budget=120
+# stays until a hosted non-exclusive record runs well under half (#1998).
+merge-gate	@budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin-extractor-differential.test.sh
 merge-gate	bash scripts/ci-gate/require-secrets.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-permission.test.sh

@@ -28,7 +28,6 @@ assert exclusive_commands == {
     "platform\t@exclusive @budget=180 bash scripts/actions-ci-groups.test.sh",
     "platform\t@exclusive @budget=120 python3 scripts/ci-gate/conformance/conformance.test.py",
     "platform\t@exclusive @budget=120 bash scripts/required-checks-audit.test.sh",
-    "merge-gate\t@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh",
     (
         "changelog-release-2\t@exclusive @budget=600 "
         "CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh"
@@ -2232,8 +2231,10 @@ expected = shards | {
     "merge-gate\tbash scripts/ci-gate/native-automerge.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/arm-receipt.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/zero-provider-recovery.test.sh": 90,
-    # 173s serially on main run 38513400637.
-    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
+    # #2009 ThreadPool. Slowest hosted after that is 50s (main run
+    # 43603205428; 49s on 43673676634, 43s on 43623577812). Twice 50s
+    # rounded up is 120 (ADR 0225). Was 360 serial; 90 covered only the 43s sample.
+    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 120,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
     # #1972: in-process checker + lean probe fixtures. Hosted core 63s on run

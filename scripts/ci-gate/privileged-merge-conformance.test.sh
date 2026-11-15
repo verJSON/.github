@@ -1883,10 +1883,12 @@ else
   fail "scheduled fleet audit is missing or its privileged execution surface drifted"
 fi
 
-grep -qE $'\t@exclusive (@budget=[0-9]+ )?bash scripts/ci-gate/privileged-merge-conformance.test.sh$' \
+grep -qE $'\t@budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh$' \
   "$root/scripts/actions-ci-groups.tsv" \
-  && pass "fleet conformance contract runs in actions CI" \
-  || fail "fleet conformance contract is not wired into actions CI"
+  && ! grep -qE $'\t@exclusive .*bash scripts/ci-gate/privileged-merge-conformance.test.sh$' \
+    "$root/scripts/actions-ci-groups.tsv" \
+  && pass "fleet conformance contract runs in actions CI without @exclusive" \
+  || fail "fleet conformance contract is not wired into actions CI without @exclusive"
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }
 echo "$fails test(s) failed."
