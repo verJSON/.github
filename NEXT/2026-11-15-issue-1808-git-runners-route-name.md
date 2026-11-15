@@ -9,5 +9,5 @@ Privileged merge's public-hosted admission now compares against
 `Verjson/verjson-git-runners` instead of the pre-rename
 `Verjson/verjson-github-runner`, so the runner repository can schedule the
 terminal job again. ADR 0089 records the amendment; the caller-contract
-pins match.
+pins and the public-call guard baseline use the same name.
 
