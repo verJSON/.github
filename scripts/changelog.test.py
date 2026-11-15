@@ -2285,6 +2285,138 @@ class ChangelogContractTests(unittest.TestCase):
                     finally:
                         self.root = original_root
 
+    def _dependency_pull_request(self) -> str:
+        self.root.joinpath("README.md").write_text("base\n", encoding="utf-8")
+        self.init_git()
+        self.commit_all("base")
+        base = run(self.root, "git", "rev-parse", "HEAD")
+        package = self.root / "package.json"
+        package.write_text('{"dependencies":{"commander":"^15.1.0"}}\n', encoding="utf-8")
+        self.commit_all("renovate dependency update")
+        return base
+
+    def test_renovate_missing_fragment_reports_handoff_without_changing_check_pr(self) -> None:
+        base = self._dependency_pull_request()
+
+        with self.assertRaisesRegex(
+            changelog.ChangelogError,
+            r"^dependency manifests or lockfiles require a new NEXT fragment: package\.json$",
+        ):
+            changelog.check_pr(self.root, base, "HEAD")
+
+        message = changelog.needs_changelog_context(self.root, base, "HEAD", "renovate[bot]")
+        assert message is not None
+        self.assertTrue(message.startswith("needs-changelog-context: "))
+        self.assertIn("package.json", message)
+        self.assertIn("changelog / validate remains the merge gate", message)
+        self.assertIn("[a-z0-9]+(?:-[a-z0-9]+)*", message)
+        self.assertIn("commander-15-1-0", message)
+        self.assertIn("commander-15.1.0", message)
+        self.assertIn(changelog.NEEDS_CHANGELOG_CONTEXT_ADR, message)
+        self.assertIn(changelog.NEEDS_CHANGELOG_CONTEXT_SKILL, message)
+        self.assertIsNone(
+            changelog.needs_changelog_context(self.root, base, "HEAD", "pyousefi")
+        )
+        self.assertIsNone(
+            changelog.needs_changelog_context(self.root, base, "HEAD", "Renovate-bot")
+        )
+
+    def test_renovate_handoff_clears_only_for_a_valid_added_fragment(self) -> None:
+        base = self._dependency_pull_request()
+        dotted = self.root / "NEXT" / "2026-11-15-issue-2120-commander-15.1.0.md"
+        dotted.parent.mkdir(parents=True, exist_ok=True)
+        dotted.write_text(
+            "---\ndate: 2026-11-15\nissue: 2120\nimpact: patch\ntitle: Dotted\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        self.commit_all("invalid slug")
+
+        self.assertIsNotNone(
+            changelog.needs_changelog_context(self.root, base, "HEAD", "renovate")
+        )
+        with self.assertRaises(changelog.ChangelogError):
+            changelog.check_pr(self.root, base, "HEAD")
+
+        dotted.unlink()
+        fragment(
+            self.root,
+            "2026-11-15-issue-2120-commander-15-1-0.md",
+            date="2026-11-15",
+            issue="2120",
+            impact="patch",
+            title="Exercise commander 15.1.0",
+        )
+        run(self.root, "git", "add", "-A")
+        run(self.root, "git", "commit", "-qm", "valid fragment")
+
+        self.assertIsNone(
+            changelog.needs_changelog_context(self.root, base, "HEAD", " renovate[bot] ")
+        )
+        changelog.check_pr(self.root, base, "HEAD")
+
+    def test_renovate_non_dependency_change_does_not_report_handoff(self) -> None:
+        self.root.joinpath("README.md").write_text("base\n", encoding="utf-8")
+        self.init_git()
+        self.commit_all("base")
+        base = run(self.root, "git", "rev-parse", "HEAD")
+        self.root.joinpath("README.md").write_text("notes\n", encoding="utf-8")
+        self.commit_all("docs")
+
+        self.assertIsNone(
+            changelog.needs_changelog_context(self.root, base, "HEAD", "renovate[bot]")
+        )
+
+    def test_needs_changelog_context_command_reserves_exit_1_for_the_signal(self) -> None:
+        base = self._dependency_pull_request()
+
+        missing = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "needs-changelog-context",
+                "--repo-root",
+                str(self.root),
+                "--base",
+                base,
+                "--head",
+                "HEAD",
+                "--author",
+                "renovate[bot]",
+            ],
+            cwd=self.root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(1, missing.returncode)
+        self.assertTrue(missing.stdout.startswith("needs-changelog-context: "))
+        self.assertEqual("", missing.stderr)
+
+        broken = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "needs-changelog-context",
+                "--repo-root",
+                str(self.root),
+                "--base",
+                "",
+                "--head",
+                "HEAD",
+                "--author",
+                "renovate[bot]",
+            ],
+            cwd=self.root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(2, broken.returncode)
+        self.assertEqual("", broken.stdout)
+        self.assertIn("changelog: ", broken.stderr)
+
     def test_non_dependency_change_requires_a_new_fragment(self) -> None:
         self.root.joinpath("README.md").write_text("base\n", encoding="utf-8")
         self.init_git()

@@ -52,9 +52,9 @@ provide the correct merge boundary when an agent authors the entry.
 ## Consequences
 
 - Dependency PRs remain blocked by the existing changelog gate until an agent
-  records the work it actually exercised.
-- The fleet rollout to remove retired writer workflows and regenerate caller
-  sets is tracked under issue #1869.
+  records the work it actually exercised. The handoff for that queue is
+  [verJSON/.github#2120](https://github.com/verJSON/.github/issues/2120),
+  recorded in the 2026-11-15 amendment.
 - Any textual mention of the retired path in workflow source must be removed,
   even when it appears only in a comment, run body, or unrelated metadata.
 - The standard required changelog checks remain the source of enforcement; the
@@ -65,3 +65,33 @@ provide the correct merge boundary when an agent authors the entry.
 Do not reinstate the writer by restoring ADR 0104. Any future automation that
 authors release context requires a new decision that satisfies the agent-owned
 exercise and description requirements without weakening the required checks.
+
+## Amendment 2026-11-15 — Renovate handoff is a signal, not a writer
+
+The header still cites issue #1869 because that was the record named when this
+decision was accepted. #1869 tracks node-ci performance and does not own the
+handoff this decision left open. Renovate may open a dependency pull request,
+and `changelog / validate` then fails closed until an agent authors the
+fragment. That queue looked like ordinary CI breakage. The handoff is
+[verJSON/.github#2120](https://github.com/verJSON/.github/issues/2120).
+
+1. `check-pr` is unchanged. It still requires a valid new `NEXT/` fragment for
+   dependency changes, for every author. There is no Renovate exemption, and
+   no workflow writes a fragment.
+2. The `changelog-validate.yml` job runs an informational step named
+   `needs-changelog-context` before that gate. The step fails, under that
+   title, only when the pull request author is `renovate[bot]` or `renovate`,
+   a dependency manifest or lockfile changed, and the pull request adds no
+   valid new fragment. `continue-on-error` keeps the step from becoming a
+   second merge gate. The required check remains `changelog / validate`.
+   Adopters see the annotation when their changelog caller pin includes this
+   workflow.
+3. The organization Renovate preset states the same contract in the pull
+   request body: install, exercise, adapt, then author
+   `NEXT/YYYY-MM-DD-issue-<id>-<slug>.md`. The slug matches
+   `[a-z0-9]+(?:-[a-z0-9]+)*` and cannot contain dots. The body links this
+   decision and the dependency-upgrade skill in `verjson-agents`. A static
+   `needs-changelog-context` label is not applied. Renovate would reapply it
+   after a valid fragment landed, so the annotation is the signal that clears.
+   The preset body reaches the next Renovate run after `Verjson/renovate-config`
+   merges that change.
