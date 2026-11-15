@@ -1281,3 +1281,20 @@ backlog digest is rebound because its sparse checkout includes
 lowercase ASCII hexadecimal characters. The workflow, callers, runner selector,
 unresolved reason, and pending justification are unchanged; no relay key or
 runner exception was added. The digest binds the updated sparse-checkout bytes.
+
+## Amendment (2026-11-15, #1831) — actionlint's relay job leaves the backlog
+
+**Finding.** `actionlint.yml`'s `workflow_call` job still resolved to a
+persistent runner for a public repository whose caller event was not one of
+the five public pull-request events. That path selected `CI_RUNNER_FASTLANE`,
+so the relay-backlog row could not leave.
+
+**Decision (Part of #1831).** The public-visibility branch selects
+`fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')` and does not read
+`CI_RUNNER_FASTLANE` or `CI_LANE_FALLBACK`. Private targets stay on
+`CI_LANE_TRUSTED`. ADR 0050 records the routing change. The key
+`actionlint.yml [workflow_call]` / `actionlint` leaves `RELAY_BACKLOG`, the
+test snapshot, and `public-pr-runner-isolation.pending.tsv` together. The
+other relay rows stay. `release.yml` `verify`'s pending digest is refreshed
+from the checker's report because that row binds this checker; the job is
+unchanged.
