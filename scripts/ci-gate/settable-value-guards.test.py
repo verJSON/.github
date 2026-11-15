@@ -52,11 +52,11 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 # in each workflow: one downloaded-helper digest and two verified-copy digests.
 # The terminal hold removes the merge App client-ID and successful-merge
 # artifact-ID guards along with their credential and cleanup paths (#1956).
-GUARD_COUNT = 551
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the
 # key and fails, and an entry that no longer matches a guard fails too.
+GUARD_COUNT = 559
 REASON_C = "CONTRACT_REF is the contract SHA the generator validated as 40 lowercase hex and embedded. "
 REASON_A = "accepted is generated_set_check argument 5; every call's literal argument is itself scanned as an argument guard. "
 REASON_P = "consumer_pattern is stamp_before argument 2; every call's literal argument is itself scanned as an argument guard. "

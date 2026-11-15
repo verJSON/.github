@@ -108,30 +108,40 @@ for name in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
     assert install["env"][name] == ""
 assert "npm ci --ignore-scripts" in install["run"]
 assert "printf '%s=\\n' \"$name\"" in install["run"]
-assert 'command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]' in rebuild["run"]
+rebuild_program = (
+    Path(sys.argv[1]).resolve().parents[2] / "scripts/ci_secretless_rebuild_packages.py"
+).read_text(encoding="utf-8")
+assert 'command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]' in rebuild_program
 assert 'unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN' in rebuild["run"]
-assert "exec python3 -I - <<'PY'" in rebuild["run"]
+assert 'helper="$RUNNER_TEMP/ci_secretless_rebuild_packages.py"' in rebuild["run"]
+assert 'exec /usr/bin/python3 -I "$helper" run' in rebuild["run"]
+assert "${JOB_WORKFLOW_SHA}/scripts/ci_secretless_rebuild_packages.py" in rebuild["run"]
+assert "sha256sum -- " in rebuild["run"]
+assert rebuild["env"]["JOB_WORKFLOW_SHA"] == "${{ fromJSON(toJSON(job)).workflow_sha }}"
 assert rebuild["env"]["BWRAP_BINARY"] == "/usr/bin/bwrap"
 assert steps.index(provision) < steps.index(rebuild)
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in provision["if"]
 assert "runner.environment == 'github-hosted'" in provision["if"]
-assert "bubblewrap_metadata.st_uid not in (0, os.getuid())" in rebuild["run"]
-assert '"--unshare-pid"' in rebuild["run"]
-assert '"--unshare-net"' in rebuild["run"]
-assert '"--tmpfs", "/"' in rebuild["run"]
-assert '"--ro-bind", "/", "/"' not in rebuild["run"]
-assert "bind_source(workspace, sandbox_workspace)" in rebuild["run"]
-assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in rebuild["run"]
-assert '"GITHUB_WORKSPACE": sandbox_workspace' in rebuild["run"]
-assert '"RUNNER_TEMP": "/tmp"' in rebuild["run"]
-assert '"NPM_CONFIG_USERCONFIG": "/dev/null"' not in rebuild["run"]
-assert "config_directory = '/tmp/npm-config'" in rebuild["run"]
-assert "os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path" in rebuild["run"]
-assert "os.environ[f'npm_config_{config_role}config'] = config_path" in rebuild["run"]
-assert '"/usr/bin/python3",\n    "-I",\n    "-c",\n    sandbox_entrypoint,' in rebuild["run"]
-assert '"GITHUB_ENV"' not in rebuild["run"]
-assert 'rebuild_process_env = {' in rebuild["run"]
-assert 'os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})' in rebuild["run"]
+assert "bubblewrap_metadata.st_uid not in (0, os.getuid())" in rebuild_program
+assert '"--unshare-pid"' in rebuild_program
+assert '"--unshare-net"' in rebuild_program
+assert '"--tmpfs", "/"' in rebuild_program
+assert '"--ro-bind", "/", "/"' not in rebuild_program
+assert "bind_source(workspace, sandbox_workspace)" in rebuild_program
+assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in rebuild_program
+assert '"GITHUB_WORKSPACE": sandbox_workspace' in rebuild_program
+assert '"RUNNER_TEMP": "/tmp"' in rebuild_program
+assert '"NPM_CONFIG_USERCONFIG": "/dev/null"' not in rebuild_program
+assert "config_directory = '/tmp/npm-config'" in rebuild_program
+assert "os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path" in rebuild_program
+assert "os.environ[f'npm_config_{config_role}config'] = config_path" in rebuild_program
+assert (
+    '"/usr/bin/python3",\n    "-I",\n    "-c",\n    sandbox_entrypoint,' in rebuild_program
+    or '"/usr/bin/python3",\n        "-I",\n        "-c",\n        sandbox_entrypoint,' in rebuild_program
+)
+assert '"GITHUB_ENV"' not in rebuild_program
+assert 'rebuild_process_env = {' in rebuild_program
+assert 'os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})' in rebuild_program
 # Each planned script runs in the manifest that declared it (#1229), so the
 # the mapped Node toolchain and manifest directory instead of the host paths.
 assert 'node_toolchain_destination = "/opt/verjson-node-toolchain"' in plan["run"]
