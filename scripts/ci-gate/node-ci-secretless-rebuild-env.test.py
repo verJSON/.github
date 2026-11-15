@@ -17,8 +17,25 @@ from unittest.mock import patch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+REBUILD_HELPER = ROOT / "scripts/ci_secretless_rebuild_packages.py"
 sys.path.insert(0, str(ROOT / ".github/actions/node-ci-script-plan"))
 import script_plan
+
+
+def executable_rebuild_run(run_text: str) -> str:
+    """Run the repository helper instead of curling the pinned blob."""
+    prefix = []
+    for line in run_text.splitlines():
+        if line == "set -euo pipefail" or line.startswith("unset -v "):
+            prefix.append(line)
+            continue
+        break
+    if "scripts/ci_secretless_rebuild_packages.py" not in run_text or not prefix:
+        raise AssertionError("rebuild executor does not fetch its pinned helper")
+    quoted = shlex.quote(str(REBUILD_HELPER))
+    return "\n".join([*prefix, f"exec /usr/bin/python3 -I {quoted} run"]) + "\n"
+
+
 WORKFLOW = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED_WORKFLOW = ROOT / ".github/workflows/node-ci-protected.yml"
 COMMAND_FILE_ENV = (
@@ -632,7 +649,7 @@ def run_rebuild(
         **{name: str(path) for name, path in command_files.items()},
     }
     result = subprocess.run(
-        ["bash", "-e", "-c", step["run"]],
+        ["bash", "-e", "-c", executable_rebuild_run(step["run"])],
         cwd=workspace,
         env=env,
         capture_output=True,
@@ -898,7 +915,7 @@ def run_native_addon_rebuild(step):
             "BWRAP_BINARY": "/usr/bin/bwrap",
         }
         result = subprocess.run(
-            ["bash", "-e", "-c", step["run"]],
+            ["bash", "-e", "-c", executable_rebuild_run(step["run"])],
             cwd=workspace,
             env=env,
             capture_output=True,
@@ -1200,7 +1217,7 @@ def run_skipped_install_script_never_executes(step):
                 "BWRAP_BINARY": "/usr/bin/bwrap",
             }
             result = subprocess.run(
-                ["bash", "-e", "-c", step["run"]],
+                ["bash", "-e", "-c", executable_rebuild_run(step["run"])],
                 cwd=workspace, env=env, capture_output=True, text=True, check=False,
             )
             assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
@@ -1250,6 +1267,13 @@ def main():
         assert step["env"]["SKIP_INSTALL_SCRIPTS"] == "${{ inputs.secretless-skip-install-scripts }}"
         assert "inputs.secretless-skip-install-scripts != ''" in step["if"]
         assert step["env"]["BWRAP_BINARY"] == "/usr/bin/bwrap"
+        assert step["env"]["JOB_WORKFLOW_SHA"] == "${{ fromJSON(toJSON(job)).workflow_sha }}"
+        assert 'helper="$RUNNER_TEMP/ci_secretless_rebuild_packages.py"' in step["run"]
+        assert "${JOB_WORKFLOW_SHA}/scripts/ci_secretless_rebuild_packages.py" in step["run"]
+        assert "sha256sum -- " in step["run"]
+        assert 'exec /usr/bin/python3 -I "$helper" run' in step["run"]
+        assert "<<'PY'" not in step["run"]
+        rebuild_program = REBUILD_HELPER.read_text(encoding="utf-8")
         install = next(candidate for candidate in build["steps"] if candidate.get("name") == "Install from verified secretless npm cache")
         cleanup = next(candidate for candidate in build["steps"] if candidate.get("name") == "Remove local secretless transfer state")
         provision = next(
@@ -1274,19 +1298,19 @@ def main():
         )
         assert unsupported.returncode != 0
         assert "requires a Linux GitHub-hosted runner" in unsupported.stderr
-        assert "--unshare-pid" in step["run"]
-        assert '"--unshare-net"' in step["run"]
-        assert '"--tmpfs", "/"' in step["run"]
-        assert '"--ro-bind", "/", "/"' not in step["run"]
-        assert '"GITHUB_WORKSPACE": sandbox_workspace' in step["run"]
-        assert '"RUNNER_TEMP": "/tmp"' in step["run"]
-        assert "bind_source(workspace, sandbox_workspace)" in step["run"]
-        assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in step["run"]
-        assert '"PATH": f"{toolchain_bin}:/usr/bin:/bin"' in step["run"]
-        assert "sandbox_entrypoint" in step["run"]
-        assert "os.closerange(3, max_fd)" in step["run"]
-        assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in step["run"]
-        assert '"GITHUB_ENV"' not in step["run"]
+        assert "--unshare-pid" in rebuild_program
+        assert '"--unshare-net"' in rebuild_program
+        assert '"--tmpfs", "/"' in rebuild_program
+        assert '"--ro-bind", "/", "/"' not in rebuild_program
+        assert '"GITHUB_WORKSPACE": sandbox_workspace' in rebuild_program
+        assert '"RUNNER_TEMP": "/tmp"' in rebuild_program
+        assert "bind_source(workspace, sandbox_workspace)" in rebuild_program
+        assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in rebuild_program
+        assert '"PATH": f"{toolchain_bin}:/usr/bin:/bin"' in rebuild_program
+        assert "sandbox_entrypoint" in rebuild_program
+        assert "os.closerange(3, max_fd)" in rebuild_program
+        assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in rebuild_program
+        assert '"GITHUB_ENV"' not in rebuild_program
         service_plan_step = next(
             candidate
             for candidate in build["steps"]
@@ -1297,6 +1321,12 @@ def main():
             for candidate in build["steps"]
             if candidate.get("name") == "Run runtime-resolved compatibility lanes without credentials"
         )
+        compatibility_step = {
+            **compatibility_step,
+            "run": (ROOT / "scripts/ci_secretless_compatibility_lanes.py").read_text(
+                encoding="utf-8"
+            ),
+        }
         service_plan_source = service_plan_step["run"]
         if "blocked_service_env = {" not in service_plan_source:
             assert 'python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan' in service_plan_source
@@ -1822,7 +1852,7 @@ def main():
                     raise AssertionError(
                         f"{source_name} forwarded Docker control variable {variable_name}"
                     )
-            assert '"--unshare-net"' in step["run"]
+            assert '"--unshare-net"' in rebuild_program
             steps = build["steps"]
             script_names = {
                 "Run exact credentialless consumer script plan",

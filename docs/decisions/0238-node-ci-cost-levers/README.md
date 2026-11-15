@@ -579,3 +579,23 @@ The catalog advances `libc6` to `2.39-0ubuntu8.12` and `libglib2.0-0t64` to `2.8
 - **Issue:** [Verjson/.github#1875](https://github.com/Verjson/.github/issues/1875); pull request [Verjson/.github#2088](https://github.com/Verjson/.github/pull/2088).
 
 Hosted acceptance run 43568392727 showed the pinned `libc6` upgrade failing in its post-installation script with status 1. The runner has `/run/systemd/system`, but the final package installation runs in a private PID namespace with no reachable system manager; libc's post-installation script therefore fails when `systemctl daemon-reexec` cannot connect to PID 1. A Noble Docker reproduction confirmed that the `.9` to `.12` upgrade fails without offline mode and succeeds when only the final APT invocation receives `SYSTEMD_OFFLINE=1`. Set this environment flag on the isolated offline install alone, so package scripts treat manager operations as offline while index refresh and archive download retain their normal environment. Keep the `.12` security floor: older runner packages move forward to the reviewed version, and newer installed packages remain untouched. The namespace-install test asserts the flag is present in the final APT environment.
+
+## Amendment 2026-11-15 — pin the secretless compatibility lane executor (#1869)
+
+- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869).
+
+The 2026-11-12 tripwire amendment raised both generator bounds to 490,000 bytes and named the durable remedy: move inline candidate-execution heredocs into pinned helper modules so the workflow files regain headroom. The largest remaining heredoc was the runtime-resolved secretless compatibility lane executor, about 61 KiB of Python inside both `node-ci.yml` and its generated protected twin.
+
+That executor now lives in `scripts/ci_secretless_compatibility_lanes.py`. Each workflow fetches it from `raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_secretless_compatibility_lanes.py`, requires a regular file, mode `0400`, a single link, and a SHA-256 digest, then runs `python3 -I` on that file with the `run` command. The protected generator still rewrites the step's condition, compatibility request, and credential scrub; it does not keep a second copy of the lane program. The standard and protected lane programs were already the same Python.
+
+Measured after the move: `node-ci.yml` is 411,119 bytes (was 485,707) and `node-ci-protected.yml` is 406,822 bytes (was 481,410). Both bounds drop from 490,000 to 416,000, leaving 4,881 bytes above the larger file. Crossing either bound remains a review point, not a routine bump. Build-once ArtifactSet work stays out of this slice.
+
+## Amendment 2026-11-15 — pin the secretless rebuild lifecycle executor (#1869)
+
+- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869).
+
+The compatibility-lane move left the approved lifecycle rebuild as the next inline candidate-execution heredoc: 22,485 bytes of Python inside both `node-ci.yml` and its generated protected twin. The standard and protected programs were already the same Python.
+
+That program now lives in `scripts/ci_secretless_rebuild_packages.py`. Each workflow fetches it from `raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_secretless_rebuild_packages.py`, requires a regular file, mode `0400`, a single link, and a SHA-256 digest, then runs `python3 -I` on that file with the `run` command. The protected generator still rewrites the step's condition and credential scrub; it does not keep a second copy of the rebuild program.
+
+Measured after this move: `node-ci.yml` is 384,927 bytes (was 411,119) and `node-ci-protected.yml` is 380,630 bytes (was 406,822). Both bounds drop from 416,000 to 390,000, leaving 5,073 bytes above the larger file. Crossing either bound remains a review point, not a routine bump. Build-once ArtifactSet work stays out of this slice.
