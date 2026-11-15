@@ -52,15 +52,9 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 # in each workflow: one downloaded-helper digest and two verified-copy digests.
 # The terminal hold removes the merge App client-ID and successful-merge
 # artifact-ID guards along with their credential and cleanup paths (#1956).
-<<<<<<< HEAD
+GUARD_COUNT = 559
 =======
-# The secretless compatibility-lane helper fetch (#1869 / #2103) adds two
-# spelled-out hex guards in each of node-ci.yml and node-ci-protected.yml:
-# JOB_WORKFLOW_SHA (40 hex) and the helper digest (64 hex).
-# The secretless rebuild helper fetch (#1869) adds that same pair again in
-# each workflow.
->>>>>>> e14d60f4 (ci(node-ci): fetch the secretless rebuild lane from a pinned helper (#2106))
-GUARD_COUNT = 551
+>>>>>>> ad59eac9 (test(ci): accept indented rebuild argv and set GUARD_COUNT to 559)
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the

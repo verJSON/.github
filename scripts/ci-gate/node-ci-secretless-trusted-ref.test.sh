@@ -135,7 +135,10 @@ assert '"NPM_CONFIG_USERCONFIG": "/dev/null"' not in rebuild_program
 assert "config_directory = '/tmp/npm-config'" in rebuild_program
 assert "os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path" in rebuild_program
 assert "os.environ[f'npm_config_{config_role}config'] = config_path" in rebuild_program
-assert '"/usr/bin/python3",\n    "-I",\n    "-c",\n    sandbox_entrypoint,' in rebuild_program
+assert (
+    '"/usr/bin/python3",\n    "-I",\n    "-c",\n    sandbox_entrypoint,' in rebuild_program
+    or '"/usr/bin/python3",\n        "-I",\n        "-c",\n        sandbox_entrypoint,' in rebuild_program
+)
 assert '"GITHUB_ENV"' not in rebuild_program
 assert 'rebuild_process_env = {' in rebuild_program
 assert 'os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})' in rebuild_program
