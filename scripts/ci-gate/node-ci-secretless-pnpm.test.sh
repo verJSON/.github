@@ -63,12 +63,25 @@ sed -i "s|'@verjson/contracts@1.2.3':|'@verjson/contracts@1.2.3(peer@2.0.0':|" "
 if run_validator "$malformed" '@verjson/contracts' >/dev/null 2>&1; then fail "pnpm lock admitted an unbalanced peer context"; else pass "pnpm lock rejects malformed peer-context near misses"; fi
 
 rebuild="$fixture/rebuild.sh"
-python3 - "$workflow" "$rebuild" <<'PY'
-import sys, yaml
+python3 - "$workflow" "$rebuild" "$root" <<'PY'
+import shlex, sys, yaml
+from pathlib import Path
 doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 step = next(step for step in doc["jobs"]["build-test"]["steps"]
             if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")
-open(sys.argv[2], "w", encoding="utf-8").write(step["run"])
+run_text = step["run"]
+prefix = []
+for line in run_text.splitlines():
+    if line == "set -euo pipefail" or line.startswith("unset -v "):
+        prefix.append(line)
+        continue
+    break
+if "scripts/ci_secretless_rebuild_packages.py" not in run_text or not prefix:
+    raise SystemExit("rebuild executor does not fetch its pinned helper")
+helper = shlex.quote(str(Path(sys.argv[3]) / "scripts/ci_secretless_rebuild_packages.py"))
+open(sys.argv[2], "w", encoding="utf-8").write(
+    "\n".join([*prefix, f"exec /usr/bin/python3 -I {helper} run"]) + "\n"
+)
 PY
 test_root="$fixture/rebuild"
 rebuild_fixture="$test_root/workspace"
@@ -202,6 +215,7 @@ python3 - "$workflow" "$valid/pnpm-lock.yaml" <<'PY' \
   && pass "registry-addressed private pnpm packages resolve locally in a credentialless, frozen, bounded, and cleaned install" \
   || fail "pnpm execution weakened the secretless handoff"
 import ast, re, sys, textwrap, yaml
+from pathlib import Path
 doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 inputs = doc[True]["workflow_call"]["inputs"]
 assert inputs["package-manager"]["default"] == "npm"
@@ -231,11 +245,14 @@ boundary = next(step for step in doc["jobs"]["acquire-secretless-dependencies"][
 assert "same-repository pull request" in boundary["run"]
 validator = next(step for step in doc["jobs"]["acquire-secretless-dependencies"]["steps"]
                  if step.get("name") == "Validate approved internal dependency lock")["run"]
-rebuild = next(step for step in steps
-               if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")["run"]
+rebuild = (Path(sys.argv[1]).resolve().parents[2] / "scripts/ci_secretless_rebuild_packages.py").read_text(encoding="utf-8")
 def parser_ast(script):
-    source = re.split(r"python3 (?:-I )?- <<'PY'\n", script, maxsplit=1)[1].rsplit("\nPY", 1)[0]
-    tree = ast.parse(textwrap.dedent(source))
+    if script.lstrip().startswith("#!"):
+        source = script
+    else:
+        source = re.split(r"python3 (?:-I )?- <<'PY'\n", script, maxsplit=1)[1].rsplit("\nPY", 1)[0]
+        source = textwrap.dedent(source)
+    tree = ast.parse(source)
     function = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == "pnpm_package_name")
     return ast.dump(function, include_attributes=False)

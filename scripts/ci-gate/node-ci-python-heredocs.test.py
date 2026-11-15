@@ -18,6 +18,8 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 COMPATIBILITY_LANES = ROOT / "scripts/ci_secretless_compatibility_lanes.py"
 COMPATIBILITY_STEP = "Run runtime-resolved compatibility lanes without credentials"
+REBUILD_PACKAGES = ROOT / "scripts/ci_secretless_rebuild_packages.py"
+REBUILD_STEP = "Rebuild exact approved lifecycle packages without credentials"
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 PYTHON = re.compile(r"(?:^|\s)(?:/usr/bin/)?python(?:3(?:\.\d+)?)?(?:\s|$)")
 
@@ -216,6 +218,40 @@ class NodeCiPythonHeredocsTest(unittest.TestCase):
                 )
                 self.assertIn(
                     'helper="$RUNNER_TEMP/ci_secretless_compatibility_lanes.py"',
+                    step["run"],
+                )
+                self.assertIn("sha256sum -- ", step["run"])
+                self.assertIn('exec /usr/bin/python3 -I "$helper" run', step["run"])
+                self.assertNotIn("<<'PY'", step["run"])
+
+    def test_rebuild_packages_execute_the_pinned_helper(self):
+        source = REBUILD_PACKAGES.read_text(encoding="utf-8")
+        compile(source, str(REBUILD_PACKAGES), "exec")
+        tree = ast.parse(source)
+        self.assertTrue(
+            any(
+                isinstance(node, ast.FunctionDef) and node.name == "bind_source"
+                for node in tree.body
+            )
+        )
+        for workflow in WORKFLOWS:
+            with self.subTest(workflow=workflow.name):
+                document = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+                step = next(
+                    item
+                    for item in document["jobs"]["build-test"]["steps"]
+                    if item.get("name") == REBUILD_STEP
+                )
+                self.assertEqual(
+                    "${{ fromJSON(toJSON(job)).workflow_sha }}",
+                    step["env"]["JOB_WORKFLOW_SHA"],
+                )
+                self.assertIn(
+                    "${JOB_WORKFLOW_SHA}/scripts/ci_secretless_rebuild_packages.py",
+                    step["run"],
+                )
+                self.assertIn(
+                    'helper="$RUNNER_TEMP/ci_secretless_rebuild_packages.py"',
                     step["run"],
                 )
                 self.assertIn("sha256sum -- ", step["run"])
