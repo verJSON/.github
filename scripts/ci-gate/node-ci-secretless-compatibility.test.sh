@@ -268,6 +268,31 @@ assert len(transfer_cache_saves) == 1, "protected transfer cache must have one r
 assert protected_acquire_steps.index(protected_package) < transfer_cache_saves[0][0], (
     "encrypted package step must remove its plaintext archive before caching the transfer directory"
 )
+lane_helper = (
+    Path(sys.argv[4]) / "scripts/ci_secretless_compatibility_lanes.py"
+).read_text(encoding="utf-8")
+
+def local_lane_executor(run_text, helper_name):
+    """Run a repository helper instead of curling the pinned blob.
+
+    Mutations edit only the standard helper. The protected lane keeps the
+    pristine copy when that file is present, matching the old split where
+    editing node-ci.yml left node-ci-protected.yml unchanged.
+    """
+    candidate = Path(sys.argv[4]) / "scripts" / helper_name
+    if not candidate.is_file():
+        candidate = Path(sys.argv[4]) / "scripts/ci_secretless_compatibility_lanes.py"
+    local = shlex.quote(str(candidate))
+    prefix = []
+    for line in run_text.splitlines():
+        if line == "set -euo pipefail" or line.startswith("unset -v "):
+            prefix.append(line)
+            continue
+        break
+    if "scripts/ci_secretless_compatibility_lanes.py" not in run_text or not prefix:
+        raise AssertionError("compatibility lane executor does not fetch its pinned helper")
+    return "\n".join([*prefix, f"exec /usr/bin/python3 -I {local} run"]) + "\n"
+
 for name, filename in {
     "Validate approved internal dependency lock": "validate.sh",
     "Resolve approved compatibility ranges without lifecycle execution": "resolve.sh",
@@ -276,7 +301,10 @@ for name, filename in {
     "Install from verified secretless npm cache": "install.sh",
     "Run runtime-resolved compatibility lanes without credentials": "run-lanes-executor.sh",
 }.items():
-    Path(sys.argv[2], filename).write_text(steps[name]["run"], encoding="utf-8")
+    run_text = steps[name]["run"]
+    if name == "Run runtime-resolved compatibility lanes without credentials":
+        run_text = local_lane_executor(run_text, "ci_secretless_compatibility_lanes.py")
+    Path(sys.argv[2], filename).write_text(run_text, encoding="utf-8")
 protected_validate = next(step for step in protected_acquire_steps
                           if step.get("name") == "Validate approved internal dependency lock")
 Path(sys.argv[2], "protected-validate.sh").write_text(protected_validate["run"], encoding="utf-8")
@@ -319,7 +347,10 @@ protected_runner = protected_steps[
     "Run runtime-resolved compatibility lanes without credentials"
 ]
 Path(sys.argv[2], "protected-run-lanes-executor.sh").write_text(
-    protected_runner["run"], encoding="utf-8"
+    local_lane_executor(
+        protected_runner["run"], "ci_secretless_compatibility_lanes.pristine.py"
+    ),
+    encoding="utf-8",
 )
 Path(sys.argv[2], "protected-run-lanes.sh").write_text(
     compatibility_wrapper("protected-run-lanes-executor.sh"), encoding="utf-8"
@@ -348,30 +379,35 @@ for current_runner in (runner, protected_runner):
     assert sorted(current_runner["env"]) == list(current_runner["env"]), (
         "compatibility step env keys are no longer alphabetically ordered"
     )
-assert "tarfile.open" in runner["run"] and "O_NOFOLLOW" in runner["run"]
-assert 'subprocess.run(["npm", "install"' not in runner["run"]
-assert "artifact.read_bytes" not in runner["run"]
-assert "os.fstat(descriptor)" in runner["run"] and "io.BytesIO(content)" in runner["run"]
-assert "extractall" not in runner["run"]
 for current_runner in (runner, protected_runner):
-    if os.environ.get("VERJSON_CACHE_MUTATION_CHILD") != "true":
-        assert '"--dir", "/dev/shm/npm-cache"' in current_runner["run"]
-        assert '"NPM_CONFIG_CACHE": "/dev/shm/npm-cache"' in current_runner["run"]
-        assert '"NPM_CONFIG_GLOBALCONFIG": "/dev/shm/npm-globalconfig"' in current_runner["run"]
-        assert '"NPM_CONFIG_USERCONFIG": "/dev/shm/npm-userconfig"' in current_runner["run"]
-        assert '"npm_config_cache": "/dev/shm/npm-cache"' in current_runner["run"]
-        assert '"npm_config_globalconfig": "/dev/shm/npm-globalconfig"' in current_runner["run"]
-        assert '"npm_config_userconfig": "/dev/shm/npm-userconfig"' in current_runner["run"]
-    assert "del output_tail[:-16384]" in current_runner["run"]
-    assert "subprocess.CalledProcessError(" in current_runner["run"]
-    assert "command={failure.cmd!r}" in current_runner["run"]
-    assert "exit={failure.returncode}" in current_runner["run"]
-    if os.environ.get("VERJSON_AMBIENT_MASK_MUTATION_CHILD") != "true":
-        assert "ambient_masks = {" in current_runner["run"]
-        assert 'arguments.extend(("--tmpfs", str(candidate_path)))' in current_runner["run"]
-        assert 'arguments.extend(("--ro-bind", "/dev/null", str(candidate_path)))' in current_runner["run"]
-        if os.environ.get("VERJSON_SYMLINK_GUARD_MUTATION_CHILD") != "true":
-            assert "compatibility workspace top-level symlink escapes workspace" in current_runner["run"]
+    assert current_runner["env"]["JOB_WORKFLOW_SHA"] == workflow_sha
+    assert "${JOB_WORKFLOW_SHA}/scripts/ci_secretless_compatibility_lanes.py" in current_runner["run"]
+    assert "sha256sum -- \"$helper\"" in current_runner["run"]
+    assert 'helper="$RUNNER_TEMP/ci_secretless_compatibility_lanes.py"' in current_runner["run"]
+    assert 'exec /usr/bin/python3 -I "$helper" run' in current_runner["run"]
+assert "tarfile.open" in lane_helper and "O_NOFOLLOW" in lane_helper
+assert 'subprocess.run(["npm", "install"' not in lane_helper
+assert "artifact.read_bytes" not in lane_helper
+assert "os.fstat(descriptor)" in lane_helper and "io.BytesIO(content)" in lane_helper
+assert "extractall" not in lane_helper
+if os.environ.get("VERJSON_CACHE_MUTATION_CHILD") != "true":
+    assert '"--dir", "/dev/shm/npm-cache"' in lane_helper
+    assert '"NPM_CONFIG_CACHE": "/dev/shm/npm-cache"' in lane_helper
+    assert '"NPM_CONFIG_GLOBALCONFIG": "/dev/shm/npm-globalconfig"' in lane_helper
+    assert '"NPM_CONFIG_USERCONFIG": "/dev/shm/npm-userconfig"' in lane_helper
+    assert '"npm_config_cache": "/dev/shm/npm-cache"' in lane_helper
+    assert '"npm_config_globalconfig": "/dev/shm/npm-globalconfig"' in lane_helper
+    assert '"npm_config_userconfig": "/dev/shm/npm-userconfig"' in lane_helper
+assert "del output_tail[:-16384]" in lane_helper
+assert "subprocess.CalledProcessError(" in lane_helper
+assert "command={failure.cmd!r}" in lane_helper
+assert "exit={failure.returncode}" in lane_helper
+if os.environ.get("VERJSON_AMBIENT_MASK_MUTATION_CHILD") != "true":
+    assert "ambient_masks = {" in lane_helper
+    assert 'arguments.extend(("--tmpfs", str(candidate_path)))' in lane_helper
+    assert 'arguments.extend(("--ro-bind", "/dev/null", str(candidate_path)))' in lane_helper
+    if os.environ.get("VERJSON_SYMLINK_GUARD_MUTATION_CHILD") != "true":
+        assert "compatibility workspace top-level symlink escapes workspace" in lane_helper
 PY
 [ "$?" -eq 0 ] && pass "compatibility lanes retain the canonical two-job credential boundary" \
   || fail "compatibility lanes do not retain the canonical two-job credential boundary"
@@ -1376,14 +1412,13 @@ fi
 # arity re-indexes the slice onto a source path or a flag, and the guard stops
 # covering the real target without failing. Exercise the derivation directly
 # with a differently-shaped list rather than trusting the comment.
-python3 - "$tmp/run-lanes-executor.sh" "$tmp/protected-run-lanes-executor.sh" <<'PY'
+python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import ast
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-MARKER = "python3 -I - <<'PY'\n"
 TARGET = "/dev/shm/npm-cache/_cacache/content-v2"
 STAGING = "/runner-temp/verjson-compatibility-public-cache-x/content-v2"
 EXPECTED_MOUNT_OPTIONS = {
@@ -1429,10 +1464,7 @@ bwrap_options = bwrap_option_operands()
 
 for lane_path in sys.argv[1:]:
     source = Path(lane_path).read_text(encoding="utf-8")
-    start = source.find(MARKER)
-    end = source.find("\nPY\n", start)
-    assert start >= 0 and end > start, f"{lane_path}: embedded consumer source missing"
-    module = ast.parse(source[start + len(MARKER):end + 1])
+    module = ast.parse(source)
     definitions = [
         node
         for node in module.body
@@ -1559,7 +1591,11 @@ cp "$0" "$mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh
   cp "$root/scripts/container_dependency_transfer.py" "$mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$mutation_root/docs/node-workflows.md"
-  python3 - "$workflow" "$mutation_root/.github/workflows/node-ci.yml" <<'PY'
+  cp "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$mutation_root/scripts/ci_secretless_compatibility_lanes.pristine.py"
+  cp "$workflow" "$mutation_root/.github/workflows/node-ci.yml"
+  python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$mutation_root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import sys
 from pathlib import Path
 
@@ -1605,7 +1641,11 @@ cp "$0" "$cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.t
   cp "$root/scripts/container_dependency_transfer.py" "$cache_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$cache_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$cache_mutation_root/docs/node-workflows.md"
-  python3 - "$workflow" "$cache_mutation_root/.github/workflows/node-ci.yml" <<'PY'
+  cp "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$cache_mutation_root/scripts/ci_secretless_compatibility_lanes.pristine.py"
+  cp "$workflow" "$cache_mutation_root/.github/workflows/node-ci.yml"
+  python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$cache_mutation_root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import sys
 from pathlib import Path
 
@@ -1614,9 +1654,9 @@ compatibility_start = source.index("def public_cache_bind_targets")
 prefix = source[:compatibility_start]
 compatibility = source[compatibility_start:]
 for needle in (
-    '                  "--dir", "/dev/shm/npm-cache",\n',
-    '                      "NPM_CONFIG_CACHE": "/dev/shm/npm-cache",\n',
-    '                      "npm_config_cache": "/dev/shm/npm-cache",\n',
+    '        "--dir", "/dev/shm/npm-cache",\n',
+    '            "NPM_CONFIG_CACHE": "/dev/shm/npm-cache",\n',
+    '            "npm_config_cache": "/dev/shm/npm-cache",\n',
 ):
     assert compatibility.count(needle) == 1
     compatibility = compatibility.replace(needle, "")
@@ -1650,14 +1690,18 @@ cp "$0" "$mask_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.te
   cp "$root/scripts/container_dependency_transfer.py" "$mask_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$mask_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$mask_mutation_root/docs/node-workflows.md"
-  python3 - "$workflow" "$mask_mutation_root/.github/workflows/node-ci.yml" <<'PY'
+  cp "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$mask_mutation_root/scripts/ci_secretless_compatibility_lanes.pristine.py"
+  cp "$workflow" "$mask_mutation_root/.github/workflows/node-ci.yml"
+  python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$mask_mutation_root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
-start = source.index("              ambient_masks = {\n")
+start = source.index("    ambient_masks = {\n")
 end = source.index(
-    "              for entry in sorted(workspace.iterdir(), key=lambda path: path.name):\n",
+    "    for entry in sorted(workspace.iterdir(), key=lambda path: path.name):\n",
     start,
 )
 Path(sys.argv[2]).write_text(source[:start] + source[end:], encoding="utf-8")
@@ -1685,13 +1729,17 @@ cp "$0" "$symlink_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility
   cp "$root/scripts/container_dependency_transfer.py" "$symlink_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$symlink_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$symlink_mutation_root/docs/node-workflows.md"
-  python3 - "$workflow" "$symlink_mutation_root/.github/workflows/node-ci.yml" <<'PY'
+  cp "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$symlink_mutation_root/scripts/ci_secretless_compatibility_lanes.pristine.py"
+  cp "$workflow" "$symlink_mutation_root/.github/workflows/node-ci.yml"
+  python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$symlink_mutation_root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
-start = source.index("                  if entry.is_symlink():\n")
-end = source.index("                  add_sandbox_binding(\n", start)
+start = source.index("        if entry.is_symlink():\n")
+end = source.index("        add_sandbox_binding(\n", start)
 Path(sys.argv[2]).write_text(source[:start] + source[end:], encoding="utf-8")
 PY
   if VERJSON_DIAGNOSTIC_MUTATION_CHILD=true \
@@ -1718,7 +1766,11 @@ cp "$0" "$public_cache_link_mutation_root/scripts/ci-gate/node-ci-secretless-com
   cp "$root/scripts/container_dependency_transfer.py" "$public_cache_link_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$public_cache_link_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$public_cache_link_mutation_root/docs/node-workflows.md"
-  python3 - "$workflow" "$public_cache_link_mutation_root/.github/workflows/node-ci.yml" <<'PY'
+  cp "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$public_cache_link_mutation_root/scripts/ci_secretless_compatibility_lanes.pristine.py"
+  cp "$workflow" "$public_cache_link_mutation_root/.github/workflows/node-ci.yml"
+  python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$public_cache_link_mutation_root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import sys
 from pathlib import Path
 
@@ -1754,19 +1806,23 @@ cp "$0" "$absent_cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatib
   cp "$root/scripts/container_dependency_transfer.py" "$absent_cache_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$absent_cache_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$absent_cache_mutation_root/docs/node-workflows.md"
-  python3 - "$workflow" "$absent_cache_mutation_root/.github/workflows/node-ci.yml" <<'PY'
+  cp "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$absent_cache_mutation_root/scripts/ci_secretless_compatibility_lanes.pristine.py"
+  cp "$workflow" "$absent_cache_mutation_root/.github/workflows/node-ci.yml"
+  python3 - "$root/scripts/ci_secretless_compatibility_lanes.py" \
+    "$absent_cache_mutation_root/scripts/ci_secretless_compatibility_lanes.py" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 needle = (
-    "                      # secretless-runtime-public-cache is off, so the runtime\n"
-    "                      # cache was never created. Start the sandbox without it.\n"
-    "                      return None\n"
+    "            # secretless-runtime-public-cache is off, so the runtime\n"
+    "            # cache was never created. Start the sandbox without it.\n"
+    "            return None\n"
 )
 assert source.count(needle) == 1
 Path(sys.argv[2]).write_text(
-    source.replace(needle, "                      pass\n"), encoding="utf-8"
+    source.replace(needle, "            pass\n"), encoding="utf-8"
 )
 PY
   if VERJSON_DIAGNOSTIC_MUTATION_CHILD=true \
