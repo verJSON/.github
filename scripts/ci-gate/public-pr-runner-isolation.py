@@ -2693,9 +2693,11 @@ RELAY_HEAD_REFUSAL = (
     "runner, so no reviewed entry can accept it (ADR 0235)"
 )
 
-# The relay backlog, frozen (round-4 review of #1827): the 44 relayed jobs
-# #1831 moves, as they stood when ADR 0235 began scanning relays. They are the
-# only keys a pending row may name; any other key, including every
+# The relay backlog, frozen (round-4 review of #1827): the relayed jobs
+# #1831 moves, as they stood when ADR 0235 began scanning relays (44 keys).
+# actionlint.yml's workflow_call job left on 2026-11-15 (Part of #1831).
+# The keys that remain are the
+# only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
 # snapshot it may only shrink from. Both live in this repository, so a change
@@ -2706,7 +2708,6 @@ RELAY_HEAD_REFUSAL = (
 # a new refusal; a kind the job no longer carries fails as STALE BACKLOG until
 # it is removed here.
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
-    ('actionlint.yml [workflow_call]', 'actionlint'): frozenset({'relay-head'}),
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),
