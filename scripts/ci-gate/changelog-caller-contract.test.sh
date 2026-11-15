@@ -151,7 +151,7 @@ expect_generator_refusal() {
 # A fixture the rest of the shard reads. `fail` is suspended while this shard
 # skips a case, so a generator failure recorded that way leaves an empty file
 # and a later rejection still reads green (#1983). Exit the shard, as the
-# nested-only fixtures do (#1974). The shard test pins both messages.
+# nested-only fixtures do (#1974).
 write_generated_fixture() {
   # write_generated_fixture <dest> <generator-args...>
   local dest="$1"
@@ -183,6 +183,10 @@ read_generated_fixture() {
   rm -f "$err"
   printf -v "$target" '%s' "$out"
 }
+# printf -v assigns these. Declaring them keeps the reference visible to shellcheck.
+declare audited_workflow yaml_keyword_release component_mode_release
+declare mutated_contract empty_contract padded_contract
+declare artifact_release private_artifact_release snapshot_release node_release
 # Fixtures every mode needs. Case shards skip the generator-only assertions
 # below, so nothing a case reads may be defined there (#1736).
 capture_mode workflow workflow "$sha"
@@ -5879,7 +5883,10 @@ windows_lane_expression='${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}'
 if bash "$gen" release-artifact "$sha" --build-runner "$lane_expression" >/dev/null 2>&1; then
   pass "release-artifact accepts the exact ADR 0103 macOS lane expression"
 else
-  fail "release-artifact rejected the exact ADR 0103 macOS lane expression"
+  # `fail` is suspended between cases, so a rejected generation would vanish
+  # and the shard would stay green (#1983).
+  echo "FAIL - release-artifact rejected the exact ADR 0103 macOS lane expression"
+  exit 1
 fi
 for forbidden_metered_literal in macos-14 windows-2022; do
   expect_generator_refusal "$build_runner_refusal" \
@@ -5892,7 +5899,8 @@ if bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 --node-versio
     >/dev/null 2>&1; then
   pass "release-artifact accepts the same --node-version/--scope knobs as release-node"
 else
-  fail "release-artifact rejected a validated --node-version"
+  echo "FAIL - release-artifact rejected a validated --node-version"
+  exit 1
 fi
 
 expect_generator_refusal '--build-runner is accepted only by release-artifact and contract-test' \
