@@ -83,9 +83,20 @@ Pull-request runs that uploaded no records were all runs where `shell-test-group
 
 The Consequences list above marked `privileged-merge-conformance` `@exclusive`
 with the required-checks audit after the first concurrent actions-ci run
-(#1736 / #1746). On main run 43623577812 the row is a single-threaded ~24s
-bash audit; its exclusivity reserved all four merge-gate cores for that whole
-prefix (~18–20s of the group's ~112s command wall). The suite is no longer the
-slow contended shape that needed the reservation: drop `@exclusive`, keep
-`@budget=120`, and let sibling load fail the budget closed if contention
-returns. The required-checks audit row stays exclusive.
+(#1736 / #1746). Hosted merge-gate (parallelism 4) measured that row alone at
+16–29s (slowest 29s on main run 43603205428; 25s on 43673676634; 24s on
+43623577812). It is single-threaded, so the reservation held every core for
+that prefix (25s of run 43673676634's 128s command wall, 03:44:51Z–03:46:59Z).
+
+Local remeasure on 4 CPUs, the merge-gate lane width: 72.9s alone, and 72.9s
+under the first-wave siblings (`review-caller-bootstrap`,
+`assert-mergeable-head`, `arm-receipt`), exit 0. Contention did not move it.
+Hosted alone is already under half of `@budget=120`, and the local ratio is
+1.0, so the row stays inside that budget without the reservation. Drop
+`@exclusive`. Keep `@budget=120` until a hosted non-exclusive record shows it
+running well under half. The required-checks audit row stays exclusive.
+
+`review-caller-bootstrap` is no longer the 173s serial row. After #2009 its
+slowest hosted measurement is 50s (main run 43603205428; 49s on 43673676634;
+43s on 43623577812). Twice 50s, rounded up to 30s, is 120. A declaration of 90
+only covered the 43s sample.

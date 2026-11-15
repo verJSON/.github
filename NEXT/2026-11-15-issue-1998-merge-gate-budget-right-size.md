@@ -5,10 +5,13 @@ title: Cut merge-gate makespan by dropping privileged-merge exclusivity
 impact: patch
 ---
 
+Merge-gate no longer reserves the runner for privileged-merge conformance.
+Hosted, that single-threaded audit is 16–29s; on a 4-CPU remeasure, sibling
+load matched running it alone (73s), inside the 120s budget, so the exclusive
+prefix comes off the group wall. `review-caller-bootstrap`'s declared budget
+is 120, twice its slowest hosted run after #2009 (50s).
+
 #2009 already removed double `run_case`, stubbed recovery sleeps, and
-parallelized `review-caller-bootstrap`. Hosted main run 43623577812 measured
-bootstrap at 43s (ADR 0225 → `@budget=90`, was 360) and
-`privileged-merge-conformance` at 24s alone. Dropping that row's `@exclusive`
-lets it overlap the parallel phase (~18–20s of merge-gate wall); `@budget=120`
-still fails closed under sibling load. ADR 0225 is amended. The low-impact
-`required-checks-audit` shared preamble stays deferred as in #2009.
+parallelized the bootstrap row (was 360s, from a 173s serial run). ADR 0225's
+2026-11-15 amendment records the exclusivity drop and the budget. The
+low-impact `required-checks-audit` shared preamble stays deferred.
