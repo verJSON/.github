@@ -2110,7 +2110,9 @@ jobs:
             esac
             transport_sentence() {
               [ -n "$2" ] || return 0
-              printf 'DeepSeek %s pre-token failure class `%s` (transport `%s`, HTTP status family `%s`, status `%s`). ' \
+              # Double quotes: shellcheck SC2016 treats markdown backticks in a
+              # single-quoted printf format as unevaluated expansions.
+              printf "DeepSeek %s pre-token failure class \`%s\` (transport \`%s\`, HTTP status family \`%s\`, status \`%s\`). " \
                 "$1" "$3" "$2" "$4" "$5"
             }
             transport_detail="$(transport_sentence "pass 1" "$transport_failure" "$failure_class" "$http_status_family" "$http_status")"
