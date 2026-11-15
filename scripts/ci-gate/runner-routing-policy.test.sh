@@ -1201,14 +1201,10 @@ policy_jobs() {
   cat <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
-notify-umbrella.yml dispatch
 helm-ci.yml lint-template
-ui-ci.yml build-test
 pulumi-ci.yml validate
 pulumi-ci.yml preview-admission
-pulumi-ci.yml preview
 changelog-validate.yml validate
-generated-artifacts.yml validate
 changelog-release.yml release
 TARGETS
 }
@@ -1248,6 +1244,53 @@ grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubunt
   "$workflows/container-candidate.yml" \
   && pass "container-candidate public routing uses the visibility STRING and gates inputs.runner" \
   || fail "container-candidate public routing drifted (ADR 0235 / Part of #1831)"
+
+# Part of #1831: shared untrusted||FALLBACK adopters leave the shared policy_jobs
+# loop once public visibility takes the hosted untrusted tail.
+for shared_target in \
+  "generated-artifacts.yml validate" \
+  "notify-umbrella.yml dispatch" \
+  "pulumi-ci.yml preview" \
+  "repo-hygiene.yml hygiene" \
+  "ui-ci.yml build-test"
+do
+  set -- $shared_target
+  wf_name="$1"; job="$2"
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml} $job"
+  assert_route "$wf" "$job" Verjson/verjson-authn '' true \
+    '["self-hosted","private-canary"]' '["self-hosted","public-canary"]' \
+    '["self-hosted","private-canary"]' \
+    "$name — private Verjson repo uses the trusted lane"
+  assert_route "$wf" "$job" Verjson/.github '' false \
+    '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "$name — public Verjson takes the untrusted hosted tail, not FALLBACK" \
+    '["self-hosted","general"]'
+  assert_route "$wf" "$job" Verjson/.github '' false \
+    '["self-hosted","default-only"]' '' \
+    '["ubuntu-24.04"]' \
+    "$name — public with unset untrusted lane takes the hosted tail, not FALLBACK" \
+    '["self-hosted","general"]'
+  assert_route "$wf" "$job" Acme/widgets '' true '' '' \
+    'ubuntu-24.04' \
+    "$name — external callers stay portable on hosted"
+  assert_route "$wf" "$job" Verjson/.github '["self-hosted","manish"]' false \
+    '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "$name — public Verjson ignores inputs.runner" \
+    '["self-hosted","general"]'
+  assert_route "$wf" "$job" Verjson/verjson-authn '["self-hosted","manish"]' true '' '' \
+    '["self-hosted","manish"]' \
+    "$name — private Verjson honors inputs.runner"
+done
+grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/notify-umbrella.yml" \
+  && grep -qF "(github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner" \
+  "$workflows/notify-umbrella.yml" \
+  && pass "shared FALLBACK adopters route public on the visibility STRING and gate inputs.runner" \
+  || fail "shared FALLBACK adopter public routing drifted (Part of #1831)"
+
 
 
 while read -r wf_name job; do
@@ -1304,12 +1347,8 @@ while read -r wf_name job; do
 done <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
-notify-umbrella.yml dispatch
 helm-ci.yml lint-template
-ui-ci.yml build-test
-pulumi-ci.yml preview
 changelog-validate.yml validate
-generated-artifacts.yml validate
 changelog-release.yml release
 container-candidate.yml prepare
 container-candidate.yml pull-request-build

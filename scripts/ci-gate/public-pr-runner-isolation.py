@@ -2697,7 +2697,8 @@ RELAY_HEAD_REFUSAL = (
 # #1831 moves, as they stood when ADR 0235 began scanning relays (44 keys).
 # actionlint.yml's workflow_call job left on 2026-11-15 (Part of #1831).
 # container-candidate.yml's three workflow_call jobs left on 2026-11-15
-# (Part of #1831). The keys that remain are the
+# (Part of #1831). generated-artifacts/notify-umbrella/pulumi-ci preview/
+# repo-hygiene/ui-ci left on 2026-11-15 (Part of #1831). The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
@@ -2729,14 +2730,11 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('container-release.yml [workflow_call]', 'retention'): frozenset({'relay-head', 'runtime-checkout'}),
     ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
     ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
-    ('generated-artifacts.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
     ('helm-ci.yml [workflow_call]', 'lint-template'): frozenset({'relay-head'}),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
     ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
-    ('notify-umbrella.yml [workflow_call]', 'dispatch'): frozenset(),
-    ('pulumi-ci.yml [workflow_call]', 'preview'): frozenset({'relay-head'}),
     ('pulumi-ci.yml [workflow_call]', 'preview-admission'): frozenset(),
     ('pulumi-ci.yml [workflow_call]', 'validate'): frozenset({'relay-head'}),
     ('release-app-canary.yml [workflow_dispatch]', 'canary'): frozenset(),
@@ -2752,10 +2750,8 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
     ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('repo-hygiene.yml [workflow_call]', 'hygiene'): frozenset({'relay-head', 'runtime-checkout'}),
     ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
-    ('ui-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
 }
 
 

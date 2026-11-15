@@ -1319,3 +1319,23 @@ hosted. The three keys leave `RELAY_BACKLOG`, the test snapshot, and
 `public-pr-runner-isolation.pending.tsv` together. `hosted-selector-policy.py`
 pins the new canonical expression. `release.yml` `verify`'s pending digest is
 refreshed because that row binds this checker; the job is unchanged.
+
+## Amendment (2026-11-15, #1831) — five shared FALLBACK adopters leave
+
+**Finding.** Five `workflow_call` jobs still resolved to a persistent runner for
+a public Verjson repository: `generated-artifacts.yml` / `validate`,
+`notify-umbrella.yml` / `dispatch`, `pulumi-ci.yml` / `preview`,
+`repo-hygiene.yml` / `hygiene`, and `ui-ci.yml` / `build-test`. They shared one
+routing expression that honored `inputs.runner` on public calls and fell
+through to `vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK` when the untrusted
+lane was unset.
+
+**Decision (Part of #1831).** The shared expression now gates `inputs.runner` to
+private Verjson or non-Verjson callers and inserts
+`visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`
+ahead of the fallback tail — the same shape as `container-candidate` after the
+prior amendment. The five keys leave `RELAY_BACKLOG`, the test snapshot, and
+`public-pr-runner-isolation.pending.tsv` together. `pulumi-ci.yml`'s
+`validate` and `preview-admission` jobs keep their distinct expressions and
+remain in the backlog. `release.yml` `verify`'s pending digest is refreshed
+because that row binds this checker; the job is unchanged.
