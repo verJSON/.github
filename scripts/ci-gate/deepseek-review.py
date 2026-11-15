@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 
@@ -452,6 +453,86 @@ def streamed_response(raw: object, model: str, progress: StreamProgress | None =
     }
 
 
+# Auth, quota, and upstream failures use the same key and endpoint for Pro and
+# Flash. Model-specific 404/400/422 responses still cascade.
+IDENTICAL_PRE_TOKEN_HTTP_CLASSES = frozenset({"auth", "quota", "upstream"})
+TRANSPORT_OUTPUT_FIELDS = (
+    "transport_failure",
+    "http_status",
+    "http_status_family",
+    "failure_class",
+    "suppress_automatic_fallback",
+)
+TRANSPORT_OUTPUT_PATTERN = re.compile(
+    r"transport_failure=(pre_token_http|pre_token_transport)\n"
+    r"http_status=([1-5][0-9]{2}|none)\n"
+    r"http_status_family=(4xx|5xx|other|none)\n"
+    r"failure_class=(auth|quota|not_found|request_rejected|upstream|http_other|transport)\n"
+    r"suppress_automatic_fallback=(true|false)\n"
+)
+
+
+def http_status_code(code: object) -> int | None:
+    if type(code) is int and 100 <= code <= 599:
+        return code
+    if type(code) is str and re.fullmatch(r"[1-5][0-9]{2}", code):
+        return int(code)
+    return None
+
+
+def http_failure_classification(status: int | None) -> tuple[str, str]:
+    if status is None:
+        return "other", "http_other"
+    if 400 <= status <= 499:
+        family = "4xx"
+    elif 500 <= status <= 599:
+        family = "5xx"
+    else:
+        family = "other"
+    if status in {401, 403}:
+        failure_class = "auth"
+    elif status in {402, 429}:
+        failure_class = "quota"
+    elif status == 404:
+        failure_class = "not_found"
+    elif status in {400, 422}:
+        failure_class = "request_rejected"
+    elif status == 408 or 500 <= status <= 599:
+        failure_class = "upstream"
+    else:
+        failure_class = "http_other"
+    return family, failure_class
+
+
+def pre_token_failure_record(error: BaseException, wire_bytes: int) -> dict[str, str] | None:
+    if wire_bytes > 0 or not isinstance(error, OSError):
+        return None
+    if isinstance(error, urllib.error.HTTPError):
+        status = http_status_code(error.code)
+        family, failure_class = http_failure_classification(status)
+        return {
+            "transport_failure": "pre_token_http",
+            "http_status": str(status) if status is not None else "none",
+            "http_status_family": family,
+            "failure_class": failure_class,
+            "suppress_automatic_fallback": "true" if failure_class in IDENTICAL_PRE_TOKEN_HTTP_CLASSES else "false",
+        }
+    return {
+        "transport_failure": "pre_token_transport",
+        "http_status": "none",
+        "http_status_family": "none",
+        "failure_class": "transport",
+        "suppress_automatic_fallback": "true",
+    }
+
+
+def transport_output_payload(record: dict[str, str]) -> str | None:
+    payload = "".join(f"{field}={record[field]}\n" for field in TRANSPORT_OUTPUT_FIELDS)
+    if TRANSPORT_OUTPUT_PATTERN.fullmatch(payload) is None:
+        return None
+    return payload
+
+
 def main() -> int:
     required = (
         "MODEL", "BUDGET_USD", "PROMPT_FILE", "PR_JSON_FILE", "PR_DIFF_FILE", "GITHUB_OUTPUT",
@@ -506,13 +587,34 @@ def main() -> int:
             response = streamed_response(raw, values["MODEL"], progress)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         elapsed = int(time.monotonic() - started)
+        record = pre_token_failure_record(error, progress.wire_bytes)
+        payload = transport_output_payload(record) if record is not None else None
+        detail = ""
+        if payload is not None and record is not None:
+            detail = " " + " ".join(
+                f"{field}={record[field]}" for field in TRANSPORT_OUTPUT_FIELDS
+            )
+            try:
+                with open(values["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                    out.write(payload)
+            except OSError:
+                print(
+                    "::warning::DeepSeek transport classification output unavailable; detail redacted",
+                    file=sys.stderr,
+                    flush=True,
+                )
         print(
             f"::error::phase=provider-request transport=sse provider=deepseek "
             f"model={values['MODEL']} result=failed elapsed_seconds={elapsed} "
-            f"error_type={type(error).__name__}",
+            f"error_type={type(error).__name__}{detail}",
             file=sys.stderr,
             flush=True,
         )
+        if isinstance(error, urllib.error.HTTPError):
+            try:
+                error.close()
+            except OSError:
+                pass
         raise
     provenance = {
         "reviewed_head": values["REVIEWED_HEAD_SHA"],

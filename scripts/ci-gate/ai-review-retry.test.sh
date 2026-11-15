@@ -58,6 +58,7 @@ check_contract() {
   printf '%s' "$reserve_two" | grep -F 'consumed="${{ steps.reserve_1.outputs.count }}"' >/dev/null || contract_reject 'pass 2 reuses the pass 1 count' || return
   ! printf '%s' "$reserve_two" | grep -F 'pulls/$PR_NUMBER/reviews?per_page=100' >/dev/null || contract_reject 'pass 2 does not re-read reviews' || return
   grep -qF "steps.verdict_1.outputs.usable != 'true'" "$candidate" || contract_reject 'fallback requires an unusable primary verdict' || return
+  [ "$(grep -c "steps.deepseek_primary.outputs.suppress_automatic_fallback != 'true'" "$candidate")" -eq 2 ] || contract_reject 'pre-token failure suppresses reservation and invocation' || return
   grep -qF 'MODEL: ${{ needs.preflight.outputs.fallback_model }}' "$candidate" || contract_reject 'fallback uses the fallback model' || return
   grep -qF 'BUDGET_USD: ${{ needs.preflight.outputs.fallback_budget_usd }}' "$candidate" || contract_reject 'fallback uses the fallback budget' || return
   verdict=$(awk '/id: submit$/{found=1} found&&/VERDICT:/{print; exit}' "$candidate")
@@ -211,6 +212,10 @@ expect_contract_rejects "an unbounded third model pass was admitted" \
 sed "s/steps.verdict_1.outputs.usable != 'true'/steps.verdict_1.outputs.usable == 'true'/" "$workflow" >"$tmp/workflow.yml"
 expect_contract_rejects "fallback can run after a usable primary verdict" \
   "usable primary verdict terminates the cascade" 'fallback requires an unusable primary verdict'
+
+sed "s/ && steps.deepseek_primary.outputs.suppress_automatic_fallback != 'true'//g" "$workflow" >"$tmp/workflow.yml"
+expect_contract_rejects "an identical pre-token failure still reserved Flash" \
+  "pre-token failure cannot reserve or invoke the fallback pass" 'pre-token failure suppresses reservation and invocation'
 
 sed 's/\[ "$consumed" -ge 2 \]/[ "$consumed" -ge 3 ]/g' "$workflow" >"$tmp/workflow.yml"
 expect_contract_rejects "a third exact-head pass was admitted" \

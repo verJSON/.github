@@ -24,6 +24,8 @@ run-name: AI review authorization ${{ inputs.authorization_check_id }} from arm 
 #   2. Model policy is immutable receipt data. Every provider invocation first
 #      reserves an exact-head, PR-visible pass slot. DeepSeek Pro runs first and
 #      Flash runs only when Pro yields no usable verdict and pass 2 remains.
+#      An identical pre-token failure (auth, quota, upstream, or no HTTP status)
+#      does not reserve Flash. Model-specific HTTP failures still cascade.
 #      Any usable verdict ends the cascade; no exact head can consume a third pass.
 #   3. Reviews run on every ready-PR revision (incl. synchronize) so a
 #      Renovate rebase re-fires the gate and the required check stays fresh on
@@ -1779,7 +1781,7 @@ jobs:
 
       - name: Validate pass 1 verdict semantics
         id: verdict_1
-        if: always() && needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
+        if: always() && needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true' && steps.deepseek_primary.outputs.transport_failure != 'pre_token_http' && steps.deepseek_primary.outputs.transport_failure != 'pre_token_transport'
         env:
           # A replace ref left in a reused .git would swap object content in every
           # diff, patch id, and evidence lookup (ADR 0237).
@@ -1800,7 +1802,7 @@ jobs:
 
       - name: Reserve cumulative AI review pass 2
         id: reserve_2
-        if: ${{ !cancelled() && inputs.explicit_rereview != true && needs.preflight.outputs.provider == 'deepseek' && steps.reserve_1.outputs.allowed == 'true' && steps.verdict_1.outputs.usable != 'true' }}
+        if: ${{ !cancelled() && inputs.explicit_rereview != true && needs.preflight.outputs.provider == 'deepseek' && steps.reserve_1.outputs.allowed == 'true' && steps.verdict_1.outputs.usable != 'true' && steps.deepseek_primary.outputs.suppress_automatic_fallback != 'true' }}
         env:
           GH_TOKEN: ${{ steps.reservation-app-token.outputs.token }}
           PROVIDER: deepseek
@@ -1856,7 +1858,7 @@ jobs:
 
       - name: DeepSeek review pass 2
         id: deepseek_fallback
-        if: ${{ !cancelled() && inputs.explicit_rereview != true && needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'deepseek' && steps.rereview.outputs.skip_model != 'true' && steps.verdict_1.outputs.usable != 'true' && steps.reserve_2.outputs.allowed == 'true' }}
+        if: ${{ !cancelled() && inputs.explicit_rereview != true && needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'deepseek' && steps.rereview.outputs.skip_model != 'true' && steps.verdict_1.outputs.usable != 'true' && steps.deepseek_primary.outputs.suppress_automatic_fallback != 'true' && steps.reserve_2.outputs.allowed == 'true' }}
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -1889,7 +1891,7 @@ jobs:
 
       - name: Validate pass 2 verdict semantics
         id: verdict_2
-        if: always() && inputs.explicit_rereview != true && needs.preflight.outputs.provider == 'deepseek' && steps.deepseek_fallback.conclusion != 'skipped'
+        if: always() && inputs.explicit_rereview != true && needs.preflight.outputs.provider == 'deepseek' && steps.deepseek_fallback.conclusion != 'skipped' && steps.deepseek_fallback.outputs.transport_failure != 'pre_token_http' && steps.deepseek_fallback.outputs.transport_failure != 'pre_token_transport'
         env:
           # A replace ref left in a reused .git would swap object content in every
           # diff, patch id, and evidence lookup (ADR 0237).
@@ -1996,6 +1998,7 @@ jobs:
           fi
           automatic_paid_attempts=1
           [ "${MODEL_CONCLUSION:-skipped}" = skipped ] && automatic_paid_attempts=0
+          if [ "$PROVIDER" = deepseek ] && [ "${{ steps.deepseek_primary.conclusion }}" != skipped ]; then automatic_paid_attempts=1; fi
           if [ "$PROVIDER" = deepseek ] && [ "${{ steps.deepseek_fallback.conclusion }}" != skipped ]; then automatic_paid_attempts=2; fi
           echo "::notice::phase=model elapsed_seconds=$elapsed first_verdict=$FIRST_VERDICT run_paid_attempts=$automatic_paid_attempts cumulative_pass_count=$PASS_COUNT/2 budget_exhausted=$budget_exhausted turns_exhausted=$turns_exhausted permission_denials=$permission_denials"
 
@@ -2024,6 +2027,15 @@ jobs:
           SELECTED_PASS_TERMINAL_ERROR: ${{ steps.retry_outcome.outputs.selected_pass_terminal_error }}
           PRIMARY_EXTRACTION_DIAGNOSTIC: ${{ steps.deepseek_primary.outputs.extraction_diagnostic }}
           FALLBACK_EXTRACTION_DIAGNOSTIC: ${{ steps.deepseek_fallback.outputs.extraction_diagnostic }}
+          PRIMARY_TRANSPORT_FAILURE: ${{ steps.deepseek_primary.outputs.transport_failure }}
+          PRIMARY_HTTP_STATUS_FAMILY: ${{ steps.deepseek_primary.outputs.http_status_family }}
+          PRIMARY_FAILURE_CLASS: ${{ steps.deepseek_primary.outputs.failure_class }}
+          PRIMARY_HTTP_STATUS: ${{ steps.deepseek_primary.outputs.http_status }}
+          FALLBACK_TRANSPORT_FAILURE: ${{ steps.deepseek_fallback.outputs.transport_failure }}
+          FALLBACK_HTTP_STATUS_FAMILY: ${{ steps.deepseek_fallback.outputs.http_status_family }}
+          FALLBACK_FAILURE_CLASS: ${{ steps.deepseek_fallback.outputs.failure_class }}
+          FALLBACK_HTTP_STATUS: ${{ steps.deepseek_fallback.outputs.http_status }}
+          AUTOMATIC_FALLBACK_SUPPRESSED: ${{ steps.deepseek_primary.outputs.suppress_automatic_fallback }}
           PERMISSION_DENIALS: ${{ steps.retry_outcome.outputs.permission_denials }}
           PASS_CAP_EXHAUSTED: ${{ steps.rereview.outputs.skip_model != 'true' && (steps.reserve_1.outputs.cap_exhausted == 'true' || steps.reserve_2.outputs.cap_exhausted == 'true' || steps.reserve_2.outputs.count == '2') }}
           REVIEW_PASS_COUNT: ${{ steps.reserve_2.outputs.count || steps.reserve_1.outputs.count || '0' }}
@@ -2060,8 +2072,54 @@ jobs:
             # `error_max_budget_usd`: name the cause, the diff size and the cap
             # so the maintainer knows the PR is oversized rather than broken.
             # The flag only chooses the wording; every branch remains advisory.
+            accepted_transport() {
+              case "$1" in
+                pre_token_http|pre_token_transport) printf '%s' "$1" ;;
+                *) printf '' ;;
+              esac
+            }
+            accepted_family() {
+              case "$1" in
+                4xx|5xx|other|none) printf '%s' "$1" ;;
+                *) printf 'unclassified' ;;
+              esac
+            }
+            accepted_failure() {
+              case "$1" in
+                auth|quota|not_found|request_rejected|upstream|http_other|transport) printf '%s' "$1" ;;
+                *) printf 'unclassified' ;;
+              esac
+            }
+            accepted_status() {
+              case "$1" in
+                [12345][0123456789][0123456789]|none) printf '%s' "$1" ;;
+                *) printf 'none' ;;
+              esac
+            }
+            transport_failure="$(accepted_transport "${PRIMARY_TRANSPORT_FAILURE:-}")"
+            fallback_transport_failure="$(accepted_transport "${FALLBACK_TRANSPORT_FAILURE:-}")"
+            http_status_family="$(accepted_family "${PRIMARY_HTTP_STATUS_FAMILY:-}")"
+            fallback_http_status_family="$(accepted_family "${FALLBACK_HTTP_STATUS_FAMILY:-}")"
+            failure_class="$(accepted_failure "${PRIMARY_FAILURE_CLASS:-}")"
+            fallback_failure_class="$(accepted_failure "${FALLBACK_FAILURE_CLASS:-}")"
+            http_status="$(accepted_status "${PRIMARY_HTTP_STATUS:-}")"
+            fallback_http_status="$(accepted_status "${FALLBACK_HTTP_STATUS:-}")"
+            case "${AUTOMATIC_FALLBACK_SUPPRESSED:-false}" in
+              true) fallback_suppressed=true ;;
+              *) fallback_suppressed=false ;;
+            esac
+            transport_sentence() {
+              [ -n "$2" ] || return 0
+              # Double quotes: shellcheck SC2016 treats markdown backticks in a
+              # single-quoted printf format as unevaluated expansions.
+              printf "DeepSeek %s pre-token failure class \`%s\` (transport \`%s\`, HTTP status family \`%s\`, status \`%s\`). " \
+                "$1" "$3" "$2" "$4" "$5"
+            }
+            transport_detail="$(transport_sentence "pass 1" "$transport_failure" "$failure_class" "$http_status_family" "$http_status")"
+            transport_detail="${transport_detail}$(transport_sentence "pass 2" "$fallback_transport_failure" "$fallback_failure_class" "$fallback_http_status_family" "$fallback_http_status")"
+            advisory_outcome=inconclusive
             heading="⚠️ **AI review advisory: review could not complete**"
-            detail="The receipt-bound review cascade produced no usable verdict (budget/turn exhaustion, another terminal model error, or semantically invalid structured output). Human approval remains available. Apply the \`re-review\` label only when a maintainer explicitly authorizes another paid attempt."
+            detail="The receipt-bound review cascade produced no usable verdict (budget/turn exhaustion, another terminal model error, or semantically invalid structured output). ${transport_detail}Human approval remains available. Apply the \`re-review\` label only when a maintainer explicitly authorizes another paid attempt."
             extraction_detail=""
             extraction_kind() {
               jq -er '
@@ -2092,14 +2150,20 @@ jobs:
               heading="⚠️ **AI review advisory: denied tool calls**"
               detail="The review recorded ${PERMISSION_DENIALS} denied tool call(s) and produced no usable verdict. This is tool-boundary non-progress, not evidence that the diff is oversized."
             fi
+            if [ "$fallback_suppressed" = true ] && [ -n "$transport_failure" ]; then
+              heading="⚠️ **AI review advisory: provider transport failed**"
+              detail="DeepSeek failed before any completion tokens (transport \`$transport_failure\`, failure class \`$failure_class\`, HTTP status family \`$http_status_family\`, HTTP status \`$http_status\`). The response body and exception text stay redacted. Automatic pass 2 was not reserved, so this exact head keeps its remaining allowance. This is a pre-token transport failure, not a semantic verdict. Human approval remains available. Apply the \`re-review\` label only after the provider condition changes."
+              advisory_outcome=provider_transport
+            fi
             if [ "${PASS_CAP_EXHAUSTED:-false}" = "true" ]; then
               heading="🛑 **AI review advisory: two-pass maximum reached**"
-              detail="This exact head has consumed ${REVIEW_PASS_COUNT:-2}/2 model passes and has no usable verdict. ${extraction_detail}A third provider invocation for the same head is forbidden; autonomous AI approval and merge remain fail-closed. Human review remains available."
+              detail="This exact head has consumed ${REVIEW_PASS_COUNT:-2}/2 model passes and has no usable verdict. ${extraction_detail}${transport_detail}A third provider invocation for the same head is forbidden; autonomous AI approval and merge remain fail-closed. Human review remains available."
+              advisory_outcome=inconclusive
             fi
             gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body "$heading
 
           $detail This advisory result does not block deterministic CI or human approval."
-            echo "outcome=inconclusive" >> "$GITHUB_OUTPUT"
+            echo "outcome=$advisory_outcome" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # Expose the verdict so this gate job can file follow-up issues for the
@@ -2565,6 +2629,10 @@ jobs:
               inconclusive)
                 title='AI review inconclusive; human path ready'
                 summary='AI did not produce a reusable verdict. The result is advisory under ADR 0090; an authorized human may still approve after reviewing the available evidence.'
+                ;;
+              provider_transport)
+                title='AI review provider transport failed; human path ready'
+                summary='DeepSeek failed before any completion tokens. The automatic fallback pass was not reserved. The result is advisory under ADR 0090; an authorized human may still approve. The response body stays redacted.'
                 ;;
               approved)
                 title='AI advisory non-blocking; human path ready'

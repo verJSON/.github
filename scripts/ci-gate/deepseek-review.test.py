@@ -6,7 +6,9 @@ import os
 import re
 import tempfile
 import unittest
+import urllib.error
 from decimal import Decimal
+from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -689,6 +691,149 @@ class DeepSeekReviewTest(unittest.TestCase):
             self.assertFalse(review.write_extraction_diagnostic_bundle(
                 "diagnostic.json", "deepseek-v4-flash", diagnostic, provenance,
             ))
+
+    def _review_env(self, root: Path) -> dict[str, str]:
+        prompt, metadata, diff, output, replay = (
+            root / name for name in ("prompt", "pr.json", "pr.diff", "output", "replay.json")
+        )
+        prompt.write_text("sensitive prompt", encoding="utf-8")
+        metadata.write_text('{"title":"sensitive metadata"}', encoding="utf-8")
+        diff.write_text("sensitive diff", encoding="utf-8")
+        return {
+            "MODEL": "deepseek-v4-pro", "BUDGET_USD": "5.00", "PROMPT_FILE": str(prompt),
+            "PR_JSON_FILE": str(metadata), "PR_DIFF_FILE": str(diff), "GITHUB_OUTPUT": str(output),
+            "DEEPSEEK_API_KEY": "sensitive key",
+            "REPLAY_FILE": str(replay), "REVIEWED_HEAD_SHA": "a" * 40,
+            "REVIEW_POLICY": "receipt-policy", "AUTHORIZATION_CHECK_ID": "9001",
+            "TARGET_REPO": "Verjson/.github", "PR_NUMBER": "7", "REVIEW_PASS": "1", "SENSITIVE": "false",
+            "TRUSTED_REVIEW_SHA": "f" * 40,
+        }
+
+    def test_pre_token_http_error_records_status_family_without_response_secrets(self):
+        cases = (
+            (401, "4xx", "auth", "true"),
+            (403, "4xx", "auth", "true"),
+            (402, "4xx", "quota", "true"),
+            (429, "4xx", "quota", "true"),
+            (404, "4xx", "not_found", "false"),
+            (400, "4xx", "request_rejected", "false"),
+            (422, "4xx", "request_rejected", "false"),
+            (408, "4xx", "upstream", "true"),
+            (500, "5xx", "upstream", "true"),
+            (503, "5xx", "upstream", "true"),
+            (418, "4xx", "http_other", "false"),
+            ("429", "4xx", "quota", "true"),
+        )
+        for status, family, failure_class, suppress in cases:
+            with self.subTest(status=status):
+                reason = f"private-reason-{status}"
+                body = f"private-body-{status}".encode()
+                headers = EmailMessage()
+                headers["X-Private"] = reason
+                error = urllib.error.HTTPError(
+                    "https://api.deepseek.com/chat/completions",
+                    status,
+                    reason,
+                    headers,
+                    io.BytesIO(body),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    env = self._review_env(root)
+                    errors = io.StringIO()
+                    with (
+                        patch.dict(os.environ, env, clear=True),
+                        patch.object(review.urllib.request, "urlopen", side_effect=error),
+                        patch("sys.stderr", errors),
+                        self.assertRaises(urllib.error.HTTPError),
+                    ):
+                        review.main()
+                    diagnostic = errors.getvalue()
+                    output = Path(env["GITHUB_OUTPUT"]).read_text(encoding="utf-8")
+                    self.assertIn("error_type=HTTPError", diagnostic)
+                    self.assertIn("transport_failure=pre_token_http", diagnostic)
+                    expected_status = status if isinstance(status, int) else int(status)
+                    self.assertIn(f"http_status={expected_status}", diagnostic)
+                    self.assertIn(f"http_status_family={family}", diagnostic)
+                    self.assertIn(f"failure_class={failure_class}", diagnostic)
+                    self.assertIn(f"suppress_automatic_fallback={suppress}", diagnostic)
+                    self.assertIn(f"transport_failure=pre_token_http\n", output)
+                    self.assertIn(f"http_status={expected_status}\n", output)
+                    self.assertIn(f"http_status_family={family}\n", output)
+                    self.assertIn(f"failure_class={failure_class}\n", output)
+                    self.assertIn(f"suppress_automatic_fallback={suppress}\n", output)
+                    self.assertNotIn("structured_output=", output)
+                    for secret in (
+                        "sensitive prompt", "sensitive metadata", "sensitive diff", "sensitive key",
+                        reason, body.decode(),
+                    ):
+                        self.assertNotIn(secret, diagnostic)
+                        self.assertNotIn(secret, output)
+                    self.assertFalse(Path(env["REPLAY_FILE"]).exists())
+
+    def test_pre_token_transport_error_suppresses_fallback_without_exception_text(self):
+        class ResettingContext:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self): raise ConnectionResetError("private response detail")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = self._review_env(root)
+            errors = io.StringIO()
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(review.urllib.request, "urlopen", return_value=ResettingContext()),
+                patch("sys.stderr", errors),
+                self.assertRaises(ConnectionResetError),
+            ):
+                review.main()
+            diagnostic = errors.getvalue()
+            output = Path(env["GITHUB_OUTPUT"]).read_text(encoding="utf-8")
+            self.assertIn("transport_failure=pre_token_transport", output)
+            self.assertIn("http_status=none\n", output)
+            self.assertIn("http_status_family=none\n", output)
+            self.assertIn("failure_class=transport\n", output)
+            self.assertIn("suppress_automatic_fallback=true\n", output)
+            self.assertNotIn("private response detail", diagnostic)
+            self.assertNotIn("private response detail", output)
+
+    def test_mid_stream_transport_error_does_not_suppress_fallback(self):
+        chunk = json.dumps({
+            "object": "chat.completion.chunk",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "index": 0,
+                "finish_reason": None,
+                "delta": {"role": "assistant", "content": "x"},
+            }],
+        })
+
+        class MidStream:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self):
+                yield f"data: {chunk}\n".encode()
+                raise ConnectionResetError("private-midstream-sentinel")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = self._review_env(root)
+            errors = io.StringIO()
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(review.urllib.request, "urlopen", return_value=MidStream()),
+                patch("sys.stderr", errors),
+                self.assertRaises(ConnectionResetError),
+            ):
+                review.main()
+            diagnostic = errors.getvalue()
+            output = Path(env["GITHUB_OUTPUT"]).read_text(encoding="utf-8") if Path(env["GITHUB_OUTPUT"]).exists() else ""
+            self.assertIn("error_type=ConnectionResetError", diagnostic)
+            self.assertNotIn("suppress_automatic_fallback=true", diagnostic)
+            self.assertNotIn("transport_failure=", output)
+            self.assertNotIn("private-midstream-sentinel", diagnostic)
+            self.assertNotIn("private-midstream-sentinel", output)
 
 
 if __name__ == "__main__":

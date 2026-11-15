@@ -132,11 +132,33 @@ still requires `ai_authorized=true`, which is emitted only after the exact-head 
 approval is read back and verified. A neutral blocking or inconclusive advisory can
 satisfy check availability, but cannot mint an approval or dispatch a merge.
 
+### 2026-11-15 amendment — identical pre-token failures do not consume the fallback pass (#2124)
+
+Run `43737657166` on PR #2123, and the same pattern on #2116, failed DeepSeek SSE
+with `HTTPError` before any completion tokens. The gate recorded only
+`error_type=HTTPError`, classified the empty result as a semantic verdict, and
+reserved Flash. Both exact-head passes were consumed with no verdict.
+
+Pass 1 stays reserved because the slot is taken before invocation. Automatic
+pass 2 is not reserved when that failure would repeat on Flash: HTTP auth
+(`401`/`403`), quota (`402`/`429`), upstream (`408` and `5xx`), or a pre-token
+transport error that never received an HTTP status. Model-specific HTTP classes
+(`404`, `400`/`422`, and any other status) still follow the Pro-to-Flash
+cascade. Logs and the advisory comment record the status code, status family
+(`4xx`/`5xx`/`other`/`none`), and failure class. Response bodies, headers,
+URLs, and exception text stay redacted.
+
+The authorization check stays `neutral`, including the distinct
+`provider_transport` advisory. No outcome mints App approval. Human approval
+remains available. `re-review` is still required for another paid attempt and
+does not raise the two-pass ceiling. A real unusable verdict, including empty
+completed content, still fail-closes and may cascade.
+
 The GitHub-visible contract is:
 
 | Review state | Check conclusion | Meaning |
 | --- | --- | --- |
-| Blocking, inconclusive, skipped, superseded, or human-only non-blocking | `neutral` | AI did not authorize the head; human approval remains available |
+| Blocking, inconclusive, skipped, superseded, provider transport, or human-only non-blocking | `neutral` | AI did not authorize the head; human approval remains available |
 | Exact-head App approval persisted and verified | `success` | AI approval exists for this exact head |
 | Receipt, trusted-head, or deterministic-policy failure | `failure` | Authorization evaluation failed closed |
 

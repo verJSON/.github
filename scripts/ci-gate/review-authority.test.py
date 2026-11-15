@@ -33,6 +33,7 @@ def contract(candidate_gate=gate, candidate_arm=arm, candidate_policy=policy):
         "ai-approve cannot reach terminal merge": "needs.preflight.outputs.authority == 'ai-approve'" not in candidate_gate.split("  dispatch-merge:", 1)[1],
         "DeepSeek order is fixed": "deepseek-v4-pro then deepseek-v4-flash" in candidate_arm,
         "fallback runs only without pass-one verdict": "steps.verdict_1.outputs.usable != 'true'" in candidate_gate,
+        "identical pre-token failure does not reserve fallback": "steps.deepseek_primary.outputs.suppress_automatic_fallback != 'true'" in candidate_gate,
         "fallback is separately budgeted": "fallback_budget_usd" in candidate_gate and "PRIMARY_FALLBACK_BUDGET_USD" in candidate_arm,
         "DeepSeek credential stays step-scoped": "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in candidate_gate,
     }
@@ -46,6 +47,7 @@ mutations = {
     "unconditional App approval": (gate.replace('[ "$REVIEW_OUTCOME" = approved ] && { [ "$REVIEW_AUTHORITY" = ai-approve ] || [ "$REVIEW_AUTHORITY" = ai-merge ]; }', '[ "$REVIEW_OUTCOME" = approved ]'), arm, policy),
     "merge on ai-approve": (gate.replace("needs.preflight.outputs.authority == 'ai-merge'", "needs.preflight.outputs.authority == 'ai-approve'"), arm, policy),
     "fallback after usable verdict": (gate.replace("steps.verdict_1.outputs.usable != 'true'", "steps.verdict_1.outputs.usable == 'true'"), arm, policy),
+    "pre-token failure still reserves fallback": (gate.replace("steps.deepseek_primary.outputs.suppress_automatic_fallback != 'true'", "true"), arm, policy),
     "deduplicated post-open opt-in": (gate, arm.replace('[ "$explicit_rereview" = false ] && [ "$explicit_ai_review" = false ]', '[ "$explicit_rereview" = false ]'), policy),
     "explicit opt-in not consumed": (gate, arm.replace('authorization_label=ai-review', 'authorization_label='), policy),
     "third review admitted": (gate.replace('[ "${EXPLICIT_REREVIEW:-false}" != true ] && [ "$consumed" -ge 2 ]', '[ "${EXPLICIT_REREVIEW:-false}" != true ] && [ "$consumed" -ge 3 ]'), arm, policy),

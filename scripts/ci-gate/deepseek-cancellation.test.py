@@ -15,7 +15,7 @@ STEPS = {step.get('id'): step for step in WORKFLOW['jobs']['gate']['steps']}
 HEAD = 'a' * 40
 
 
-def fallback_allowed(step, *, cancelled=False, usable='false', reserved='true'):
+def fallback_allowed(step, *, cancelled=False, usable='false', reserved='true', suppress='false'):
     values = {
         'inputs.explicit_rereview': False,
         'needs.preflight.outputs.lane': 'ai',
@@ -24,11 +24,24 @@ def fallback_allowed(step, *, cancelled=False, usable='false', reserved='true'):
         'steps.reserve_1.outputs.allowed': 'true',
         'steps.reserve_2.outputs.allowed': reserved,
         'steps.verdict_1.outputs.usable': usable,
+        'steps.deepseek_primary.outputs.suppress_automatic_fallback': suppress,
     }
     expression = step['if'].removeprefix('${{').removesuffix('}}').strip()
     expression = expression.replace('always()', 'True').replace('cancelled()', str(cancelled))
     for name, value in values.items():
         expression = expression.replace(name, repr(value))
+    expression = re.sub(r'(?<![\w\'"])true(?![\w\'"])', 'True', expression)
+    expression = re.sub(r'(?<![\w\'"])false(?![\w\'"])', 'False', expression)
+    expression = expression.replace('&&', ' and ').replace('||', ' or ')
+    expression = re.sub(r'!(?!=)', 'not ', expression)
+    return eval(expression, {'__builtins__': {}}, {})
+
+
+def condition_holds(step, **values):
+    expression = step['if'].removeprefix('${{').removesuffix('}}').strip()
+    expression = expression.replace('always()', 'True').replace('cancelled()', 'False')
+    for name in sorted(values, key=len, reverse=True):
+        expression = expression.replace(name, repr(values[name]))
     expression = re.sub(r'(?<![\w\'"])true(?![\w\'"])', 'True', expression)
     expression = re.sub(r'(?<![\w\'"])false(?![\w\'"])', 'False', expression)
     expression = expression.replace('&&', ' and ').replace('||', ' or ')
@@ -46,6 +59,36 @@ class DeepSeekCancellationTest(unittest.TestCase):
         for name in ('reserve_2', 'deepseek_fallback'):
             with self.subTest(step=name):
                 self.assertTrue(fallback_allowed(STEPS[name]))
+
+    def test_identical_pre_token_failure_does_not_reserve_or_invoke_fallback(self):
+        for name in ('reserve_2', 'deepseek_fallback'):
+            with self.subTest(step=name):
+                self.assertFalse(fallback_allowed(STEPS[name], suppress='true'))
+
+    def test_model_specific_http_failure_can_still_cascade(self):
+        for name in ('reserve_2', 'deepseek_fallback'):
+            with self.subTest(step=name):
+                self.assertTrue(fallback_allowed(STEPS[name], suppress='false', usable='false'))
+
+    def test_pre_token_transport_failure_skips_empty_output_semantics(self):
+        for step_id, output_name in (
+            ('verdict_1', 'steps.deepseek_primary.outputs.transport_failure'),
+            ('verdict_2', 'steps.deepseek_fallback.outputs.transport_failure'),
+        ):
+            base = {
+                'needs.preflight.outputs.lane': 'ai',
+                'needs.preflight.outputs.provider': 'deepseek',
+                'steps.rereview.outputs.skip_model': 'false',
+                'steps.reserve_1.outputs.allowed': 'true',
+                'inputs.explicit_rereview': False,
+                'steps.deepseek_fallback.conclusion': 'failure',
+                output_name: '',
+            }
+            with self.subTest(step=step_id, transport='completed'):
+                self.assertTrue(condition_holds(STEPS[step_id], **base))
+            for transport in ('pre_token_http', 'pre_token_transport'):
+                with self.subTest(step=step_id, transport=transport):
+                    self.assertFalse(condition_holds(STEPS[step_id], **{**base, output_name: transport}))
 
     def test_usable_primary_and_denied_reservation_prevent_another_call(self):
         for name in ('reserve_2', 'deepseek_fallback'):
