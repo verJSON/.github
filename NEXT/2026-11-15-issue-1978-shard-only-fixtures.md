@@ -13,3 +13,7 @@ shard map are unchanged.
 
 A stubbed walk of the four shards materializes 36, 33, 35, and 32 fixtures
 instead of every shard building the full set.
+
+The shard-only caller-contract fixture helpers change full-checkout bytes
+seen by `release.yml` verify, so the ADR 0235 pending backlog digest moves
+to `sha256:141778ee…`.
