@@ -10,65 +10,38 @@ from __future__ import annotations
 
 import sys
 
+
 def main(argv: list[str] | None = None) -> None:
     """Admit only the explicit workflow command before the lane runs."""
     if argv is None:
         argv = sys.argv[1:]
     if argv != ["run"]:
         raise SystemExit("usage: ci_secretless_compatibility_lanes.py run")
-
-
 import ctypes
-
-
 import errno
-
-
 import fcntl
-
-
 import gzip
-
-
 import hashlib
-
-
 import io
-
-
 import json
-
-
 import os
-
-
 import re
-
-
 import shutil
-
-
 import signal
-
-
 import stat
-
-
 import subprocess
-
-
+import sys
 import tarfile
-
-
 import tempfile
-
-
 from pathlib import Path
-
-
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-
+protected = {
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AZURE_CREDENTIALS", "GH_TOKEN", "GITHUB_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS", "NODE_AUTH_TOKEN", "NPM_TOKEN",
+}
 blocked_service_env = {
     "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
     "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
@@ -89,27 +62,20 @@ blocked_service_env = {
     "GCONV_PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 }
-
-
 blocked_service_prefixes = (
     "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "DOCKER_", "AWS_", "GOOGLE_",
     "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
     "LD_", "DYLD_", "POSTGRES_",
 )
-
-
 credential_environment_name_pattern = re.compile(
     r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
     r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|BEARER|COOKIE|SESSION|JWT|AUTH)",
     re.IGNORECASE,
 )
-
-
 credential_environment_ambiguous_name_pattern = re.compile(
     r"(?<![A-Z0-9])(?:KEY|CODE|SIG)(?![A-Z0-9])",
     re.IGNORECASE,
 )
-
 
 def credential_environment_name_is_sensitive(name):
     normalized_name = name.upper()
@@ -123,7 +89,6 @@ def credential_environment_name_is_sensitive(name):
         return False
     return credential_environment_ambiguous_name_pattern.search(name) is not None
 
-
 credential_parameter_name_pattern = re.compile(
     r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
     r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
@@ -132,8 +97,6 @@ credential_parameter_name_pattern = re.compile(
     r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))",
     re.IGNORECASE,
 )
-
-
 credential_parameter_pattern = re.compile(
     r"(?:^|[;?&#=\s])(?:[A-Z0-9]+[_-])*(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
     r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
@@ -143,7 +106,6 @@ credential_parameter_pattern = re.compile(
     r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))\s*=",
     re.IGNORECASE,
 )
-
 
 def credential_component_is_present(component):
     for _ in range(8):
@@ -162,7 +124,6 @@ def credential_component_is_present(component):
         component = decoded
     return True
 
-
 def credential_environment_value_is_sensitive(name, value):
     if name.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY"}:
         return False
@@ -176,7 +137,6 @@ def credential_environment_value_is_sensitive(name, value):
         credential_component_is_present(component)
         for component in (parsed.query, parsed.fragment)
     )
-
 
 def opaque_service_value_contains_userinfo(name, value):
     normalized_name = name.upper()
@@ -222,7 +182,6 @@ def opaque_service_value_contains_userinfo(name, value):
             return False
         value = decoded
     return True
-
 
 def validate_candidate_service_value(name, value):
     if credential_environment_name_is_sensitive(name) and not (
@@ -273,7 +232,6 @@ def configured_compatibility_service_names(db_env, cache_env):
                 names.add(name)
     return names
 
-
 def compatibility_service_environment(
     requires_services, db_env, cache_env, environment,
 ):
@@ -295,8 +253,10 @@ def compatibility_service_environment(
             sys.exit(f"compatibility service environment rejected: {error}")
         service_environment[name] = environment[name]
     return service_environment
-
-
+max_archive_bytes = 32 * 1024 * 1024
+max_expanded_bytes = 64 * 1024 * 1024
+max_members = 4096
+max_tar_bytes = max_expanded_bytes + max_members * 1024 + 1024
 def open_installed_package_parent():
     descriptor = None
     try:
@@ -317,7 +277,7 @@ def open_installed_package_parent():
         if descriptor is not None:
             os.close(descriptor)
         raise
-
+rename_no_replace = 1
 
 def place_without_replacement(source, destination):
     result = renameat2(
@@ -334,7 +294,6 @@ def place_without_replacement(source, destination):
         raise FileExistsError(destination)
     raise OSError(error, os.strerror(error), destination)
 
-
 def verify_installed_package_parent():
     try:
         metadata = package_parent.lstat()
@@ -346,8 +305,6 @@ def verify_installed_package_parent():
         raise SystemExit(
             "installed compatibility package parent is not a real directory"
         )
-
-
 def read_verified_artifact(path, expected_sha512):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -367,7 +324,6 @@ def read_verified_artifact(path, expected_sha512):
         raise SystemExit("compatibility artifact changed before consumer execution")
     return content
 
-
 def write_all(descriptor, content):
     view = memoryview(content)
     while view:
@@ -375,7 +331,6 @@ def write_all(descriptor, content):
         if written <= 0:
             raise SystemExit("compatibility package extraction made no progress")
         view = view[written:]
-
 
 def open_directory_chain(root_descriptor, parts):
     descriptor = os.dup(root_descriptor)
@@ -396,7 +351,6 @@ def open_directory_chain(root_descriptor, parts):
     except BaseException:
         os.close(descriptor)
         raise
-
 
 def read_bounded_tar_stream(content):
     try:
@@ -442,7 +396,6 @@ def read_bounded_tar_stream(content):
             raise SystemExit("compatibility package archive member is truncated")
         offset += padded_size
     raise SystemExit("compatibility package archive has no complete end marker")
-
 
 def stage_verified_package(content, lane, package_parent_handle):
     tar_bytes = read_bounded_tar_stream(content)
@@ -568,11 +521,9 @@ def stage_verified_package(content, lane, package_parent_handle):
         (tuple(sorted(sandbox_directories)), tuple(sandbox_files)),
     )
 
-
 def discard_staging(staging):
     if staging.exists() and not staging.is_symlink():
         shutil.rmtree(staging)
-
 
 def reject_verified_staging(staging, descriptor, identity, reason):
     try:
@@ -591,7 +542,6 @@ def reject_verified_staging(staging, descriptor, identity, reason):
         os.close(descriptor)
     raise SystemExit(reason)
 
-
 def installed_target_is_absent():
     try:
         os.stat(
@@ -602,7 +552,6 @@ def installed_target_is_absent():
     except FileNotFoundError:
         return True
     return False
-
 
 def swap_verified_package(
         staging, staging_descriptor, staging_identity,
@@ -786,7 +735,6 @@ def swap_verified_package(
             os.close(staging_descriptor)
     return installed_identity, staging_descriptor
 
-
 def verify_bound_installed_target(descriptor, identity, phase):
     verify_installed_package_parent()
     held_metadata = os.fstat(descriptor)
@@ -808,7 +756,6 @@ def verify_bound_installed_target(descriptor, identity, phase):
             f"installed compatibility package target changed {phase}"
         )
 
-
 def add_sandbox_binding(arguments, source, destination, *, writable):
     metadata = source.lstat()
     if stat.S_ISLNK(metadata.st_mode):
@@ -823,7 +770,6 @@ def add_sandbox_binding(arguments, source, destination, *, writable):
         raise SystemExit(
             f"compatibility sandbox cannot mirror special entry {source}"
         )
-
 
 def mirror_node_modules(arguments, source, destination, target_parts):
     for entry in sorted(source.iterdir(), key=lambda path: path.name):
@@ -848,7 +794,6 @@ def mirror_node_modules(arguments, source, destination, target_parts):
             target_parts[1:],
         )
 
-
 def create_sealed_file(content):
     try:
         descriptor = os.memfd_create(
@@ -872,7 +817,6 @@ def create_sealed_file(content):
     except BaseException:
         os.close(descriptor)
         raise
-
 
 def verified_public_cache_source(script_environment):
     # The sandbox masks every ambient npm cache path, so the verified
@@ -1009,8 +953,6 @@ def run_bound_consumer(
                 f"removed: {staging}",
                 file=sys.stderr,
             )
-
-
 PUBLIC_CACHE_MOUNT_ARITY = {
     "--bind": (2, 2),
     "--dir": (1, 1),
@@ -1351,7 +1293,6 @@ def run_sandboxed_consumer(
         for descriptor in sealed_descriptors:
             os.close(descriptor)
 
-
 def restore_initial_absence(expected_owned_identity):
     if not target_initially_absent or expected_owned_identity is None:
         return
@@ -1388,103 +1329,58 @@ def restore_initial_absence(expected_owned_identity):
         )
     shutil.rmtree(cleanup_container)
 
-
 def interrupt_compatibility_lane(signum, _frame):
     raise SystemExit(f"compatibility lane interrupted by signal {signum}")
-
+owned_target_identity = None
+owned_target_descriptor = None
 
 if __name__ == "__main__":
     main()
-    protected = {
-        "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
-        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-        "AZURE_CREDENTIALS", "GH_TOKEN", "GITHUB_TOKEN",
-        "GOOGLE_APPLICATION_CREDENTIALS", "NODE_AUTH_TOKEN", "NPM_TOKEN",
-    }
-
     leaked = sorted(name for name in protected if os.environ.get(name))
-
     if leaked:
         sys.exit("credential reached compatibility consumer execution: " + ", ".join(leaked))
-
     request = json.loads(os.environ["COMPATIBILITY_RANGES"])
-
     artifact_dir = Path(os.environ["COMPATIBILITY_ARTIFACT_DIR"])
-
     provenance_path = artifact_dir / "provenance.json"
-
     provenance_bytes = provenance_path.read_bytes()
-
     if hashlib.sha256(provenance_bytes).hexdigest() \
             != os.environ["EXPECTED_COMPATIBILITY_PROVENANCE_SHA256"]:
         sys.exit("compatibility provenance changed before consumer execution")
-
     provenance = json.loads(provenance_bytes)
-
     if provenance.get("request") != request:
         sys.exit("compatibility consumer provenance does not match the declared request")
-
     package_json = json.loads(Path("package.json").read_text(encoding="utf-8"))
-
     scripts = package_json.get("scripts")
-
     if not isinstance(scripts, dict) or request["script"] not in scripts:
         sys.exit("compatibility script is absent from package.json")
-
     compatibility_service_names = configured_compatibility_service_names(
         os.environ.get("DB_ENV", ""), os.environ.get("CACHE_ENV", ""),
     )
-
     compatibility_service_env = compatibility_service_environment(
         os.environ.get("COMPATIBILITY_REQUIRES_SERVICES") == "true",
         os.environ.get("DB_ENV", ""),
         os.environ.get("CACHE_ENV", ""),
         os.environ,
     )
-
     package_parts = request["package"].split("/")
-
     if (not package_parts
             or any(not part or part in (".", "..") or "/" in part or "\\" in part
                    for part in package_parts)):
         sys.exit("compatibility package path is invalid")
-
     installed_root = Path("node_modules").joinpath(*package_parts)
-
     package_parent = installed_root.parent
-
     installed_leaf = installed_root.name
-
-    max_archive_bytes = 32 * 1024 * 1024
-
-    max_expanded_bytes = 64 * 1024 * 1024
-
-    max_members = 4096
-
-    max_tar_bytes = max_expanded_bytes + max_members * 1024 + 1024
-
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-
     package_parent_descriptor = open_installed_package_parent()
-
     package_parent_metadata = os.fstat(package_parent_descriptor)
-
     package_parent_handle = Path(f"/proc/self/fd/{package_parent_descriptor}")
-
     libc = ctypes.CDLL(None, use_errno=True)
-
     renameat2 = libc.renameat2
-
     renameat2.argtypes = [
         ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
     ]
-
     renameat2.restype = ctypes.c_int
-
-    rename_no_replace = 1
-
     verify_installed_package_parent()
-
     try:
         initial_target_metadata = os.stat(
             installed_leaf,
@@ -1500,16 +1396,10 @@ if __name__ == "__main__":
             raise SystemExit(
                 "installed compatibility package target is not a real directory"
             )
-
     previous_signal_handlers = {
         signum: signal.signal(signum, interrupt_compatibility_lane)
         for signum in (signal.SIGINT, signal.SIGTERM)
     }
-
-    owned_target_identity = None
-
-    owned_target_descriptor = None
-
     try:
         for index, lane in enumerate(provenance["lanes"]):
             artifact = artifact_dir / f"lane-{index}.tgz"
@@ -1574,4 +1464,3 @@ if __name__ == "__main__":
             for signum, previous_handler in previous_signal_handlers.items():
                 signal.signal(signum, previous_handler)
             os.close(package_parent_descriptor)
-
