@@ -17,3 +17,5 @@ instead of every shard building the full set.
 The shard-only caller-contract fixture helpers change full-checkout bytes
 seen by `release.yml` verify, so the ADR 0235 pending backlog digest moves
 to `sha256:141778ee…`.
+
+Shard-only fixture helpers change the settable-guard inventory scanned from the caller-contract tests; `GUARD_COUNT` moves from 543 to 551.
