@@ -1210,11 +1210,45 @@ pulumi-ci.yml preview
 changelog-validate.yml validate
 generated-artifacts.yml validate
 changelog-release.yml release
-container-candidate.yml prepare
-container-candidate.yml pull-request-build
-container-candidate.yml skip-private-node-build
 TARGETS
 }
+
+# ADR 0235 / Part of #1831: container-candidate's public visibility branch takes
+# the untrusted lane with a hosted tail and does not honor inputs.runner or
+# CI_LANE_FALLBACK on a public Verjson repository. Keep these jobs out of the
+# shared policy_jobs loop above — that loop still expects public untrusted to
+# fall back to CI_LANE_FALLBACK during migration.
+for candidate_job in prepare pull-request-build skip-private-node-build; do
+  assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/verjson-authn '' true \
+    '["self-hosted","private-canary"]' '["self-hosted","public-canary"]' \
+    '["self-hosted","private-canary"]' \
+    "container-candidate $candidate_job — private Verjson repo uses the trusted lane"
+  assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' false \
+    '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "container-candidate $candidate_job — public Verjson takes the untrusted hosted tail, not FALLBACK" \
+    '["self-hosted","general"]'
+  assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' false \
+    '["self-hosted","default-only"]' '' \
+    '["ubuntu-24.04"]' \
+    "container-candidate $candidate_job — public with unset untrusted lane takes the hosted tail, not FALLBACK" \
+    '["self-hosted","general"]'
+  assert_route "$workflows/container-candidate.yml" "$candidate_job" Acme/widgets '' true '' '' \
+    'ubuntu-24.04' \
+    "container-candidate $candidate_job — external callers stay portable on hosted"
+  assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '["self-hosted","manish"]' false \
+    '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "container-candidate $candidate_job — public Verjson ignores inputs.runner" \
+    '["self-hosted","general"]'
+done
+grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/container-candidate.yml" \
+  && grep -qF "(github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner" \
+  "$workflows/container-candidate.yml" \
+  && pass "container-candidate public routing uses the visibility STRING and gates inputs.runner" \
+  || fail "container-candidate public routing drifted (ADR 0235 / Part of #1831)"
+
 
 while read -r wf_name job; do
   wf="$workflows/$wf_name"
