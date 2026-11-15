@@ -148,6 +148,41 @@ expect_generator_refusal() {
     fail "generator refused '${*//$'\n'/\\n}' for a reason other than '$reason' (exit $status): $(head -c 400 "$err" | tr '\n' ' ')"
   fi
 }
+# A fixture the rest of the shard reads. `fail` is suspended while this shard
+# skips a case, so a generator failure recorded that way leaves an empty file
+# and a later rejection still reads green (#1983). Exit the shard, as the
+# nested-only fixtures do (#1974). The shard test pins both messages.
+write_generated_fixture() {
+  # write_generated_fixture <dest> <generator-args...>
+  local dest="$1"
+  shift
+  local status=0
+  bash "$gen" "$@" >"$dest" || status=$?
+  if [ "$status" -ne 0 ] || [ ! -s "$dest" ]; then
+    echo "FAIL - generator failed writing $dest (exit $status)"
+    exit 1
+  fi
+}
+read_generated_fixture() {
+  # read_generated_fixture <varname> <generator-args...>
+  local target="$1"
+  shift
+  case "$target" in
+    target | out | status | err)
+      echo "FAIL - read_generated_fixture target '$target' shadows one of its own locals"
+      exit 1 ;;
+  esac
+  local out="" status=0 err
+  err="$(mktemp)" || { echo "FAIL - could not capture generator diagnostics"; exit 1; }
+  out="$(bash "$gen" "$@" 2>"$err")" || status=$?
+  if [ "$status" -ne 0 ] || [ -z "$out" ]; then
+    echo "FAIL - generator failed capturing $target (exit $status): $(tr '\n' ' ' <"$err" | cut -c1-300)"
+    rm -f "$err"
+    exit 1
+  fi
+  rm -f "$err"
+  printf -v "$target" '%s' "$out"
+}
 # Fixtures every mode needs. Case shards skip the generator-only assertions
 # below, so nothing a case reads may be defined there (#1736).
 capture_mode workflow workflow "$sha"
@@ -416,8 +451,9 @@ for audited_mode in pr-gate release-node release-artifact release-snapshot relea
   audit_args=("$audited_mode" "$sha")
   [ "$audited_mode" != release-artifact ] || audit_args+=(--build-runner ubuntu-24.04)
   [ "$audited_mode" != release-propose ] || audit_args+=(--autonomy propose)
+  read_generated_fixture audited_workflow "${audit_args[@]}"
   audit_report="$(audit_checkout_credentials "$audited_mode" \
-    "$(bash "$gen" "${audit_args[@]}")" 2>&1)" \
+    "$audited_workflow" 2>&1)" \
     && pass "generated $audited_mode keeps no job credential in the checked-out tree, #959 ($audit_report)" \
     || fail "generated $audited_mode persists the job credential into checked-out code (#959): $audit_report"
 done
@@ -571,16 +607,19 @@ YAML
   && grep -qF 'release-node '"$sha"' --default-prefix schema-v --default-component cli-schema --only-package-dir packages/cli-schema' <<<"$component_release" \
   && pass "release-node emits byte-exact component workflow defaults (#1565)" \
   || fail "release-node component workflow defaults or provenance differ from the canonical bytes"
-yaml_keyword_release="$(bash "$gen" release-node "$sha" --default-prefix null-v --default-component null)"
+read_generated_fixture yaml_keyword_release \
+  release-node "$sha" --default-prefix null-v --default-component null
 [ "$(grep -cF "default: 'null-v'" <<<"$yaml_keyword_release")" -eq 1 ] \
   && [ "$(grep -cF "default: 'null'" <<<"$yaml_keyword_release")" -eq 1 ] \
   && pass "component defaults remain strings when their names are YAML keywords (#1565)" \
   || fail "component defaults permit YAML scalar coercion"
 for component_mode in release-snapshot release-artifact; do
   if [ "$component_mode" = release-artifact ]; then
-    component_mode_release="$(bash "$gen" "$component_mode" "$sha" --build-runner ubuntu-24.04 --default-prefix schema-v --default-component cli-schema)"
+    read_generated_fixture component_mode_release \
+      "$component_mode" "$sha" --build-runner ubuntu-24.04 --default-prefix schema-v --default-component cli-schema
   else
-    component_mode_release="$(bash "$gen" "$component_mode" "$sha" --default-prefix schema-v --default-component cli-schema)"
+    read_generated_fixture component_mode_release \
+      "$component_mode" "$sha" --default-prefix schema-v --default-component cli-schema
   fi
   component_mode_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_mode_release" | sed '$d')"
   assert_optional_release_version "$component_mode" "$component_mode_release"
@@ -972,7 +1011,7 @@ if [ "$staged_fixture" = true ]; then
     fail "adr-index-test did not refuse as documented (status=$refusal_status): $(tail -1 "$refusal_err")"
   fi
 
-  mutated_contract="$(bash "$gen" contract-test "$mutated_sha" 2>/dev/null)"
+  read_generated_fixture mutated_contract contract-test "$mutated_sha"
   mutated_pin="$(grep -m1 '^ADR_INDEX_TEST_SHA256=' <<<"$mutated_contract" | cut -d'"' -f2)"
   # An empty pin is only evidence if a contract test was emitted at all: a mode
   # that failed wholesale also yields an empty pin, and would otherwise report the
@@ -1055,7 +1094,7 @@ if [ -n "$empty_sha" ]; then
   fi
   rm -f "$anchor_err"
 
-  empty_contract="$(bash "$gen" contract-test "$empty_sha" 2>/dev/null)"
+  read_generated_fixture empty_contract contract-test "$empty_sha"
   empty_pin="$(grep -m1 '^ADR_INDEX_SHA256=' <<<"$empty_contract" | cut -d'"' -f2)"
   if ! grep -q "^CONTRACT_REF=\"$empty_sha\"$" <<<"$empty_contract"; then
     fail "contract-test emitted nothing for a ref whose ADR-index generator is empty"
@@ -1127,7 +1166,7 @@ if [ -n "$padded_sha" ]; then
   bash "$gen" adr-index-generator "$padded_sha" >"$padded_mode" 2>/dev/null \
     || padded_mode_status=$?
   padded_emitted_digest="$(sha256sum <"$padded_mode" | cut -d' ' -f1)"
-  padded_contract="$(bash "$gen" contract-test "$padded_sha" 2>/dev/null)"
+  read_generated_fixture padded_contract contract-test "$padded_sha"
   padded_pin="$(grep -m1 '^ADR_INDEX_SHA256=' <<<"$padded_contract" | cut -d'"' -f2)"
 
   # The fixture only proves anything if the two candidate sources actually
@@ -1367,26 +1406,28 @@ build_adopter() {
     return 0
   fi
   mkdir -p "$dir/NEXT" "$dir/scripts" "$dir/.github/workflows"
-  bash "$gen" codeowners "$sha" >"$dir/.github/CODEOWNERS"
-  bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
-  bash "$gen" "$caller" "$sha" >"$dir/.github/workflows/changelog.yml"
-  bash "$gen" pr-gate "$sha" >"$dir/.github/workflows/changelog-contract.yml"
+  write_generated_fixture "$dir/.github/CODEOWNERS" codeowners "$sha"
+  write_generated_fixture "$dir/scripts/render-next.sh" renderer "$sha"
+  write_generated_fixture "$dir/.github/workflows/changelog.yml" "$caller" "$sha"
+  write_generated_fixture "$dir/.github/workflows/changelog-contract.yml" pr-gate "$sha"
   if [ "$caller" = generated-artifacts-with-adr-index ]; then
-    bash "$gen" adr-index-generator "$sha" >"$dir/scripts/gen-adr-index.sh"
+    write_generated_fixture "$dir/scripts/gen-adr-index.sh" adr-index-generator "$sha"
     chmod +x "$dir/scripts/gen-adr-index.sh"
     # The generator and the suite that covers it are one set (#1380).
-    bash "$gen" adr-index-test "$sha" >"$dir/scripts/gen-adr-index.test.sh"
+    write_generated_fixture "$dir/scripts/gen-adr-index.test.sh" adr-index-test "$sha"
   fi
   cp "$emitted" "$dir/scripts/changelog-contract.test.sh"
   chmod +x "$dir/scripts/render-next.sh" "$dir/scripts/changelog-contract.test.sh"
   if [ "$with_release" = yes ]; then
     if [ "$release_mode" = release-artifact ]; then
-      bash "$gen" "$release_mode" "$sha" --build-runner ubuntu-24.04 >"$dir/.github/workflows/release.yml"
+      write_generated_fixture "$dir/.github/workflows/release.yml" \
+        "$release_mode" "$sha" --build-runner ubuntu-24.04
     else
-      bash "$gen" "$release_mode" "$sha" >"$dir/.github/workflows/release.yml"
+      write_generated_fixture "$dir/.github/workflows/release.yml" \
+        "$release_mode" "$sha"
     fi
-    bash "$gen" release-propose "$sha" --autonomy propose \
-      >"$dir/.github/workflows/release-propose.yml"
+    write_generated_fixture "$dir/.github/workflows/release-propose.yml" \
+      release-propose "$sha" --autonomy propose
   elif [ "$with_release" = legacy ]; then
     cat >"$dir/.github/workflows/release.yml" <<YAML
 name: release
@@ -1447,9 +1488,9 @@ FRAGMENT
 build_split_adopter() {
   local dir="$1"
   build_adopter "$dir" no workflow
-  bash "$gen" generated-artifacts-with-adr-index "$sha" \
-    >"$dir/.github/workflows/generated-artifacts.yml"
-  bash "$gen" adr-index-generator "$sha" >"$dir/scripts/gen-adr-index.sh"
+  write_generated_fixture "$dir/.github/workflows/generated-artifacts.yml" \
+    generated-artifacts-with-adr-index "$sha"
+  write_generated_fixture "$dir/scripts/gen-adr-index.sh" adr-index-generator "$sha"
   chmod +x "$dir/scripts/gen-adr-index.sh"
   git -C "$dir" add -A
   git -C "$dir" commit -qm 'add generated artifacts caller'
@@ -1660,8 +1701,10 @@ schedule_adopter_script "$adopter" '
 unset ADOPTER_GITHUB_OWNER
 foreign_adopter="$tmproot/adopter-foreign-codeowners"
 cp -a "$adopter" "$foreign_adopter"
-bash "$gen" codeowners "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/.github/CODEOWNERS"
-bash "$gen" contract-test "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/scripts/changelog-contract.test.sh"
+write_generated_fixture "$foreign_adopter/.github/CODEOWNERS" \
+  codeowners "$sha" --codeowners-org Acme --codeowners-team platform
+write_generated_fixture "$foreign_adopter/scripts/changelog-contract.test.sh" \
+  contract-test "$sha" --codeowners-org Acme --codeowners-team platform
 schedule_adopter_script "$foreign_adopter" '
   if [ "$status" -eq 0 ]; then pass "foreign generated ownership passes"; else fail "foreign generated ownership failed"; fi
 '
@@ -2110,17 +2153,16 @@ fi
 SCHED_SCRIPT
 )"
 
-# Regenerations below build the case fixtures, not case assertions: a
-# generator failure must abort every shard, never be suspended with the case
-# that precedes it, or an empty release.yml would read as a valid rejection.
+# Regenerations below rebuild the nested-only caller. write_generated_fixture
+# aborts the shard on failure: `fail` is suspended between cases, and an empty
+# release.yml would otherwise read as a valid rejection (#1974, #1983).
 nested_adopter="$tmproot/adopter-nested-only-release"
 build_adopter "$nested_adopter"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
-bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh" \
-  || { echo "FAIL - could not generate the nested-only contract test"; exit 1; }
+write_generated_fixture "$nested_adopter/.github/workflows/release.yml" \
+  release-node "$sha" --only-package-dir packages/cli-schema \
+  --default-prefix schema-v --default-component cli-schema
+write_generated_fixture "$nested_adopter/scripts/changelog-contract.test.sh" \
+  contract-test "$sha" --only-package-dir packages/cli-schema
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "nested-only release and contract agree on component defaults without selecting root (#1286, #1565)"
@@ -2141,10 +2183,9 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+write_generated_fixture "$nested_adopter/.github/workflows/release.yml" \
+  release-node "$sha" --only-package-dir packages/cli-schema \
+  --default-prefix schema-v --default-component cli-schema
 sed -i "s/default: 'cli-schema'/default: ''/" \
   "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
@@ -2157,10 +2198,9 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+write_generated_fixture "$nested_adopter/.github/workflows/release.yml" \
+  release-node "$sha" --only-package-dir packages/cli-schema \
+  --default-prefix schema-v --default-component cli-schema
 sed -i 's/package_dirs=(packages\/cli-schema)/package_dirs=(. packages\/cli-schema)/' "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
@@ -2172,10 +2212,9 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml" \
-  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+write_generated_fixture "$nested_adopter/.github/workflows/release.yml" \
+  release-node "$sha" --only-package-dir packages/cli-schema \
+  --default-prefix schema-v --default-component cli-schema
 sed -i 's/\["packages\/cli-schema"\]/[".","packages\/cli-schema"]/' "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
@@ -2190,12 +2229,13 @@ SCHED_SCRIPT
 
 multi_release_adopter="$tmproot/adopter-multi-release"
 build_adopter "$multi_release_adopter"
-bash "$gen" release-node "$sha" >"$multi_release_adopter/.github/workflows/release.yml"
-bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
-  >"$multi_release_adopter/.github/workflows/release-cli-schema.yml"
-bash "$gen" contract-test "$sha" \
-  --release-caller-package-dirs .github/workflows/release-cli-schema.yml=packages/cli-schema \
-  >"$multi_release_adopter/scripts/changelog-contract.test.sh"
+write_generated_fixture "$multi_release_adopter/.github/workflows/release.yml" \
+  release-node "$sha"
+write_generated_fixture "$multi_release_adopter/.github/workflows/release-cli-schema.yml" \
+  release-node "$sha" --only-package-dir packages/cli-schema
+write_generated_fixture "$multi_release_adopter/scripts/changelog-contract.test.sh" \
+  contract-test "$sha" \
+  --release-caller-package-dirs .github/workflows/release-cli-schema.yml=packages/cli-schema
 chmod +x "$multi_release_adopter/scripts/changelog-contract.test.sh"
 schedule_adopter_script "$multi_release_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
@@ -2461,7 +2501,7 @@ else
 fi
 SCHED_SCRIPT
 )"
-bash "$gen" adr-index-generator "$sha" >"$adr_adopter/scripts/gen-adr-index.sh"
+write_generated_fixture "$adr_adopter/scripts/gen-adr-index.sh" adr-index-generator "$sha"
 chmod +x "$adr_adopter/scripts/gen-adr-index.sh"
 printf '\n# local drift\n' >>"$adr_adopter/scripts/gen-adr-index.sh"
 schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
@@ -2477,7 +2517,7 @@ SCHED_SCRIPT
 
 optional_generator_adopter="$tmproot/adopter-optional-adr-generator"
 build_adopter "$optional_generator_adopter" yes generated-artifacts
-bash "$gen" adr-index-generator "$sha" >"$optional_generator_adopter/scripts/gen-adr-index.sh"
+write_generated_fixture "$optional_generator_adopter/scripts/gen-adr-index.sh" adr-index-generator "$sha"
 chmod +x "$optional_generator_adopter/scripts/gen-adr-index.sh"
 printf '\n# local payload drift with current pin\n' >>"$optional_generator_adopter/scripts/gen-adr-index.sh"
 schedule_adopter_script "$optional_generator_adopter" "$(cat <<'SCHED_SCRIPT'
@@ -2492,7 +2532,7 @@ SCHED_SCRIPT
 )"
 optional_adr_test_adopter="$tmproot/adopter-optional-adr-test"
 build_adopter "$optional_adr_test_adopter" yes generated-artifacts
-bash "$gen" adr-index-test "$sha" >"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
+write_generated_fixture "$optional_adr_test_adopter/scripts/gen-adr-index.test.sh" adr-index-test "$sha"
 printf '\n# local payload drift with current pin\n' >>"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
 schedule_adopter_script "$optional_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
@@ -5871,8 +5911,8 @@ for invalid_package in '@Verjson/ai' '@verjson/AI' '@other/ai' '@verjson/ai@late
     release-artifact "$sha" --build-runner ubuntu-24.04 --approved-internal-package "$invalid_package"
 done
 
-artifact_release="$(bash "$gen" release-artifact "$sha" \
-  --build-runner ubuntu-24.04 --build-runner self-hosted-release)"
+read_generated_fixture artifact_release release-artifact "$sha" \
+  --build-runner ubuntu-24.04 --build-runner self-hosted-release
 
 grep -qF "gen-changelog-caller.sh release-artifact $sha --build-runner ubuntu-24.04 --build-runner self-hosted-release" \
   <<<"$artifact_release" \
@@ -5888,9 +5928,9 @@ grep -qF -- "- os: 'ubuntu-24.04'" <<<"$artifact_release" \
   && pass "release-artifact's build matrix carries exactly the declared runner labels" \
   || fail "release-artifact's build matrix does not match --build-runner"
 
-private_artifact_release="$(bash "$gen" release-artifact "$sha" \
+read_generated_fixture private_artifact_release release-artifact "$sha" \
   --build-runner "$lane_expression" --build-runner "$windows_lane_expression" \
-  --approved-internal-package @verjson/ai --approved-internal-package @verjson/ai-gguf)"
+  --approved-internal-package @verjson/ai --approved-internal-package @verjson/ai-gguf
 grep -qF 'acquire-private-dependencies:' <<<"$private_artifact_release" \
   && grep -qF 'permissions:' <<<"$private_artifact_release" \
   && grep -qF 'packages: read' <<<"$private_artifact_release" \
@@ -5912,14 +5952,14 @@ build_artifact_adopter() {
   # but release-artifact for publication and a release-build.sh hook per #975.
   local dir="$1"
   mkdir -p "$dir/NEXT" "$dir/scripts" "$dir/.github/workflows"
-  bash "$gen" codeowners "$sha" >"$dir/.github/CODEOWNERS"
-  bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
-  bash "$gen" workflow "$sha" >"$dir/.github/workflows/changelog.yml"
-  bash "$gen" pr-gate "$sha" >"$dir/.github/workflows/changelog-contract.yml"
+  write_generated_fixture "$dir/.github/CODEOWNERS" codeowners "$sha"
+  write_generated_fixture "$dir/scripts/render-next.sh" renderer "$sha"
+  write_generated_fixture "$dir/.github/workflows/changelog.yml" workflow "$sha"
+  write_generated_fixture "$dir/.github/workflows/changelog-contract.yml" pr-gate "$sha"
   cp "$emitted" "$dir/scripts/changelog-contract.test.sh"
   chmod +x "$dir/scripts/render-next.sh" "$dir/scripts/changelog-contract.test.sh"
-  bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 --build-runner self-hosted-release \
-    >"$dir/.github/workflows/release.yml"
+  write_generated_fixture "$dir/.github/workflows/release.yml" \
+    release-artifact "$sha" --build-runner ubuntu-24.04 --build-runner self-hosted-release
   printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'mkdir -p "$2"' \
     'echo built >"$2/artifact-$1.bin"' >"$dir/scripts/release-build.sh"
   chmod +x "$dir/scripts/release-build.sh"
@@ -5959,14 +5999,14 @@ assert_release_path_mutation_rejected "$artifact_adopter" release-artifact artif
 
 private_artifact_adopter="$tmproot/adopter-artifact-private"
 cp -a "$artifact_adopter" "$private_artifact_adopter"
-bash "$gen" release-artifact "$sha" \
+write_generated_fixture "$private_artifact_adopter/.github/workflows/release.yml" \
+  release-artifact "$sha" \
   --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}' \
-  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai \
-  >"$private_artifact_adopter/.github/workflows/release.yml"
-bash "$gen" contract-test "$sha" \
+  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai
+write_generated_fixture "$private_artifact_adopter/scripts/changelog-contract.test.sh" \
+  contract-test "$sha" \
   --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}' \
-  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai \
-  >"$private_artifact_adopter/scripts/changelog-contract.test.sh"
+  --build-runner '${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}' --approved-internal-package @verjson/ai
 chmod +x "$private_artifact_adopter/scripts/changelog-contract.test.sh"
 cat >"$private_artifact_adopter/package-lock.json" <<'LOCK'
 {"name":"private-release","lockfileVersion":3,"packages":{"":{"name":"private-release"},"node_modules/@verjson/ai":{"name":"@verjson/ai","version":"1.0.0","resolved":"https://npm.pkg.github.com/download/@verjson/ai/1.0.0/hash","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}
@@ -6992,7 +7032,7 @@ SCHED_SCRIPT
 # permanently unconsumed.
 # --------------------------------------------------------------------------
 
-snapshot_release="$(bash "$gen" release-snapshot "$sha")"
+read_generated_fixture snapshot_release release-snapshot "$sha"
 release_auth_environment_note='# The step clears shell startup, loader, and Git settings that could alter this lookup.'
 release_auth_isolation_note='# Run Git with env -i and send its auth header over stdin; do not export it.'
 grep -qF -- "$release_auth_environment_note" <<<"$release_node_workflow" \
@@ -7050,13 +7090,13 @@ build_snapshot_adopter() {
   # workflow: no package, no GitHub Release assets, no release-build.sh hook.
   local dir="$1"
   mkdir -p "$dir/NEXT" "$dir/scripts" "$dir/.github/workflows"
-  bash "$gen" codeowners "$sha" >"$dir/.github/CODEOWNERS"
-  bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
-  bash "$gen" workflow "$sha" >"$dir/.github/workflows/changelog.yml"
-  bash "$gen" pr-gate "$sha" >"$dir/.github/workflows/changelog-contract.yml"
+  write_generated_fixture "$dir/.github/CODEOWNERS" codeowners "$sha"
+  write_generated_fixture "$dir/scripts/render-next.sh" renderer "$sha"
+  write_generated_fixture "$dir/.github/workflows/changelog.yml" workflow "$sha"
+  write_generated_fixture "$dir/.github/workflows/changelog-contract.yml" pr-gate "$sha"
   cp "$emitted" "$dir/scripts/changelog-contract.test.sh"
   chmod +x "$dir/scripts/render-next.sh" "$dir/scripts/changelog-contract.test.sh"
-  bash "$gen" release-snapshot "$sha" >"$dir/.github/workflows/release.yml"
+  write_generated_fixture "$dir/.github/workflows/release.yml" release-snapshot "$sha"
   cat >"$dir/NEXT/2026-09-01-issue-1206-first.md" <<'FRAGMENT'
 ---
 date: 2026-09-01
@@ -7248,7 +7288,7 @@ SCHED_SCRIPT
 # assertion exists to catch.
 # --------------------------------------------------------------------------
 
-node_release="$(bash "$gen" release-node "$sha")"
+read_generated_fixture node_release release-node "$sha"
 private_guard="$tmproot/private-guard.sh"
 awk '
   /^  snapshot:$/ { exit }
@@ -7623,10 +7663,10 @@ cat "$tmproot/run.out" >"$remedy_scan"
 
 custom_modes="$tmproot/adopter-remedy-custom-modes"
 build_adopter "$custom_modes" yes generated-artifacts-with-adr-index
-bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
-  >"$custom_modes/.github/workflows/release.yml"
-bash "$gen" pr-gate "$sha" --untrusted-runner linux-x64 \
-  >"$custom_modes/.github/workflows/changelog-contract.yml"
+write_generated_fixture "$custom_modes/.github/workflows/release.yml" \
+  release-artifact "$sha" --build-runner ubuntu-24.04
+write_generated_fixture "$custom_modes/.github/workflows/changelog-contract.yml" \
+  pr-gate "$sha" --untrusted-runner linux-x64
 grep -qF -- '--build-runner ubuntu-24.04' "$custom_modes/.github/workflows/release.yml" \
   && pass "custom release-artifact fixture records its build-runner option" \
   || fail "custom release-artifact fixture lost its build-runner option"
@@ -8010,7 +8050,8 @@ pr_gate_record_runner() { # pr_gate_record_runner <dir> <labels>: header only, b
     "$1/.github/workflows/changelog-contract.yml"
 }
 pr_gate_regenerate_then_runs_on() { # <dir> <labels> <replacement runs-on value>
-  bash "$gen" pr-gate "$sha" --untrusted-runner "$2" >"$1/.github/workflows/changelog-contract.yml"
+  write_generated_fixture "$1/.github/workflows/changelog-contract.yml" \
+    pr-gate "$sha" --untrusted-runner "$2"
   pr_gate_runs_on "$1" "$3"
 }
 pr_gate_second_job() { # <dir>: a sibling job on a persistent runner
@@ -8033,7 +8074,8 @@ pr_gate_target_trigger() { # <dir>: pull_request_target runs with base-repositor
   sed -i 's/^  pull_request:$/  pull_request_target:/' "$1/.github/workflows/changelog-contract.yml"
 }
 pr_gate_unaccepted_runner() { # <dir>: header and body agree on a runner pr-gate refuses
-  bash "$gen" pr-gate "$sha" --untrusted-runner self-hosted,isolated >"$1/.github/workflows/changelog-contract.yml"
+  write_generated_fixture "$1/.github/workflows/changelog-contract.yml" \
+    pr-gate "$sha" --untrusted-runner self-hosted,isolated
   sed -i -e 's/--untrusted-runner self-hosted,isolated$/--untrusted-runner Self-Hosted,isolated/' \
     -e 's/^    runs-on: \[self-hosted, isolated\]$/    runs-on: [Self-Hosted, isolated]/' \
     "$1/.github/workflows/changelog-contract.yml"
@@ -8059,8 +8101,8 @@ expect_rejection --reason "differs from the PR gate pr-gate writes" "a YAML merg
 
 isolated_gate_adopter="$tmproot/adopter-isolated-pr-gate"
 build_adopter "$isolated_gate_adopter"
-bash "$gen" pr-gate "$sha" --untrusted-runner self-hosted,isolated \
-  >"$isolated_gate_adopter/.github/workflows/changelog-contract.yml"
+write_generated_fixture "$isolated_gate_adopter/.github/workflows/changelog-contract.yml" \
+  pr-gate "$sha" --untrusted-runner self-hosted,isolated
 schedule_adopter_script "$isolated_gate_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "emitted suite accepts a PR gate generated with --untrusted-runner"
