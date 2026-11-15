@@ -77,6 +77,7 @@ platform	bash scripts/ci-gate/pulumi-comment.test.sh
 platform	python3 scripts/ci-gate/pulumi-private-node-packages.test.py
 platform	bash scripts/ci-gate/pulumi-comment-pipefail.test.sh
 platform	bash scripts/ci-gate/pulumi-untrusted-execution.test.sh
+platform	bash scripts/ci-gate/pulumi-environment-secrets.test.sh
 platform	bash scripts/ci-gate/ui-ci-untrusted-execution.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh

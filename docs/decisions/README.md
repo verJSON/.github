@@ -13,6 +13,7 @@ Reverse-chronological index of org-level decisions.
 | # | Date | Decision |
 |---|------|----------|
 | [0267](0267-container-gitlink-file-dependencies/README.md) | 2026-11-15 | Container acquisition accepts a pinned gitlink file dependency |
+| [0266](0266-pulumi-environment-scoped-token/README.md) | 2026-11-15 | Pulumi preview can read an environment-scoped token |
 | [0265](0265-node-ci-fixed-package-token/README.md) | 2026-11-14 | Node CI selects the package read token explicitly |
 | [0264](0264-node-ci-submodule-token-lifetime/README.md) | 2026-11-14 | Node CI submodule credentials end at checkout |
 | [0263](0263-pulumi-private-package-validation/README.md) | 2026-11-13 | Pulumi private packages use scriptless, step-scoped acquisition |

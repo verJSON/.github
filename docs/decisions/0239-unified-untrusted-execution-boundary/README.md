@@ -140,3 +140,14 @@ pinned auxiliary-source migration first.
 
 Revert the change; callers keep working. The `preview-environment` input is ignored by older
 copies, which would again auto-admit same-repository PRs.
+
+## 2026-11-15 — Secret scoping is a separate input
+
+[ADR 0266](../0266-pulumi-environment-scoped-token/README.md) adds optional
+`credential-environment` so a default-branch preview can read `PULUMI_ACCESS_TOKEN`
+from a caller environment. `preview-environment` stays the pull-request approval
+gate described above, not the token's storage boundary. When `credential-environment`
+is empty, this decision's pull-request environment expression and admission table
+are unchanged, and a trusted ref still binds no environment. When the input is
+set, that trusted ref binds it instead of the empty environment this decision
+assumed.
