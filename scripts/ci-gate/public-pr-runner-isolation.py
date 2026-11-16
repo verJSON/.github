@@ -2701,7 +2701,8 @@ RELAY_HEAD_REFUSAL = (
 # repo-hygiene/ui-ci left on 2026-11-15 (Part of #1831).
 # changelog/pulumi remaining/release-dispatch/propose left on 2026-11-15
 # (Part of #1831). helm-ci.yml lint-template left on 2026-11-16
-# (Part of #1831). The keys that remain are the
+# (Part of #1831). container-deployment/review-producer/release retention
+# left on 2026-11-16 (Part of #1831). The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
@@ -2715,20 +2716,6 @@ RELAY_HEAD_REFUSAL = (
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),
-    ('container-deployment-review-producer.yml [workflow_call]', 'publish-ai'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment-review-producer.yml [workflow_call]', 'publish-code'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment-review-producer.yml [workflow_call]', 'publish-security'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment.yml [workflow_call]', 'deploy'): frozenset({'relay-head'}),
-    ('container-deployment.yml [workflow_call]', 'dry-run'): frozenset({'relay-head'}),
-    ('container-release-workflow-ref-canary.yml [workflow_dispatch]:probe -> container-release.yml', 'retention'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-release.yml [workflow_call]', 'retention'): frozenset({'relay-head', 'runtime-checkout'}),
     ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
     ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),

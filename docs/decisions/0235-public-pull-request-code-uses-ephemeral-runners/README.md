@@ -1378,3 +1378,25 @@ snapshot, and `public-pr-runner-isolation.pending.tsv` together. The
 `caller-runner` catalog shape and Node CI markers stay unchanged.
 `release.yml` `verify`'s pending digest is refreshed because that row binds
 this checker; the job is unchanged.
+
+## Amendment (2026-11-16, #1831) — container deployment/review/release retention leave
+
+**Finding.** Nine relay jobs still resolved to a persistent runner for a public
+Verjson repository: `container-deployment.yml` / `deploy` and `dry-run`,
+`container-deployment-review-producer.yml` / `environment-preflight`,
+`analyze`, `publish-ai`, `publish-code`, and `publish-security`, and
+`container-release.yml` / `retention` (including the
+`container-release-workflow-ref-canary` probe that calls it). They shared
+`github.repository_owner != 'Verjson' && 'ubuntu-24.04' ||
+fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || …)`, so every Verjson
+call — public included — took the trusted/fallback pool.
+
+**Decision (Part of #1831).** The shared expression now matches the already
+reviewed owner-gated shape: private Verjson keeps
+`CI_LANE_TRUSTED || CI_LANE_FALLBACK`, public Verjson takes
+`visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`,
+and unresolved visibility fails through the untrusted/fallback tail. The nine
+keys leave `RELAY_BACKLOG`, the test snapshot, and
+`public-pr-runner-isolation.pending.tsv` together. Public pull-request callers
+remain rejected by the existing sentinel jobs. `release.yml` `verify`'s pending
+digest is refreshed because that row binds this checker; the job is unchanged.
