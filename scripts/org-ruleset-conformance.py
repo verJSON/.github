@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -834,7 +835,8 @@ def requires_bound_merge_admission(ruleset: dict, merge_admission: dict):
 def repository_default_branch_file_exists(repository: str, path: str, default_branch: str):
     """True when path exists on the repository default branch; False on HTTP 404."""
     encoded = path.replace(" ", "%20")
-    api_path = f"repos/{repository}/contents/{encoded}?ref={default_branch}"
+    # Query-position encoding: keep "/" literal (default-branch-uri-encoding.test.sh).
+    api_path = f"repos/{repository}/contents/{encoded}?ref={quote(default_branch)}"
     result = subprocess.run(
         [
             "gh",
