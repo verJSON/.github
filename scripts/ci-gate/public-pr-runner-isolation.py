@@ -2702,7 +2702,9 @@ RELAY_HEAD_REFUSAL = (
 # changelog/pulumi remaining/release-dispatch/propose left on 2026-11-15
 # (Part of #1831). helm-ci.yml lint-template left on 2026-11-16
 # (Part of #1831). container-deployment/review-producer/release retention
-# left on 2026-11-16 (Part of #1831). The keys that remain are the
+# left on 2026-11-16 (Part of #1831). seven TRUSTED||FALLBACK observe/
+# reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
+# The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
@@ -2716,13 +2718,10 @@ RELAY_HEAD_REFUSAL = (
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
-    ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
     ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
-    ('release-app-canary.yml [workflow_dispatch]', 'canary'): frozenset(),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     # The one full-checkout tolerance (Part of #1831): verify runs the release
@@ -2730,10 +2729,6 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     # programs it runs (tree_programs), never the whole tree.
     ('release.yml [workflow_dispatch]', 'verify'):
         frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
-    ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
 }
 

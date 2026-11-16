@@ -37,9 +37,15 @@ def validate(document: dict, raw: str) -> list[str]:
         problems.append("workflow GITHUB_TOKEN is not contents-read-only")
 
     job = (document.get("jobs") or {}).get("canary") or {}
-    expected_runner = "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+    expected_runner = (
+        "${{ github.event.repository.private == true && "
+        "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || "
+        "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+    )
     if job.get("runs-on") != expected_runner:
-        problems.append("canary does not route through the trusted organization lane and fallback")
+        problems.append(
+            "canary does not route private through TRUSTED||FALLBACK and public/unclassified through UNTRUSTED"
+        )
     if job.get("permissions") != {"contents": "read"}:
         problems.append("job GITHUB_TOKEN is not contents-read-only")
     steps = job.get("steps") or []
