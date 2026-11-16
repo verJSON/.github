@@ -2705,6 +2705,7 @@ RELAY_HEAD_REFUSAL = (
 # left on 2026-11-16 (Part of #1831). seven TRUSTED||FALLBACK observe/
 # reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
 # capability-floor-observe left on 2026-11-16 (Part of #1831).
+# ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
 # The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
@@ -2717,7 +2718,6 @@ RELAY_HEAD_REFUSAL = (
 # a new refusal; a kind the job no longer carries fails as STALE BACKLOG until
 # it is removed here.
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
-    ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),

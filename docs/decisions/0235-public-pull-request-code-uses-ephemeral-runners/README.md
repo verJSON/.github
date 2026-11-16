@@ -348,10 +348,13 @@ or a literal GitHub-hosted image.
    review digest binds; its entry was re-reviewed with that ref.
 
    `issue_comment` has no workflow in this repository. The one `workflow_run`
-   workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only
-   a trusted `Verjson/.github` revision. Downloading a workflow artifact is a
-   fetch, so a reviewed job that does so needs `dynamic: fetch`, and its
-   justification must say how the artifact is used.
+   workflow, `ai-promotion-retry.yml`, was a reviewed entry that checked out
+   only a trusted `Verjson/.github` revision (downloading a workflow artifact
+   is a fetch, so that reviewed job needed `dynamic: fetch` and a justification
+   for how the artifact is used). The 2026-11-16 `#1831` amendment retires that
+   reviewed row: the shared `resolve` job is now private-gated onto the
+   untrusted hosted lane for public evaluation, so the allowlist entry is
+   obsolete rather than a silent waiver.
 
 6. **Review procedure for adding or refreshing an entry.**
    1. Run `public-pr-runner-isolation.py --pending … --reviewed … .github/workflows`.
@@ -1438,4 +1441,29 @@ keep the privileged/fallback pool; public and unclassified events take the
 untrusted hosted lane. The key leaves `RELAY_BACKLOG`, the test snapshot, and
 `public-pr-runner-isolation.pending.tsv` together. `release.yml` `verify`'s
 pending digest is refreshed because that row binds this checker; the job is
+unchanged.
+
+## Amendment (2026-11-16, #1831) — ai-promotion-retry workflow_call resolve leaves
+
+**Finding.** `ai-promotion-retry.yml` / `resolve` still resolved to a
+persistent runner for a public Verjson repository because its `runs-on` was
+`github.repository_owner == 'Verjson' && fromJSON(vars.CI_RUNNER_FASTLANE ||
+vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || …)`. The `[workflow_call]`
+shape carried a relay-backlog pending row; the `[workflow_run]` shape was a
+separate reviewed privileged-event entry on the same job.
+
+**Decision (Part of #1831).** The shared job takes the already-reviewed
+private-gated expression `github.event.repository.private == true &&
+fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || …) ||
+fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`. Private repositories
+keep the trusted/fallback pool; public and unclassified events take the
+untrusted hosted lane. The `[workflow_call]` key leaves `RELAY_BACKLOG`, the
+test snapshot, and `public-pr-runner-isolation.pending.tsv` together. Under
+ADR 0235's public-repository evaluation (`private` is always false), that
+same expression is hosted-only, so the former `[workflow_run]` reviewed entry
+retires as stale rather than remaining as a no-longer-needed review. Fixture
+exemplars that used this job as the live sparse-digest or workflow_call
+caller target retarget to `runner-canary.yml` / `canary` and
+`node-ci-protected.yml` / `build-test`. `release.yml` `verify`'s pending
+digest is refreshed because that row binds this checker; the job is
 unchanged.
