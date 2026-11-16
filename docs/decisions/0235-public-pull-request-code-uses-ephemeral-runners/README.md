@@ -1339,3 +1339,21 @@ prior amendment. The five keys leave `RELAY_BACKLOG`, the test snapshot, and
 `validate` and `preview-admission` jobs keep their distinct expressions and
 remain in the backlog. `release.yml` `verify`'s pending digest is refreshed
 because that row binds this checker; the job is unchanged.
+
+## Amendment (2026-11-15, #1831) — pulumi remaining jobs and OVERFLOW adopters leave
+
+**Finding.** Six more `workflow_call` jobs still resolved to a persistent
+runner for a public Verjson repository: `pulumi-ci.yml` / `validate` and
+`preview-admission` (no `inputs.runner`, final `CI_LANE_UNTRUSTED ||
+CI_LANE_FALLBACK` tail), and `changelog-validate.yml` / `validate`,
+`changelog-release.yml` / `release`, `release-dispatch.yml` /
+`release-dispatch`, and `release-propose.yml` / `release-propose` (shared
+`CI_RUNNER_OVERFLOW` chain that honored `inputs.runner` on public calls).
+
+**Decision (Part of #1831).** Both shapes insert
+`visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`
+ahead of their fallback tails. The OVERFLOW adopters also gate `inputs.runner`
+to private Verjson or non-Verjson callers. The six keys leave `RELAY_BACKLOG`,
+the test snapshot, and `public-pr-runner-isolation.pending.tsv` together.
+`release.yml` `verify`'s pending digest is refreshed because that row binds
+this checker; the job is unchanged.
