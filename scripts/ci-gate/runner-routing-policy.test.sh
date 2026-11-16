@@ -1554,6 +1554,29 @@ grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUST
   && pass "TRUSTED||FALLBACK observe set routes public/unclassified onto the untrusted hosted lane" \
   || fail "TRUSTED||FALLBACK observe set public routing drifted (Part of #1831)"
 
+# Part of #1831: capability-floor-observe leaves; private keeps
+# PRIVILEGED||FALLBACK, public and unclassified take untrusted hosted.
+assert_route "$workflows/capability-floor-observe.yml" observe Verjson/verjson-authn '' true \
+  '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+  '["self-hosted","trusted-canary"]' \
+  "capability-floor-observe observe — private Verjson keeps the privileged lane"
+assert_route "$workflows/capability-floor-observe.yml" observe Verjson/.github '' false \
+  '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+  '["self-hosted","untrusted-canary"]' \
+  "capability-floor-observe observe — public Verjson takes the untrusted hosted lane, not PRIVILEGED/FALLBACK"
+assert_route "$workflows/capability-floor-observe.yml" observe Verjson/.github '' false \
+  '["self-hosted","trusted-canary"]' '' \
+  '["ubuntu-24.04"]' \
+  "capability-floor-observe observe — public with unset untrusted lane takes the hosted tail"
+assert_route "$workflows/capability-floor-observe.yml" observe Verjson/.github '' '' \
+  '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+  '["self-hosted","untrusted-canary"]' \
+  "capability-floor-observe observe — unresolved visibility fails safe to the untrusted lane"
+grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/capability-floor-observe.yml" \
+  && pass "capability-floor-observe routes public/unclassified onto the untrusted hosted lane" \
+  || fail "capability-floor-observe public routing drifted (Part of #1831)"
+
 
 for job in validate preview-admission; do
   expr_no_override="$(extract_runs_on "$workflows/pulumi-ci.yml" "$job")"

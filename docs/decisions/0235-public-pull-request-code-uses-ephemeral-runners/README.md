@@ -1423,3 +1423,19 @@ leave `RELAY_BACKLOG`, the test snapshot, and
 `public-pr-runner-isolation.pending.tsv` together. `release.yml` `verify`'s
 pending digest is refreshed because that row binds this checker; the job is
 unchanged.
+
+## Amendment (2026-11-16, #1831) — capability-floor-observe leaves
+
+**Finding.** `capability-floor-observe.yml` / `observe` still resolved to a
+persistent runner for a public Verjson repository because its `runs-on` was
+only `fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || …)`.
+
+**Decision (Part of #1831).** The job takes the already-reviewed private-gated
+expression `github.event.repository.private == true &&
+fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || …) ||
+fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`. Private repositories
+keep the privileged/fallback pool; public and unclassified events take the
+untrusted hosted lane. The key leaves `RELAY_BACKLOG`, the test snapshot, and
+`public-pr-runner-isolation.pending.tsv` together. `release.yml` `verify`'s
+pending digest is refreshed because that row binds this checker; the job is
+unchanged.
