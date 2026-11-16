@@ -2698,7 +2698,9 @@ RELAY_HEAD_REFUSAL = (
 # actionlint.yml's workflow_call job left on 2026-11-15 (Part of #1831).
 # container-candidate.yml's three workflow_call jobs left on 2026-11-15
 # (Part of #1831). generated-artifacts/notify-umbrella/pulumi-ci preview/
-# repo-hygiene/ui-ci left on 2026-11-15 (Part of #1831). The keys that remain are the
+# repo-hygiene/ui-ci left on 2026-11-15 (Part of #1831).
+# changelog/pulumi remaining/release-dispatch/propose left on 2026-11-15
+# (Part of #1831). The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
@@ -2712,8 +2714,6 @@ RELAY_HEAD_REFUSAL = (
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('changelog-validate.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
     ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
         frozenset({'relay-head', 'runtime-checkout'}),
     ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),
@@ -2735,11 +2735,7 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
     ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
-    ('pulumi-ci.yml [workflow_call]', 'preview-admission'): frozenset(),
-    ('pulumi-ci.yml [workflow_call]', 'validate'): frozenset({'relay-head'}),
     ('release-app-canary.yml [workflow_dispatch]', 'canary'): frozenset(),
-    ('release-dispatch.yml [workflow_call]', 'release-dispatch'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('release-propose.yml [workflow_call]', 'release-propose'): frozenset({'relay-head', 'runtime-checkout'}),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     # The one full-checkout tolerance (Part of #1831): verify runs the release

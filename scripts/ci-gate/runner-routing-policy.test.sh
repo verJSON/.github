@@ -1202,10 +1202,6 @@ policy_jobs() {
 node-ci.yml eligibility
 node-ci.yml build-test
 helm-ci.yml lint-template
-pulumi-ci.yml validate
-pulumi-ci.yml preview-admission
-changelog-validate.yml validate
-changelog-release.yml release
 TARGETS
 }
 
@@ -1247,15 +1243,35 @@ grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubunt
 
 # Part of #1831: shared untrusted||FALLBACK adopters leave the shared policy_jobs
 # loop once public visibility takes the hosted untrusted tail.
-for shared_target in \
-  "generated-artifacts.yml validate" \
-  "notify-umbrella.yml dispatch" \
-  "pulumi-ci.yml preview" \
-  "repo-hygiene.yml hygiene" \
-  "ui-ci.yml build-test"
-do
-  set -- $shared_target
-  wf_name="$1"; job="$2"
+shared_fallback_jobs() {
+  cat <<'TARGETS'
+changelog-release.yml release
+changelog-validate.yml validate
+generated-artifacts.yml validate
+notify-umbrella.yml dispatch
+pulumi-ci.yml preview
+pulumi-ci.yml preview-admission
+pulumi-ci.yml validate
+release-dispatch.yml release-dispatch
+release-propose.yml release-propose
+repo-hygiene.yml hygiene
+ui-ci.yml build-test
+TARGETS
+}
+shared_runner_input_jobs() {
+  cat <<'TARGETS'
+changelog-release.yml release
+changelog-validate.yml validate
+generated-artifacts.yml validate
+notify-umbrella.yml dispatch
+pulumi-ci.yml preview
+release-dispatch.yml release-dispatch
+release-propose.yml release-propose
+repo-hygiene.yml hygiene
+ui-ci.yml build-test
+TARGETS
+}
+while read -r wf_name job; do
   wf="$workflows/$wf_name"
   name="${wf_name%.yml} $job"
   assert_route "$wf" "$job" Verjson/verjson-authn '' true \
@@ -1275,6 +1291,10 @@ do
   assert_route "$wf" "$job" Acme/widgets '' true '' '' \
     'ubuntu-24.04' \
     "$name — external callers stay portable on hosted"
+done < <(shared_fallback_jobs)
+while read -r wf_name job; do
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml} $job"
   assert_route "$wf" "$job" Verjson/.github '["self-hosted","manish"]' false \
     '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
     '["ubuntu-24.04"]' \
@@ -1283,7 +1303,7 @@ do
   assert_route "$wf" "$job" Verjson/verjson-authn '["self-hosted","manish"]' true '' '' \
     '["self-hosted","manish"]' \
     "$name — private Verjson honors inputs.runner"
-done
+done < <(shared_runner_input_jobs)
 grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
   "$workflows/notify-umbrella.yml" \
   && grep -qF "(github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner" \
@@ -1348,8 +1368,6 @@ done <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
 helm-ci.yml lint-template
-changelog-validate.yml validate
-changelog-release.yml release
 container-candidate.yml prepare
 container-candidate.yml pull-request-build
 TARGETS
