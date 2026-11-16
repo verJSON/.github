@@ -2626,12 +2626,12 @@ BACKLOG_DIGEST_LINE = re.compile(r"backlog digest (sha256:[0-9a-f]{64})")
 
 
 def backlog_fixture(steps: str, extra: str = "") -> dict[str, str]:
-    """capability-floor-observe.yml's `observe`, a backlog job with no refusal."""
+    """release.yml's `publish`, a backlog job with no refusal."""
     return {
-        "capability-floor-observe.yml": f"""
+        "release.yml": f"""
             on: workflow_dispatch
             jobs:
-              observe:
+              publish:
                 runs-on: [self-hosted, general]
 {textwrap.indent(textwrap.dedent(extra), " " * 16)}
                 steps:
@@ -2677,7 +2677,7 @@ PENDING_ARGS = ("--pending", "{dir}/pending.tsv")
 # The relay backlog is an exact pending ratchet keyed to the backlog digest. It
 # is frozen in code, so these fixtures use real backlog keys: runner-canary's
 # `canary` carried a relayed-head refusal when the backlog was frozen, and
-# capability-floor-observe's `observe` carried none.
+# release.yml's `publish` carried none.
 def backlog_relay(name: str, job: str, steps: str, runs_on: str = "[self-hosted, general]") -> dict[str, str]:
     return {name: relay_job("workflow_dispatch", steps, runs_on)["relay.yml"].replace("\n              j:\n", f"\n              {job}:\n")}
 
@@ -2699,13 +2699,13 @@ MOVED = backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD, "[self-hosted,
 expect({**MOVED, "pending.tsv": HEAD_PENDING}, 1,
        ("pending row no longer applies: backlog digest changed",),
        "a backlog row stops applying when the selector changes", "--pending", "{dir}/pending.tsv")
-OBSERVE_PLAIN = backlog_relay("capability-floor-observe.yml", "observe", "- run: echo maintenance")
-OBSERVE_PLAIN_PENDING = backlog_row(OBSERVE_PLAIN, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+OBSERVE_PLAIN = backlog_relay("release.yml", "publish", "- run: echo maintenance")
+OBSERVE_PLAIN_PENDING = backlog_row(OBSERVE_PLAIN, "release.yml [workflow_dispatch]", "publish")
 expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING}, 0,
-       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
+       ("PENDING: release.yml [workflow_dispatch]: job 'publish'",),
        "a backlog row ratchets a known relayed job with no refusal", "--pending", "{dir}/pending.tsv")
 expect_no_pending(
-    {**backlog_relay("capability-floor-observe.yml", "observe", PROBES["workflow_dispatch"][0]),
+    {**backlog_relay("release.yml", "publish", PROBES["workflow_dispatch"][0]),
      "pending.tsv": OBSERVE_PLAIN_PENDING},
     "a backlog job that gains a head-materializing checkout is refused, whatever its row says",
     (RELAY_REFUSAL, "a pending row cannot waive a refusal"),
@@ -2717,7 +2717,7 @@ expect({**backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD, "ubuntu-24.0
        1, ("STALE PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
        "a backlog row for a job moved to a hosted runner is stale", "--pending", "{dir}/pending.tsv")
 expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING,
-        "reviewed.tsv": review_row(OBSERVE_PLAIN, "capability-floor-observe.yml [workflow_dispatch]", "observe")},
+        "reviewed.tsv": review_row(OBSERVE_PLAIN, "release.yml [workflow_dispatch]", "publish")},
        2, ("UNDETERMINED", "in both the pending and the reviewed list"),
        "a relayed job listed as both pending and reviewed is undetermined",
        "--pending", "{dir}/pending.tsv", *REVIEWED_ARGS)
@@ -2817,9 +2817,9 @@ expect(
 UNPINNED_OBSERVE = backlog_fixture("- run: echo observe", "container: alpine:3")
 expect_no_pending(
     {**UNPINNED_OBSERVE,
-     "pending.tsv": backlog_row(UNPINNED_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")},
+     "pending.tsv": backlog_row(UNPINNED_OBSERVE, "release.yml [workflow_dispatch]", "publish")},
     "a matching backlog row cannot waive a refusal: an unpinned job image still fails",
-    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'",
      "must be pinned by an @sha256: digest"),
     *PENDING_ARGS,
 )
@@ -2839,10 +2839,10 @@ expect(
 # names: an edit that keeps both (here, a different command) stops the row
 # applying, so the backlog cannot carry a job that changed after it froze.
 expect_no_pending(
-    {**backlog_relay("capability-floor-observe.yml", "observe", "- run: bash -c \"$PAYLOAD\""),
+    {**backlog_relay("release.yml", "publish", "- run: bash -c \"$PAYLOAD\""),
      "pending.tsv": OBSERVE_PLAIN_PENDING},
     "a backlog row stops applying when the job's content changes under the same selector and reasons",
-    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'", "pending row no longer applies"),
     *PENDING_ARGS,
 )
 expect_no_pending(
@@ -2850,13 +2850,13 @@ expect_no_pending(
         for name, body in OBSERVE_PLAIN.items()},
      "pending.tsv": OBSERVE_PLAIN_PENDING},
     "a backlog row stops applying when the job's inherited workflow settings change",
-    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'", "pending row no longer applies"),
     *PENDING_ARGS,
 )
 
 # A local action is the job's own steps, so its bytes bind the backlog row too.
 ACTION_OBSERVE = {
-    **backlog_relay("capability-floor-observe.yml", "observe", "- uses: ./.github/actions/observe"),
+    **backlog_relay("release.yml", "publish", "- uses: ./.github/actions/observe"),
     ".github/actions/observe/action.yml": """
         runs:
           using: composite
@@ -2869,9 +2869,9 @@ expect_no_pending(
     {**ACTION_OBSERVE,
      ".github/actions/observe/action.yml": ACTION_OBSERVE[".github/actions/observe/action.yml"].replace(
          "echo observe", "bash -c \"$PAYLOAD\""),
-     "pending.tsv": backlog_row(ACTION_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")},
+     "pending.tsv": backlog_row(ACTION_OBSERVE, "release.yml [workflow_dispatch]", "publish")},
     "a backlog row stops applying when a local action the job runs changes",
-    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'", "pending row no longer applies"),
     *PENDING_ARGS,
 )
 
@@ -3031,9 +3031,9 @@ for label, dockerfile in (
 # (Part of #1831). container-deployment/review-producer/release retention
 # left on 2026-11-16 (Part of #1831). seven TRUSTED||FALLBACK observe/
 # reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
+# capability-floor-observe left on 2026-11-16 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
-    ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
@@ -3626,8 +3626,8 @@ else:
 # behavior changed. Head detection never read a program run by a bare
 # relative path (`scripts/x.sh`), and the backlog digest bound neither the
 # bytes a sparse checkout puts on disk nor the programs a full-checkout job
-# runs. These fixtures copy a live relay-backlog job and its sparse scripts
-# (capability-floor-observe after rework-reconcile left; Part of #1831).
+# runs. These fixtures copy a live relay-backlog job
+# (ai-promotion-retry after capability-floor-observe left; Part of #1831).
 # ---------------------------------------------------------------------------
 def live(path: str) -> str:
     with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
@@ -3694,44 +3694,48 @@ jobs:
 
 
 REWORK = {
-    # After #1831 moved rework-reconcile off the backlog, these round-5 digests
-    # bind the live capability-floor-observe job that remains (Part of #1831).
-    "capability-floor-observe.yml": live(".github/workflows/capability-floor-observe.yml"),
+    # After #1831 moved capability-floor-observe off the backlog, these round-5
+    # digests bind the live ai-promotion-retry resolve job that remains
+    # (Part of #1831). promote → ai-privileged-merge → app-key-environment, so
+    # the fixture tree must carry that chain or the checker exits undetermined.
+    "ai-promotion-retry.yml": live(".github/workflows/ai-promotion-retry.yml"),
+    "ai-privileged-merge.yml": live(".github/workflows/ai-privileged-merge.yml"),
+    "app-key-environment.yml": live(".github/workflows/app-key-environment.yml"),
     **{path: live(path) for path in (
-        "scripts/capability-floor-discovery.py",
-        "scripts/capability-floor-audit.py",
-        "scripts/github_identity.py",
-        "scripts/shared_checkout_fetch.py",
-        "config/capability-floor-consumers.json",
-        "config/capability-floors.json",
-        "scripts/gen-ai-review-caller.sh",
-        "scripts/gen-ai-review-label-rearm-caller.sh",
-        "scripts/gen-ai-review-lifecycle-rearm-caller.sh",
-        "scripts/gen-changelog-caller.sh",
-        "scripts/gen-gate-rearm-caller.sh",
-        "scripts/gen-privileged-merge-caller.sh",
+        "scripts/ci-gate/review-policy-envelope.py",
     )},
 }
-REWORK_LABEL = ("capability-floor-observe.yml [workflow_dispatch]", "observe")
+REWORK_LABEL = ("ai-promotion-retry.yml [workflow_call]", "resolve")
 REWORK_PENDING = backlog_row(REWORK, *REWORK_LABEL)
-expect({**REWORK, "pending.tsv": REWORK_PENDING}, 0,
-       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
-       "the live capability-floor-observe job is ratcheted by its own backlog row", *PENDING_ARGS)
+# workflow_run resolve is a privileged-event reviewed job on the same file;
+# carry the live reviewed row (including its dynamic: field) so the
+# workflow_call pending ratchet is what the exit status measures.
+REWORK_REVIEWED = next(
+    f"{line}\n"
+    for line in live("scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv").splitlines()
+    if line.startswith("ai-promotion-retry.yml [workflow_run]\tresolve\t")
+)
+REWORK_ARGS = (*PENDING_ARGS, *REVIEWED_ARGS)
+expect({**REWORK, "pending.tsv": REWORK_PENDING, "reviewed.tsv": REWORK_REVIEWED}, 0,
+       ("PENDING: ai-promotion-retry.yml [workflow_call]: job 'resolve'",),
+       "the live ai-promotion-retry resolve job is ratcheted by its own backlog row", *REWORK_ARGS)
+# This key already tolerates relay-head, so a sparse-script head checkout is
+# not a new refusal kind; the pending row fails on the digest change instead.
 expect_no_pending(
-    {**REWORK, "pending.tsv": REWORK_PENDING,
-     "scripts/capability-floor-discovery.py": REWORK["scripts/capability-floor-discovery.py"]
+    {**REWORK, "pending.tsv": REWORK_PENDING, "reviewed.tsv": REWORK_REVIEWED,
+     "scripts/ci-gate/review-policy-envelope.py": REWORK["scripts/ci-gate/review-policy-envelope.py"]
      + 'gh pr checkout "$PR"\ngit fetch origin "refs/pull/$PR/head" && git checkout FETCH_HEAD\n'},
-    "round-5 repro: a backlog job's bare-path script that starts checking out a pull request head is refused",
-    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", RELAY_REFUSAL),
-    *PENDING_ARGS,
+    "round-5 repro: a backlog job's bare-path script change stops the pending row applying",
+    ("VIOLATION: ai-promotion-retry.yml [workflow_call]: job 'resolve'", "pending row no longer applies"),
+    *REWORK_ARGS,
 )
 expect_no_pending(
-    {**REWORK, "pending.tsv": REWORK_PENDING,
-     "scripts/capability-floor-discovery.py": REWORK["scripts/capability-floor-discovery.py"]
+    {**REWORK, "pending.tsv": REWORK_PENDING, "reviewed.tsv": REWORK_REVIEWED,
+     "scripts/ci-gate/review-policy-envelope.py": REWORK["scripts/ci-gate/review-policy-envelope.py"]
      + 'print("digest-bump")\n'},
     "a backlog row stops applying when any file the job's sparse checkout holds changes",
-    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
-    *PENDING_ARGS,
+    ("VIOLATION: ai-promotion-retry.yml [workflow_call]: job 'resolve'", "pending row no longer applies"),
+    *REWORK_ARGS,
 )
 
 # Head detection follows a bare relative path in any command position: after
@@ -3745,10 +3749,10 @@ BARE_STEPS = {
     "after an assignment": "- run: MODE=weekly tools/observe.sh",
 }
 for label, step in BARE_STEPS.items():
-    job = {**backlog_relay("capability-floor-observe.yml", "observe", SPARSE_TOOLS + step),
+    job = {**backlog_relay("release.yml", "publish", SPARSE_TOOLS + step),
            "tools/observe.sh": "echo observe\n"}
     expect_no_pending(
-        {**job, "pending.tsv": backlog_row(job, "capability-floor-observe.yml [workflow_dispatch]", "observe"),
+        {**job, "pending.tsv": backlog_row(job, "release.yml [workflow_dispatch]", "publish"),
          "tools/observe.sh": "gh pr checkout \"$PR\"\n"},
         f"a bare relative program ({label}) that starts checking out a head is refused",
         (RELAY_REFUSAL,),
@@ -3757,11 +3761,11 @@ for label, step in BARE_STEPS.items():
 # Every file the sparse checkout holds binds the row, so a script two calls
 # deep is bound by its bytes, not by following the call.
 NESTED = {
-    **backlog_relay("capability-floor-observe.yml", "observe", SPARSE_TOOLS + "- run: bash tools/outer.sh"),
+    **backlog_relay("release.yml", "publish", SPARSE_TOOLS + "- run: bash tools/outer.sh"),
     "tools/outer.sh": "#!/usr/bin/env bash\n\"$(dirname \"$0\")/inner.sh\" --weekly\n",
     "tools/inner.sh": "echo inner\n",
 }
-NESTED_ROW = backlog_row(NESTED, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+NESTED_ROW = backlog_row(NESTED, "release.yml [workflow_dispatch]", "publish")
 expect_no_pending(
     {**NESTED, "tools/inner.sh": "echo inner changed\n", "pending.tsv": NESTED_ROW},
     "a backlog row stops applying when a script reached only through a variable changes",
@@ -3771,7 +3775,7 @@ expect_no_pending(
 # A command word that is not a tracked file is not a program to follow, so a
 # step naming a head value beside it is not made undetermined by it.
 UNTRACKED_WORD = backlog_relay(
-    "capability-floor-observe.yml", "observe",
+    "release.yml", "publish",
     "- uses: actions/checkout@v4\n- run: node_modules/.bin/tool \"$SHA\"\n"
     "  env:\n    SHA: ${{ github.event.pull_request.head.sha }}",
 )
@@ -3784,11 +3788,11 @@ else:
 # A sparse checkout's bytes bind the backlog row, except the pending and
 # reviewed lists themselves, which a checkout of their directory holds.
 SPARSE_OBSERVE = {
-    **backlog_relay("capability-floor-observe.yml", "observe",
+    **backlog_relay("release.yml", "publish",
                     "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: config\n- run: echo observe"),
     "config/policy.json": '{"allow": false}\n',
 }
-SPARSE_PENDING = backlog_row(SPARSE_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+SPARSE_PENDING = backlog_row(SPARSE_OBSERVE, "release.yml [workflow_dispatch]", "publish")
 expect_no_pending(
     {**SPARSE_OBSERVE, "config/policy.json": '{"allow": true}\n', "pending.tsv": SPARSE_PENDING},
     "a backlog row stops applying when a file its sparse checkout puts on disk changes",
@@ -3796,12 +3800,12 @@ expect_no_pending(
     *PENDING_ARGS,
 )
 LISTS_OBSERVE = backlog_relay(
-    "capability-floor-observe.yml", "observe",
+    "release.yml", "publish",
     "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: .github/workflows\n- run: echo observe",
 )
-LISTS_ROW = backlog_row(LISTS_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+LISTS_ROW = backlog_row(LISTS_OBSERVE, "release.yml [workflow_dispatch]", "publish")
 expect({**LISTS_OBSERVE, "pending.tsv": LISTS_ROW}, 0,
-       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
+       ("PENDING: release.yml [workflow_dispatch]: job 'publish'",),
        "a backlog row whose checkout holds the pending list still matches its own row", *PENDING_ARGS)
 
 # Round-5 should-fix (M1c): tolerance is the key's own frozen kinds, never a
@@ -3832,18 +3836,18 @@ UNBOUND = "a backlog row cannot bind"
 
 
 def observe_job(steps: str, files: dict | None = None) -> dict[str, str]:
-    return {**backlog_relay("capability-floor-observe.yml", "observe", steps), **(files or {})}
+    return {**backlog_relay("release.yml", "publish", steps), **(files or {})}
 
 
 def expect_backlog(job: dict[str, str], refused: bool, label: str) -> None:
-    row = backlog_row(job, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+    row = backlog_row(job, "release.yml [workflow_dispatch]", "publish")
     if refused:
         expect_no_pending({**job, "pending.tsv": row}, label,
-                          ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", UNBOUND),
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'", UNBOUND),
                           *PENDING_ARGS)
     else:
         expect({**job, "pending.tsv": row}, 0,
-               ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",), label, *PENDING_ARGS)
+               ("PENDING: release.yml [workflow_dispatch]: job 'publish'",), label, *PENDING_ARGS)
 
 
 TOOL = {"scripts/tool.py": "print('tool')\n", "scripts/other.py": "print('other')\n"}
@@ -3914,7 +3918,7 @@ for label, step, followed in (
     ("bash -ec inline", "- run: bash -ec 'echo tools/x.sh'", False),
     ("node -e inline", "- run: node -e 'console.log(1)' tools/x.sh", False),
 ):
-    job = {**backlog_relay("capability-floor-observe.yml", "observe", SPARSE_TOOLS + step),
+    job = {**backlog_relay("release.yml", "publish", SPARSE_TOOLS + step),
            "tools/x.sh": 'gh pr checkout "$PR"\n'}
     code, output = run_checker(job)
     if (RELAY_REFUSAL in output) == followed and code == 1:
