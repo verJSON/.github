@@ -820,9 +820,9 @@ scripts through a variable.
   Every other form the trace cannot resolve refuses. For what remains, the
   protection is code review of `main`, not this checker. The live
   `release.yml` `verify` job left the persistent pool on 2026-11-16 (public
-  hosted gate on `release_runner_expr`; see amendment below). The
-  `RELAY_BACKLOG` full-checkout tolerance and fixture suite remain until those
-  synthetic self-hosted verify fixtures are retired.
+  hosted gate on `release_runner_expr`; see amendment below). Live
+  `RELAY_BACKLOG` no longer grants `full-checkout`; fixtures temporarily
+  restore that key for the synthetic self-hosted verify ratchet suite.
 
 **Trade-off.** Every converted job must now list what it reads, and adding a
 file to a job means editing its sparse list. The closure test catches a
@@ -1524,7 +1524,8 @@ public repositories onto literal `["ubuntu-24.04"]` before the private Verjson
 a release stay on one pool (#465). On the scanned public tree, `verify` no
 longer reaches a persistent runner and leaves `public-pr-runner-isolation.pending.tsv`.
 `publish` and `snapshot` remain pending: they are remote callees whose
-placement the checker cannot read. The `RELAY_BACKLOG` verify key and its
-full-checkout fixture suite stay until those synthetic fixtures are retired;
-only the live pending row is removed. Regenerate `.github/workflows/release.yml`
+placement the checker cannot read. The live `RELAY_BACKLOG` verify key is
+removed with the pending row; the isolation fixture suite temporarily
+restores that key against a synthetic self-hosted verify job so the
+full-checkout ratchet remains covered. Regenerate `.github/workflows/release.yml`
 from `scripts/gen-changelog-caller.sh release-node` at the existing contract pin.

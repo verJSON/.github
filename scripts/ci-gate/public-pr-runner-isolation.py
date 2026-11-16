@@ -2726,11 +2726,9 @@ RELAY_HEAD_REFUSAL = (
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
-    # The one full-checkout tolerance (Part of #1831): verify runs the release
-    # suite on the tagged commit and is generator-pinned. Its row binds the
-    # programs it runs (tree_programs), never the whole tree.
-    ('release.yml [workflow_dispatch]', 'verify'):
-        frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
+    # release.yml verify left the live backlog on 2026-11-16 (Part of #1831):
+    # public-hosted gate on release_runner_expr. Fixture suites that still
+    # exercise the full-checkout ratchet re-add this key temporarily.
 }
 
 
