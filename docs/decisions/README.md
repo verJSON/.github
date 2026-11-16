@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0269](0269-retire-owner-admin-merge-bypass/README.md) | 2026-11-16 | Retire owner `--admin` merge bypass from the autonomous terminal path |
 | [0268](0268-bootstrap-generated-gate-callers-and-subset-pin-swaps/README.md) | 2026-11-15 | A review-caller bootstrap may move generated gate callers and a subset of mirrored pins |
 | [0267](0267-container-gitlink-file-dependencies/README.md) | 2026-11-15 | Container acquisition accepts a pinned gitlink file dependency |
 | [0266](0266-pulumi-environment-scoped-token/README.md) | 2026-11-15 | Pulumi preview can read an environment-scoped token |
