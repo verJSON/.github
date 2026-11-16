@@ -1500,6 +1500,7 @@ known materializing pattern. The job moves from `RELAY_BACKLOG` /
 `public-pr-runner-isolation.pending.tsv` onto
 `public-pr-runner-isolation.reviewed.tsv`: it remains self-hosted to prove the
 named runner, performs no repository checkout, and records dispatch metadata
-only. Fixture exemplars that used this job as the live sparse-digest target
-retarget to `node-ci.yml` / `build-test`. `release.yml` `verify`'s pending
+only. Fixture exemplars that used this job as the live sparse-digest or
+relay-head backlog target retarget to `release.yml` / `publish` and the
+live reviewed canary entry. `release.yml` `verify`'s pending
 digest is refreshed because that row binds this checker; the job is unchanged.
