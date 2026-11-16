@@ -32,13 +32,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Refuse a symlink at the outage-monitor checkout path
+        env:
+          OUTAGE_TRUST: .outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         run: |
-          if [ -L .outage-trust ]; then echo "::error::.outage-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
+          if [ -L "$OUTAGE_TRUST" ]; then echo "::error::$OUTAGE_TRUST is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out the merge-admission outage monitor
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          path: .outage-trust
+          path: .outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           persist-credentials: false
           sparse-checkout: |
             scripts/ci-gate/merge-admission-outage.py
@@ -47,4 +49,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-        run: python3 -I .outage-trust/scripts/ci-gate/merge-admission-outage.py
+          OUTAGE_TRUST: .outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        run: python3 -I "$OUTAGE_TRUST/scripts/ci-gate/merge-admission-outage.py"
+      - name: Remove the isolated outage-monitor checkout
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}
+        run: rm -rf ".outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
