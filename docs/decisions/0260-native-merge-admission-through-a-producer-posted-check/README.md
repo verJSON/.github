@@ -700,3 +700,24 @@ and tests live beside the existing binding
 **Verification.** `bash scripts/ci-gate/merge-admission-caller-contract.test.sh`;
 `python3 scripts/org_ruleset_conformance_test.py`; read-only REST and hosted-minute
 figures above; runbook and ADR cross-links.
+
+## 2026-11-16 amendment: canary ruleset create and enable
+
+After #2140 landed the code gates on `main`, the canary ruleset was created and
+enabled on 2026-11-16:
+
+- **Create (disabled):** org ruleset `merge-admission-required` id **27387670**,
+  `repository_id` `[1269388380]`, refs `~DEFAULT_BRANCH` and `refs/heads/develop`,
+  required check `merge-admission` bound to App **4528902**, bypass actors matching
+  the reviewed contract (OrganizationAdmin, Renovate 2740, release 4583107, merge
+  4693283; not 4528902).
+- **Pre-creation / full receipts:** `org-ruleset-conformance.py` exit 0 with
+  `merge-admission-receipt=pre-creation … ruleset_state=absent` before create; after
+  create, `… ruleset_id=27387670 enforcement=disabled`; after enable,
+  `… enforcement=active` (C8 canary scope + caller/trigger presence included).
+- **Policy pin:** `bypass_actor_contracts` entry for `merge-admission-required` sets
+  `ruleset_id` to **27387670**.
+- **C3-OBS (canary-only):** ≥20 pre-merge bound-App SUCCESSes on this repository
+  recorded on #2031 (24 distinct check-run ids since #2055).
+- **Decision 7 canaries** and #2031 close receipts are recorded on the issue after
+  enablement.

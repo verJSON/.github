@@ -478,7 +478,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                         ],
                     },
                     {
-                        "ruleset_id": None,
+                        "ruleset_id": 27387670,
                         "name": "merge-admission-required",
                         "bypass_actors": [
                             {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"},

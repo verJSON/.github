@@ -24,5 +24,9 @@ C10 (ii)). The monitor checkout path is unique per run, attempt, and job; job
 
 `scripts/gen-merge-admission-caller.sh` emits consumer callers pinned to
 `Verjson/.github/.github/workflows/merge-admission.yml@<sha>`; this repository keeps
-its relative-path producer caller. Live ruleset create/enablement and Decision 7
-canaries remain the ops close after these gates land on main.
+its relative-path producer caller.
+
+Org ruleset `merge-admission-required` (**27387670**) is created on canary
+`repository_id` 1269388380, requiring `merge-admission` bound to App 4528902, and
+enabled after the full conformance receipt. The bypass contract pins
+`ruleset_id` 27387670.
