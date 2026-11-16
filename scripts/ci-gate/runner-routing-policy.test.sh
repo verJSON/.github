@@ -1203,7 +1203,6 @@ grep -qF "github.event.repository.visibility == 'public'" "$workflows/actionlint
 # missing from this list is caught by the no-owner-wide-route sweep below.
 policy_jobs() {
   cat <<'TARGETS'
-node-ci.yml eligibility
 node-ci.yml build-test
 TARGETS
 }
@@ -1370,7 +1369,6 @@ while read -r wf_name job; do
   assert_route "$wf" "$job" Verjson/verjson-authn '["self-hosted","manish"]' true '' '' \
     '["self-hosted","manish"]' "$name — explicit runner input wins"
 done <<'TARGETS'
-node-ci.yml eligibility
 node-ci.yml build-test
 container-candidate.yml prepare
 container-candidate.yml pull-request-build
@@ -1380,8 +1378,8 @@ TARGETS
 # lifecycle rebuild and candidate script sandbox exit unless
 # RUNNER_ENVIRONMENT=github-hosted. The trusted-ref (push/main) build must
 # therefore take the same ephemeral hosted lane as the PR build, overriding a
-# caller's self-hosted `runner` input, while eligibility keeps the caller's
-# route so only the job that needs hosted capacity pays for it.
+# caller's self-hosted `runner` input. Eligibility itself is also on the
+# untrusted hosted lane (Part of #1831), so it no longer follows inputs.runner.
 assert_secretless_route() {
   local mode="$1"
   shift
@@ -1420,10 +1418,10 @@ for wf_name in node-ci.yml node-ci-protected.yml; do
     '["self-hosted","general"]' "$name build-test — a credentialed push keeps the caller's runner (no extra hosted spend)"
   assert_secretless_route trusted-ref "$wf" eligibility Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
-    '["self-hosted","general"]' "$name eligibility — secretless trusted-ref keeps the caller's self-hosted runner"
+    '["ubuntu-24.04"]' "$name eligibility — secretless trusted-ref stays on the untrusted hosted lane"
   assert_secretless_route pr "$wf" eligibility Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
-    '["self-hosted","general"]' "$name eligibility — secretless PR keeps the caller's self-hosted runner"
+    '["ubuntu-24.04"]' "$name eligibility — secretless PR stays on the untrusted hosted lane"
 done
 
 # Mutation probes ensure both secretless selector terms independently keep trusted-ref.
@@ -1601,6 +1599,31 @@ grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUST
   && pass "ai-promotion-retry resolve routes public/unclassified onto the untrusted hosted lane" \
   || fail "ai-promotion-retry resolve public routing drifted (Part of #1831)"
 
+# Part of #1831: node-ci eligibility leaves the relay backlog on untrusted-lane.
+eligibility_untrusted="$(PYTHONPATH="$root/scripts" python3 -c 'from runner_lane_catalog import expression; print(expression("untrusted-lane"))')"
+for wf_name in node-ci.yml node-ci-protected.yml; do
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml}"
+  assert_route "$wf" eligibility Verjson/verjson-cli '' true \
+    '["self-hosted","private-canary"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "$name eligibility — private Verjson uses the untrusted hosted lane"
+  assert_route "$wf" eligibility Verjson/.github '' false \
+    '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "$name eligibility — public Verjson uses the untrusted hosted lane" \
+    '["self-hosted","general"]'
+  assert_route "$wf" eligibility Verjson/verjson-cli '["self-hosted","manish"]' true \
+    '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' \
+    "$name eligibility — ignores inputs.runner"
+done
+grep -qF "$eligibility_untrusted" "$workflows/node-ci.yml" \
+  && grep -qF "$eligibility_untrusted" "$workflows/node-ci-protected.yml" \
+  && pass "node-ci eligibility stamps the catalog untrusted-lane selector" \
+  || fail "node-ci eligibility untrusted-lane stamp drifted (Part of #1831)"
+
+
 
 for job in validate preview-admission; do
   expr_no_override="$(extract_runs_on "$workflows/pulumi-ci.yml" "$job")"
@@ -1644,7 +1667,8 @@ for name in $policy_files; do
         && [ "$value" = '${{ fromJSON(vars.CI_LANE_UNTRUSTED || '\''["ubuntu-24.04"]'\'') }}' ]; then
       continue
     fi
-    if [ "$name" = node-ci.yml ] && [ "$job" = acquire-secretless-dependencies ] \
+    if { [ "$name" = node-ci.yml ] || [ "$name" = node-ci-protected.yml ]; } \
+        && { [ "$job" = acquire-secretless-dependencies ] || [ "$job" = eligibility ]; } \
       && [ "$value" = "\${{ $expected_node_untrusted_selector }}" ]; then
       continue
     fi
