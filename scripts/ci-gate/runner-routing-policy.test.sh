@@ -328,7 +328,7 @@ unsafe_portable="$(
     | grep -v "github.repository_owner != 'Verjson' && 'ubuntu-24.04'" \
     | grep -v "github.repository_owner == 'Verjson'.*|| 'ubuntu-24.04'" \
     | grep -vF "github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'" \
-    | awk -F: -v expected="    runs-on: \${{ fromJSON(github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]') }}" \
+    | awk -F: -v expected="    runs-on: \${{ fromJSON(github.event.repository.private != true && '[\"ubuntu-24.04\"]' || github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]') }}" \
       '!($1 ~ /(^|\/)release\.yml$/ && $2 ~ /^[0-9]+$/ && NF == 4 && $3 ":" $4 == expected)' \
     | grep -vE '/ai-privileged-merge\.yml:[0-9]+:.*github\.event\.repository\.visibility == '\''public'\'' && '\''ubuntu-24\.04'\''.*self-hosted.*general' \
     | grep -vE ':[0-9]+:[[:space:]]+runs-on: ubuntu-24\.04$' \

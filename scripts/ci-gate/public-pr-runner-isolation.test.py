@@ -3017,10 +3017,10 @@ for label, dockerfile in (
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
 # runner-canary.yml canary left on 2026-11-16 (Part of #1831) via reviewed entry.
+# release.yml verify left on 2026-11-16 (Part of #1831); fixtures temporarily restore the backlog key.
 SNAPSHOT_RELAY_BACKLOG = {
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
-    ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
 }
 
 
@@ -3558,10 +3558,10 @@ misfiled = sorted(key for key in CHECKER.RELAY_BACKLOG if not RELAY_LABEL.match(
 if hasattr(CHECKER, "PULL_REQUEST_BACKLOG"):
     misfiled.append(("PULL_REQUEST_BACKLOG", "a pull_request backlog exists again"))
 FULL_CHECKOUT_KEYS = sorted(key for key, kinds in CHECKER.RELAY_BACKLOG.items() if "full-checkout" in kinds)
-if FULL_CHECKOUT_KEYS != [("release.yml [workflow_dispatch]", "verify")]:
-    fail(f"full-checkout is tolerated by exactly release.yml verify, not {FULL_CHECKOUT_KEYS}")
+if FULL_CHECKOUT_KEYS:
+    fail(f"full-checkout is no longer a live backlog tolerance after release.yml verify left, not {FULL_CHECKOUT_KEYS}")
 else:
-    ok("full-checkout is tolerated by exactly one key, release.yml verify (Part of #1831)")
+    ok("no live backlog key tolerates full-checkout after release.yml verify left (Part of #1831)")
 if misfiled:
     fail(f"a frozen backlog key names an event outside its set: {misfiled}")
 else:
@@ -3613,9 +3613,34 @@ def live(path: str) -> str:
         return handle.read()
 
 
+def restore_verify_backlog_for_fixtures() -> None:
+    """Fixture-only: re-add verify's full-checkout tolerance after the live leave."""
+    CHECKER.RELAY_BACKLOG = dict(CHECKER.RELAY_BACKLOG)
+    CHECKER.RELAY_BACKLOG[("release.yml [workflow_dispatch]", "verify")] = frozenset(
+        {"full-checkout", "relay-head", "runtime-checkout"}
+    )
+
+
+def self_hosted_release_yml(body: str) -> str:
+    """Rewrite the live public-hosted gate back to the pre-leave expression."""
+    public_gate = (
+        "github.event.repository.private != true && '[\"ubuntu-24.04\"]' || "
+        "github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || "
+        "'[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
+    )
+    legacy = (
+        "github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || "
+        "'[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
+    )
+    if public_gate not in body:
+        raise AssertionError("live release.yml missing the public-hosted release_runner_expr")
+    return body.replace(public_gate, legacy)
+
+
 def install_lean_verify_fixture() -> None:
     """Probe shards share a stub release.yml verify key, not the live suite (#1972)."""
     global VERIFY, HOOK, VERIFY_ROW, LIVE_CHANGELOG
+    restore_verify_backlog_for_fixtures()
     lean_pin = "0123456789abcdef0123456789abcdef01234567"
     # Keep the three refusal kinds RELAY_BACKLOG freezes for release.yml verify.
     lean_release = f"""
@@ -3933,12 +3958,13 @@ else:
     fail(f"head detection stopped reading an in-tree link (got {code}: {output.strip()[:400]})")
 
 # ---------------------------------------------------------------------------
-# PM decision on #1827 round 6: release.yml's `verify` needs the whole tree
-# (it runs the repository's release suite on the commit that is tagged) and is
-# generator-pinned, so it alone tolerates `full-checkout` until #1831 moves it
-# off the persistent pool. Its row binds the job and the bytes of every
-# program it runs from the tree, never the whole tree.
+# PM decision on #1827 round 6: release.yml's `verify` once needed the whole
+# tree and alone tolerated `full-checkout`. Live verify left the backlog on
+# 2026-11-16 via the public-hosted release_runner_expr gate (Part of #1831).
+# The fixtures below keep exercising that ratchet against a synthetic
+# self-hosted verify job; they temporarily restore the backlog key.
 # ---------------------------------------------------------------------------
+restore_verify_backlog_for_fixtures()
 VERIFY_LABEL = ("release.yml [workflow_dispatch]", "verify")
 VERIFY_FILES = (
     "scripts/release-verify.sh",
@@ -3955,7 +3981,7 @@ VERIFY_FILES = (
     # A bare name would land in .github/workflows; this is the repository root.
     "./package.json",
 )
-VERIFY = {"release.yml": live(".github/workflows/release.yml"), **{path: live(path) for path in VERIFY_FILES}}
+VERIFY = {"release.yml": self_hosted_release_yml(live(".github/workflows/release.yml")), **{path: live(path) for path in VERIFY_FILES}}
 # release.yml's snapshot and publish are backlog jobs too; their rows keep
 # the fixture about verify alone.
 VERIFY_ROW = "".join(backlog_row(VERIFY, "release.yml [workflow_dispatch]", job)
@@ -4463,7 +4489,7 @@ expect_verify_refused(
 DATA_READ = '        ["git", "show", f"{revision}:{path}"],'
 CHANGELOG = LIVE_CHANGELOG
 assert CHANGELOG.count(DATA_READ + "\n") == 1, "the fixture's changelog.py must hold the frozen data read"
-LIVE_VERIFY = {"release.yml": live(".github/workflows/release.yml"), **{path: live(path) for path in (
+LIVE_VERIFY = {"release.yml": self_hosted_release_yml(live(".github/workflows/release.yml")), **{path: live(path) for path in (
     "scripts/release-verify.sh",
     "scripts/changelog.py",
     "scripts/render-next.sh",

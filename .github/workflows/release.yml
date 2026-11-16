@@ -99,7 +99,7 @@ permissions:
 jobs:
   verify:
     name: Verify the tree the snapshot will tag
-    runs-on: ${{ fromJSON(github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(github.event.repository.private != true && '["ubuntu-24.04"]' || github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -640,7 +640,7 @@ jobs:
       release_app_client_id: ${{ vars.RELEASE_APP_CLIENT_ID }}
       release_environment: release-app
       # Explicit, so both halves of one release share one pool (#465).
-      runner: ${{ github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
+      runner: ${{ github.event.repository.private != true && '["ubuntu-24.04"]' || github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
 
   publish:
     name: Publish the released snapshot
@@ -656,7 +656,7 @@ jobs:
       prefix: ${{ inputs.prefix }}
       contract-ref: 910849d61c049fe5c2552c79b9d957f5ab233a8a
       # Legacy compatibility input; all Node release jobs use fresh ubuntu-24.04 runners.
-      runner: ${{ github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
+      runner: ${{ github.event.repository.private != true && '["ubuntu-24.04"]' || github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
       # Keep this byte-coupled input Renovate-inert for the same reason as the
       # setup-node input in verify (#700).
       node-version: ${{ '24' }}
