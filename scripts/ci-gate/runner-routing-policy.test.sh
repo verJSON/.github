@@ -1578,6 +1578,29 @@ grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_PRIVI
   && pass "capability-floor-observe routes public/unclassified onto the untrusted hosted lane" \
   || fail "capability-floor-observe public routing drifted (Part of #1831)"
 
+# Part of #1831: ai-promotion-retry resolve leaves; private keeps
+# TRUSTED||FALLBACK, public and unclassified take untrusted hosted.
+assert_route "$workflows/ai-promotion-retry.yml" resolve Verjson/verjson-authn '' true \
+  '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+  '["self-hosted","trusted-canary"]' \
+  "ai-promotion-retry resolve — private Verjson keeps the trusted lane"
+assert_route "$workflows/ai-promotion-retry.yml" resolve Verjson/.github '' false \
+  '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+  '["self-hosted","untrusted-canary"]' \
+  "ai-promotion-retry resolve — public Verjson takes the untrusted hosted lane, not TRUSTED/FALLBACK"
+assert_route "$workflows/ai-promotion-retry.yml" resolve Verjson/.github '' false \
+  '["self-hosted","trusted-canary"]' '' \
+  '["ubuntu-24.04"]' \
+  "ai-promotion-retry resolve — public with unset untrusted lane takes the hosted tail"
+assert_route "$workflows/ai-promotion-retry.yml" resolve Verjson/.github '' '' \
+  '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+  '["self-hosted","untrusted-canary"]' \
+  "ai-promotion-retry resolve — unresolved visibility fails safe to the untrusted lane"
+grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/ai-promotion-retry.yml" \
+  && pass "ai-promotion-retry resolve routes public/unclassified onto the untrusted hosted lane" \
+  || fail "ai-promotion-retry resolve public routing drifted (Part of #1831)"
+
 
 for job in validate preview-admission; do
   expr_no_override="$(extract_runs_on "$workflows/pulumi-ci.yml" "$job")"

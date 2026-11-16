@@ -3032,8 +3032,8 @@ for label, dockerfile in (
 # left on 2026-11-16 (Part of #1831). seven TRUSTED||FALLBACK observe/
 # reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
 # capability-floor-observe left on 2026-11-16 (Part of #1831).
+# ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
-    ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
@@ -3627,7 +3627,7 @@ else:
 # relative path (`scripts/x.sh`), and the backlog digest bound neither the
 # bytes a sparse checkout puts on disk nor the programs a full-checkout job
 # runs. These fixtures copy a live relay-backlog job
-# (ai-promotion-retry after capability-floor-observe left; Part of #1831).
+# (runner-canary after ai-promotion-retry left; Part of #1831).
 # ---------------------------------------------------------------------------
 def live(path: str) -> str:
     with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
@@ -3694,47 +3694,37 @@ jobs:
 
 
 REWORK = {
-    # After #1831 moved capability-floor-observe off the backlog, these round-5
-    # digests bind the live ai-promotion-retry resolve job that remains
-    # (Part of #1831). promote → ai-privileged-merge → app-key-environment, so
-    # the fixture tree must carry that chain or the checker exits undetermined.
-    "ai-promotion-retry.yml": live(".github/workflows/ai-promotion-retry.yml"),
-    "ai-privileged-merge.yml": live(".github/workflows/ai-privileged-merge.yml"),
-    "app-key-environment.yml": live(".github/workflows/app-key-environment.yml"),
-    **{path: live(path) for path in (
-        "scripts/ci-gate/review-policy-envelope.py",
-    )},
+    # After #1831 moved ai-promotion-retry off the backlog, these round-5
+    # digests bind the live runner-canary canary job that remains
+    # (Part of #1831).
+    "runner-canary.yml": live(".github/workflows/runner-canary.yml"),
 }
-REWORK_LABEL = ("ai-promotion-retry.yml [workflow_call]", "resolve")
+REWORK_LABEL = ("runner-canary.yml [workflow_dispatch]", "canary")
 REWORK_PENDING = backlog_row(REWORK, *REWORK_LABEL)
-# workflow_run resolve is a privileged-event reviewed job on the same file;
-# carry the live reviewed row (including its dynamic: field) so the
-# workflow_call pending ratchet is what the exit status measures.
-REWORK_REVIEWED = next(
-    f"{line}\n"
-    for line in live("scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv").splitlines()
-    if line.startswith("ai-promotion-retry.yml [workflow_run]\tresolve\t")
-)
-REWORK_ARGS = (*PENDING_ARGS, *REVIEWED_ARGS)
-expect({**REWORK, "pending.tsv": REWORK_PENDING, "reviewed.tsv": REWORK_REVIEWED}, 0,
-       ("PENDING: ai-promotion-retry.yml [workflow_call]: job 'resolve'",),
-       "the live ai-promotion-retry resolve job is ratcheted by its own backlog row", *REWORK_ARGS)
-# This key already tolerates relay-head, so a sparse-script head checkout is
-# not a new refusal kind; the pending row fails on the digest change instead.
+REWORK_ARGS = (*PENDING_ARGS,)
+expect({**REWORK, "pending.tsv": REWORK_PENDING}, 0,
+       ("PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
+       "the live runner-canary canary job is ratcheted by its own backlog row", *REWORK_ARGS)
+# This key already tolerates relay-head, so appending a head checkout is not a
+# new refusal kind; the pending row fails on the digest change instead.
 expect_no_pending(
-    {**REWORK, "pending.tsv": REWORK_PENDING, "reviewed.tsv": REWORK_REVIEWED,
-     "scripts/ci-gate/review-policy-envelope.py": REWORK["scripts/ci-gate/review-policy-envelope.py"]
-     + 'gh pr checkout "$PR"\ngit fetch origin "refs/pull/$PR/head" && git checkout FETCH_HEAD\n'},
-    "round-5 repro: a backlog job's bare-path script change stops the pending row applying",
-    ("VIOLATION: ai-promotion-retry.yml [workflow_call]: job 'resolve'", "pending row no longer applies"),
+    {**REWORK, "pending.tsv": REWORK_PENDING,
+     "runner-canary.yml": REWORK["runner-canary.yml"].replace(
+         'test "$RUNNER_NAME" = "$EXPECTED_RUNNER"',
+         'test "$RUNNER_NAME" = "$EXPECTED_RUNNER"\n          # digest-bump: gh pr checkout "$PR"',
+         1)},
+    "round-5 repro: a backlog job content change stops the pending row applying",
+    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", "pending row no longer applies"),
     *REWORK_ARGS,
 )
 expect_no_pending(
-    {**REWORK, "pending.tsv": REWORK_PENDING, "reviewed.tsv": REWORK_REVIEWED,
-     "scripts/ci-gate/review-policy-envelope.py": REWORK["scripts/ci-gate/review-policy-envelope.py"]
-     + 'print("digest-bump")\n'},
-    "a backlog row stops applying when any file the job's sparse checkout holds changes",
-    ("VIOLATION: ai-promotion-retry.yml [workflow_call]: job 'resolve'", "pending row no longer applies"),
+    {**REWORK, "pending.tsv": REWORK_PENDING,
+     "runner-canary.yml": REWORK["runner-canary.yml"].replace(
+         "pwsh --version >/dev/null",
+         'pwsh --version >/dev/null\n          echo "digest-bump"',
+         1)},
+    "a backlog row stops applying when the job's workflow bytes change",
+    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", "pending row no longer applies"),
     *REWORK_ARGS,
 )
 
@@ -3886,23 +3876,23 @@ expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "scripts/run.s
                True, "a git show inside a script the job runs is refused too")
 # A standalone workflow_call job checks out its caller's repository, so this
 # rule does not reach it; that exposure is the relay backlog's (#1831).
-# ai-promotion-retry.yml / resolve remains in RELAY_BACKLOG after container
-# deployment/release retention left on 2026-11-16 (Part of #1831).
+# node-ci-protected.yml / build-test remains in RELAY_BACKLOG after
+# ai-promotion-retry left on 2026-11-16 (Part of #1831).
 CALLER_TREE = {
-    "ai-promotion-retry.yml": """
+    "node-ci-protected.yml": """
         on: workflow_call
         jobs:
-          resolve:
+          build-test:
             runs-on: [self-hosted, general]
             steps:
               - uses: actions/checkout@v4
               - run: docker build .
     """,
 }
-CALLER_LABEL = ("ai-promotion-retry.yml [workflow_call]", "resolve")
+CALLER_LABEL = ("node-ci-protected.yml [workflow_call]", "build-test")
 expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 1,
-       ("PENDING: ai-promotion-retry.yml [workflow_call]: job 'resolve'",
-        "VIOLATION: ai-promotion-retry.yml [public pull_request workflow_call]: job 'resolve'",
+       ("PENDING: node-ci-protected.yml [workflow_call]: job 'build-test'",
+        "VIOLATION: node-ci-protected.yml [public pull_request workflow_call]: job 'build-test'",
         "scenario digest sha256:"),
        "a generic relay backlog row cannot waive the strict public-call scenario",
        *PENDING_ARGS)
