@@ -2450,13 +2450,11 @@ jobs:
       receipt-id: ${{ steps.create-build-artifact-receipt.outputs.receipt-id }}
       receipt-digest: ${{ steps.create-build-artifact-receipt.outputs.receipt-digest }}
       command-digest: ${{ steps.run-script-plan.outputs.command-digest }}
-    # Secretless modes use a fail-closed prefix: successful eligibility and a
-    # valid untrusted lane select that lane; otherwise the literal hosted
-    # runner prevents fallthrough to caller input. The prefix is followed by
-    # the profile-aware caller-runner tail for ordinary builds. ADR 0234 sets
-    # the hosted secretless invariant; ADRs 0033/0240 define the routing tail.
+    # Part of #1831: public/unclassified take the untrusted hosted lane before
+    # inputs.runner so workflow_call relays cannot land on the persistent pool.
+    # Private keeps the secretless-first catalog shape (ADR 0234 / 0033 / 0240).
     # runner-lane: secretless-first
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
+    runs-on: ${{ github.event.repository.private != true && 'ubuntu-24.04' || ((inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       actions: read

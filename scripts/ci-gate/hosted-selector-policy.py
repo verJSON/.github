@@ -450,6 +450,11 @@ PUBLIC_PR_HOSTED_SELECTOR_PREFIX = (
     PUBLIC_PR_EVENT_CONDITION
     + " && github.event.repository.private != true && 'ubuntu-24.04' || ("
 )
+# Part of #1831: secretless-first (and future shapes) gate every non-private
+# repository onto the literal hosted image before inputs.runner.
+NON_PRIVATE_HOSTED_SELECTOR_PREFIX = (
+    "github.event.repository.private != true && 'ubuntu-24.04' || ("
+)
 PUBLIC_CALL_REJECTION_CONDITION = (
     "${{ "
     + PUBLIC_PR_EVENT_CONDITION
@@ -465,9 +470,11 @@ def is_public_pr_hosted_wrapper(
     expression: str, reviewed_expressions: frozenset[str]
 ) -> bool:
     """Accept only the fail-closed hosted prefix around a reviewed selector."""
-    if not expression.startswith(PUBLIC_PR_HOSTED_SELECTOR_PREFIX) or not expression.endswith(")"):
-        return False
-    return expression[len(PUBLIC_PR_HOSTED_SELECTOR_PREFIX) : -1] in reviewed_expressions
+    for prefix in (PUBLIC_PR_HOSTED_SELECTOR_PREFIX, NON_PRIVATE_HOSTED_SELECTOR_PREFIX):
+        if expression.startswith(prefix) and expression.endswith(")"):
+            if expression[len(prefix) : -1] in reviewed_expressions:
+                return True
+    return False
 
 
 def is_public_call_rejection_sentinel(name: str, body: dict) -> bool:

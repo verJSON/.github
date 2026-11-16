@@ -3,10 +3,10 @@
 The built-in Verjson profile is the default; CI_PROFILE_OWNER selects a custom
 profile. Custom profiles are fail-closed for public and unclassified events:
 their untrusted lane never falls through to CI_LANE_FALLBACK. The built-in
-profile keeps its historical fallback. The secretless-first shape adds a
+profile keeps its historical fallback. The secretless-first shape gates every non-private repository onto the
+strict untrusted lane before inputs.runner (Part of #1831), then adds a
 fail-closed, eligibility-gated untrusted prefix and a literal hosted fallback
-ahead of the profile-aware caller-runner tail, where an explicit caller runner
-still wins first under ADR 0033.
+ahead of the profile-aware caller-runner tail for private builds under ADR 0033.
 
 secretless-first-legacy-tail remains a migration-compatibility shape that
 preserves the pre-profile built-in routing tail. Current Node CI uses
@@ -89,8 +89,12 @@ SHAPES = {
     # organization's trusted/private and strict-or-legacy untrusted routes.
     "caller-runner": f"{PUBLIC_PR_HOSTED} || ({_CALLER_RUNNER_PROFILE_TAIL})",
     # Profile-aware secretless shape for the remaining ADR 0240 rollout.
+    # Public/unclassified take untrusted before inputs.runner (Part of #1831).
     "secretless-first": (
-        f"{PUBLIC_PR_HOSTED} || ({SECRETLESS_ELIGIBLE_UNTRUSTED}"
+        # Literal hosted landing so strict public-call analysis can resolve the
+        # public gate without reading CI_LANE_UNTRUSTED (Part of #1831).
+        f"github.event.repository.private != true && '{HOSTED}'"
+        f" || ({SECRETLESS_ELIGIBLE_UNTRUSTED}"
         f" || {SECRETLESS_HOSTED_FALLBACK}"
         f" || {_CALLER_RUNNER_PROFILE_TAIL})"
     ),

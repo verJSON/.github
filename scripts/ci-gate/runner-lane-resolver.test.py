@@ -41,6 +41,12 @@ LEGACY_SECRETLESS_FIRST = (
     "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
     "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || " + LEGACY_CALLER_RUNNER
 )
+# Part of #1831: secretless-first gates non-private repos onto untrusted before
+# the caller-runner tail (and before inputs.runner).
+LEGACY_SECRETLESS_FIRST_PUBLIC_GATE = (
+    "github.event.repository.private != true && 'ubuntu-24.04' || "
+    + LEGACY_SECRETLESS_FIRST
+)
 FAIL_CLOSED_SECRETLESS_PREFIX = (
     "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
     "needs.eligibility.result == 'success' && "
@@ -136,7 +142,7 @@ def test_builtin_profile_is_identical_to_the_legacy_spelling() -> None:
     contexts = []
     for shape, legacy in (
         ("caller-runner", LEGACY_CALLER_RUNNER),
-        ("secretless-first", LEGACY_SECRETLESS_FIRST),
+        ("secretless-first", LEGACY_SECRETLESS_FIRST_PUBLIC_GATE),
         ("secretless-first-legacy-tail", LEGACY_SECRETLESS_FIRST),
     ):
         for owner, private, runner, lanes, profile, sl_pr, sl_ref in itertools.product(
@@ -184,10 +190,17 @@ def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() 
 
     for shape, tail in shapes:
         expression = catalog.expression(shape)
-        expected = (
-            f"{catalog.PUBLIC_PR_HOSTED} || "
-            f"({FAIL_CLOSED_SECRETLESS_PREFIX} || {tail})"
-        )
+        if shape == "secretless-first":
+            # Part of #1831: non-private repos take the literal hosted gate first.
+            expected = (
+                f"github.event.repository.private != true && '{catalog.HOSTED}' || "
+                f"({FAIL_CLOSED_SECRETLESS_PREFIX} || {tail})"
+            )
+        else:
+            expected = (
+                f"{catalog.PUBLIC_PR_HOSTED} || "
+                f"({FAIL_CLOSED_SECRETLESS_PREFIX} || {tail})"
+            )
         check(f"{shape} keeps the frozen fail-closed prefix and expected tail",
               expression, expected)
         for secretless_flag in ("secretless_pr", "secretless_ref"):
@@ -195,6 +208,7 @@ def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() 
                 got = resolve(
                     expression,
                     runner=PERSISTENT,
+                    private=True,
                     eligibility_result=eligibility_result,
                     vars=variables,
                     **{secretless_flag: True},
@@ -204,6 +218,7 @@ def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() 
             missing_result = resolve(
                 expression,
                 runner=PERSISTENT,
+                private=True,
                 vars={"CI_LANE_UNTRUSTED": EPHEMERAL},
                 **{secretless_flag: True},
             )
@@ -213,6 +228,7 @@ def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() 
         non_secretless = resolve(
             expression,
             runner=PERSISTENT,
+            private=True,
             vars={"CI_LANE_UNTRUSTED": EPHEMERAL},
         )
         check(f"{shape} leaves the non-secretless runner unchanged",
@@ -400,7 +416,9 @@ def test_custom_profile_shapes_do_not_send_untrusted_events_to_the_fallback() ->
                 eligibility_result="success",
                 vars=vars_,
             )
-            check(f"custom fallback {shape} private={private}", got, ["ubuntu-24.04"])
+            # secretless-first's public gate is the literal hosted image (Part of #1831).
+            want = "ubuntu-24.04" if shape == "secretless-first" else ["ubuntu-24.04"]
+            check(f"custom fallback {shape} private={private}", got, want)
 
 
 def test_secretless_beats_a_runner_input_under_a_custom_profile_with_a_fallback() -> None:

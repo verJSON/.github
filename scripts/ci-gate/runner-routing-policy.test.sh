@@ -1201,9 +1201,10 @@ grep -qF "github.event.repository.visibility == 'public'" "$workflows/actionlint
 
 # Every job that carries the policy, across every reusable workflow. A job
 # missing from this list is caught by the no-owner-wide-route sweep below.
+# Part of #1831: node-ci build-test left the migration FALLBACK loop; its
+# public-first hosted gate is asserted with the dedicated build-test block.
 policy_jobs() {
   cat <<'TARGETS'
-node-ci.yml build-test
 TARGETS
 }
 
@@ -1622,6 +1623,28 @@ grep -qF "$eligibility_untrusted" "$workflows/node-ci.yml" \
   && grep -qF "$eligibility_untrusted" "$workflows/node-ci-protected.yml" \
   && pass "node-ci eligibility stamps the catalog untrusted-lane selector" \
   || fail "node-ci eligibility untrusted-lane stamp drifted (Part of #1831)"
+
+
+# Part of #1831: node-ci build-test leaves the relay backlog — public takes
+# untrusted before inputs.runner via the secretless-first catalog shape.
+build_test_secretless="$(PYTHONPATH="$root/scripts" python3 -c 'from runner_lane_catalog import expression; print(expression("secretless-first"))')"
+for wf_name in node-ci.yml node-ci-protected.yml; do
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml}"
+  assert_route "$wf" build-test Verjson/.github '["self-hosted","manish"]' false \
+    '["self-hosted","default-only"]' '["ubuntu-24.04"]' \
+    'ubuntu-24.04' \
+    "$name build-test — public Verjson ignores inputs.runner (Part of #1831)" \
+    '["self-hosted","general"]'
+  assert_route "$wf" build-test Verjson/verjson-cli '' true \
+    '["self-hosted","private-canary"]' '["ubuntu-24.04"]' \
+    '["self-hosted","private-canary"]' \
+    "$name build-test — private Verjson keeps the trusted lane"
+done
+grep -qF "$build_test_secretless" "$workflows/node-ci.yml" \
+  && grep -qF "$build_test_secretless" "$workflows/node-ci-protected.yml" \
+  && pass "node-ci build-test stamps the catalog secretless-first selector" \
+  || fail "node-ci build-test secretless-first stamp drifted (Part of #1831)"
 
 
 
