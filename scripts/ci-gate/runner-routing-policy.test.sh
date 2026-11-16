@@ -1467,19 +1467,50 @@ assert_route "$workflows/container-release.yml" promote Verjson/.github '' false
 assert_route "$workflows/container-release.yml" promote Acme/widgets '' false '' '' \
   'ubuntu-24.04' "container-release promote — external release uses fixed hosted provenance"
 
-for job in dry-run deploy; do
-  assert_route "$workflows/container-deployment.yml" "$job" Verjson/.github '' false \
+# Part of #1831: container deployment/review/release retention leave the
+# Verjson→TRUSTED||FALLBACK shape; public Verjson takes the untrusted hosted tail.
+deploy_trusted_jobs() {
+  cat <<'TARGETS'
+container-deployment.yml deploy
+container-deployment.yml dry-run
+container-deployment-review-producer.yml analyze
+container-deployment-review-producer.yml environment-preflight
+container-deployment-review-producer.yml publish-ai
+container-deployment-review-producer.yml publish-code
+container-deployment-review-producer.yml publish-security
+container-release.yml retention
+TARGETS
+}
+while read -r wf_name job; do
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml} $job"
+  assert_route "$wf" "$job" Verjson/verjson-authn '' true \
     '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
     '["self-hosted","trusted-canary"]' \
-    "container-deployment $job — protected orchestration stays on the trusted lane"
-  assert_route "$workflows/container-deployment.yml" "$job" Acme/widgets '' false '' '' \
-    'ubuntu-24.04' "container-deployment $job — external callers retain hosted portability"
-  expression="$(extract_runs_on "$workflows/container-deployment.yml" "$job")"
+    "$name — private Verjson keeps the trusted lane"
+  assert_route "$wf" "$job" Verjson/.github '' false \
+    '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+    '["self-hosted","untrusted-canary"]' \
+    "$name — public Verjson takes the untrusted hosted tail, not TRUSTED/FALLBACK"
+  assert_route "$wf" "$job" Verjson/.github '' false \
+    '["self-hosted","trusted-canary"]' '' \
+    '["ubuntu-24.04"]' \
+    "$name — public with unset untrusted lane takes the hosted tail, not FALLBACK"
+  assert_route "$wf" "$job" Acme/widgets '' false '' '' \
+    'ubuntu-24.04' "$name — external callers retain hosted portability"
+  expression="$(extract_runs_on "$wf" "$job")"
   case "$expression" in
-    *inputs.runner*) fail "container-deployment $job must not accept a caller runner override" ;;
-    *) pass "container-deployment $job rejects caller-selected runner routing" ;;
+    *inputs.runner*) fail "$name must not accept a caller runner override" ;;
+    *) pass "$name rejects caller-selected runner routing" ;;
   esac
-done
+done < <(deploy_trusted_jobs)
+grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/container-deployment.yml" \
+  && grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/container-release.yml" \
+  && pass "container deploy/release public routing uses the visibility STRING" \
+  || fail "container deploy/release public routing drifted (Part of #1831)"
+
 
 for job in validate preview-admission; do
   expr_no_override="$(extract_runs_on "$workflows/pulumi-ci.yml" "$job")"

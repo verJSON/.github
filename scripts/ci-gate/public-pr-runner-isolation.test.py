@@ -3028,24 +3028,11 @@ for label, dockerfile in (
 # repo-hygiene/ui-ci left on 2026-11-15 (Part of #1831).
 # changelog/pulumi remaining/release-dispatch/propose left on 2026-11-15
 # (Part of #1831). helm-ci.yml lint-template left on 2026-11-16
-# (Part of #1831).
+# (Part of #1831). container-deployment/review-producer/release retention
+# left on 2026-11-16 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),
-    ('container-deployment-review-producer.yml [workflow_call]', 'publish-ai'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment-review-producer.yml [workflow_call]', 'publish-code'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment-review-producer.yml [workflow_call]', 'publish-security'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-deployment.yml [workflow_call]', 'deploy'): frozenset({'relay-head'}),
-    ('container-deployment.yml [workflow_call]', 'dry-run'): frozenset({'relay-head'}),
-    ('container-release-workflow-ref-canary.yml [workflow_dispatch]:probe -> container-release.yml', 'retention'):
-        frozenset({'relay-head', 'runtime-checkout'}),
-    ('container-release.yml [workflow_call]', 'retention'): frozenset({'relay-head', 'runtime-checkout'}),
     ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
     ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
@@ -3890,23 +3877,23 @@ expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "scripts/run.s
                True, "a git show inside a script the job runs is refused too")
 # A standalone workflow_call job checks out its caller's repository, so this
 # rule does not reach it; that exposure is the relay backlog's (#1831).
-# container-deployment.yml / dry-run remains in RELAY_BACKLOG after helm-ci
-# left on 2026-11-16 (Part of #1831).
+# ai-promotion-retry.yml / resolve remains in RELAY_BACKLOG after container
+# deployment/release retention left on 2026-11-16 (Part of #1831).
 CALLER_TREE = {
-    "container-deployment.yml": """
+    "ai-promotion-retry.yml": """
         on: workflow_call
         jobs:
-          dry-run:
+          resolve:
             runs-on: [self-hosted, general]
             steps:
               - uses: actions/checkout@v4
               - run: docker build .
     """,
 }
-CALLER_LABEL = ("container-deployment.yml [workflow_call]", "dry-run")
+CALLER_LABEL = ("ai-promotion-retry.yml [workflow_call]", "resolve")
 expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 1,
-       ("PENDING: container-deployment.yml [workflow_call]: job 'dry-run'",
-        "VIOLATION: container-deployment.yml [public pull_request workflow_call]: job 'dry-run'",
+       ("PENDING: ai-promotion-retry.yml [workflow_call]: job 'resolve'",
+        "VIOLATION: ai-promotion-retry.yml [public pull_request workflow_call]: job 'resolve'",
         "scenario digest sha256:"),
        "a generic relay backlog row cannot waive the strict public-call scenario",
        *PENDING_ARGS)

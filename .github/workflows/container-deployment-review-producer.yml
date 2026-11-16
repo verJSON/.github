@@ -21,7 +21,7 @@ jobs:
   environment-preflight:
     if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     permissions: {actions: read, contents: read}
-    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     outputs:
       policy-digest: ${{ steps.policy.outputs.digest }}
       environment-name: ${{ steps.policy.outputs.environment }}
@@ -58,7 +58,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     needs: environment-preflight
     permissions: {actions: write, contents: read, pull-requests: read, checks: read}
-    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     outputs:
       expected-installation-id: ${{ steps.authority.outputs.installation-id }}
       artifact-id: ${{ steps.artifact.outputs.artifact-id }}
@@ -110,7 +110,7 @@ jobs:
     needs: [analyze, environment-preflight]
     environment: runner-deploy-code-review-publisher
     permissions: {actions: read, contents: read}
-    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     steps:
       - name: Reconcile immutable code and caller environment authority
         env: {WORKFLOW_REPOSITORY: '${{ needs.environment-preflight.outputs.workflow-repository }}', WORKFLOW_REF: '${{ needs.environment-preflight.outputs.workflow-ref }}', WORKFLOW_SHA: '${{ needs.environment-preflight.outputs.workflow-sha }}', EXPECTED_POLICY_DIGEST: '${{ needs.environment-preflight.outputs.policy-digest }}', GH_TOKEN: '${{ github.token }}'}
@@ -160,7 +160,7 @@ jobs:
     needs: [analyze, environment-preflight]
     environment: runner-deploy-security-review-publisher
     permissions: {actions: read, contents: read}
-    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     steps:
       - name: Reconcile immutable security and caller environment authority
         env: {WORKFLOW_REPOSITORY: '${{ needs.environment-preflight.outputs.workflow-repository }}', WORKFLOW_REF: '${{ needs.environment-preflight.outputs.workflow-ref }}', WORKFLOW_SHA: '${{ needs.environment-preflight.outputs.workflow-sha }}', EXPECTED_POLICY_DIGEST: '${{ needs.environment-preflight.outputs.policy-digest }}', GH_TOKEN: '${{ github.token }}'}
@@ -210,7 +210,7 @@ jobs:
     needs: [analyze, environment-preflight]
     environment: runner-deploy-ai-review-publisher
     permissions: {actions: read, contents: read}
-    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     steps:
       - name: Reconcile immutable AI and caller environment authority
         env: {WORKFLOW_REPOSITORY: '${{ needs.environment-preflight.outputs.workflow-repository }}', WORKFLOW_REF: '${{ needs.environment-preflight.outputs.workflow-ref }}', WORKFLOW_SHA: '${{ needs.environment-preflight.outputs.workflow-sha }}', EXPECTED_POLICY_DIGEST: '${{ needs.environment-preflight.outputs.policy-digest }}', GH_TOKEN: '${{ github.token }}'}
