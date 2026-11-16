@@ -16,6 +16,26 @@
       "default": false,
       "description": "On isolated GitHub-hosted candidate build jobs, remove only unused image IDs present before the job initializes Buildx. No image cleanup is performed by default."
     },
+    "postPublishSmoke": {
+      "type": "object",
+      "description": "Opt-in smoke against a published candidate digest after credential-separated publish. Absent disables the hook. When present, publication fails closed unless the named variant's published digest and command are both available.",
+      "required": ["variant", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "variant": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "description": "Image variant whose published index digest the smoke must target"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Single-line shell command run after publish with IMAGE_REPOSITORY, IMAGE_DIGEST, IMAGE_REF, and IMAGE_VARIANT set; no package-registry credentials"
+        }
+      }
+    },
     "privateNodePackages": {
       "type": "array",
       "items": {

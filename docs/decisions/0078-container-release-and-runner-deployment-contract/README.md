@@ -721,3 +721,21 @@ regenerate; a caller still granting `actions: read` fails workflow validation.
 **Decision (interim).** `scripts/container_release_promotion.py` refuses to plan unless the candidate's `source.commit` equals `release.sourceCommit`. Both values must be 40-hex lowercase SHAs, and they must match exactly. A tagged retry compares against the source recorded in the release manifest, not the commit the retry was dispatched from. A retry of a release whose recorded sources already differ stops. A manual release dispatch is accepted only on `refs/heads/main`, so it must run while `main`'s HEAD is the commit of a successful candidate. Candidates publish on every push to `main`, so a later commit that gets a successful candidate makes a release possible again.
 
 **Scope.** This guard covers source identity only. It does not establish dispatch authorization, fragment selection, or registry transaction safety. Those remain with #1949 and the proposed source-bound release decision (PR #1950). The planner that runs is the adopter's own generated copy, written and digest-checked by `scripts/gen-container-release.sh`; repinning only the caller does not deliver the guard. Adopters receive it when they regenerate their full container-release adopter set (caller and planner) at a contract pin that includes it.
+
+## Amendment (2026-11-16) — opt-in post-publish OCI smoke (#2141)
+
+Credential-separated adopters need to smoke the **published digest** after trusted
+publication, not rebuild PR-controlled Docker content inside the secretless `node-ci`
+sandbox. Hand-rolling a parallel post-publish job would fork the publisher contract.
+
+`container-candidate-publish.yml` therefore accepts a required boolean
+`post-publish-smoke` input that must match the presence of an optional reviewed
+`postPublishSmoke: { variant, command }` object in the candidate config (same dual-path
+pattern as `cleanupUnusedDockerImages`). When enabled, a package-credential-free
+`post-publish-smoke` job downloads the named variant's published `image.json`, refuses
+a missing digest or command, and runs the reviewed single-line command under `env -i`
+with `IMAGE_REPOSITORY`, `IMAGE_DIGEST`, `IMAGE_REF`, and `IMAGE_VARIANT` set. GHCR pull
+may use the job token; `NODE_AUTH_TOKEN` and OIDC minting stay unset. The candidate
+manifest waits for smoke success or skip, so a configured smoke failure blocks the
+manifest. Pull-request validation stays credential-free and never receives the input.
+Adopters regenerate the generated caller at a contract pin that includes the input.

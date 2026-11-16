@@ -60,6 +60,7 @@ jobs:
     with:
       config-path: scripts/fixtures/container-candidate/canary.json
       cleanup-unused-docker-images: true
+      post-publish-smoke: false
       contract-ref: ${{ github.sha }}
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
       transfer-sha256: '6bbd22f2e0c4814d661cb74e1e31e6ed1cb9b5cf744b35571749221579c0b14a'

@@ -27,6 +27,10 @@ on:
         description: Opt-in removal of unused preloaded images on isolated GitHub-hosted build jobs
         required: true
         type: boolean
+      post-publish-smoke:
+        description: Opt-in smoke of the published candidate digest after credential-separated publish
+        required: true
+        type: boolean
       retry-sha256:
         description: SHA-256 of the canonical exact-SHA retry verifier
         required: true
@@ -79,6 +83,9 @@ jobs:
       private-node-packages: ${{ steps.config.outputs.private-node-packages }}
       has-private-node-packages: ${{ steps.config.outputs.has-private-node-packages }}
       cleanup-unused-docker-images: ${{ steps.config.outputs.cleanup-unused-docker-images }}
+      post-publish-smoke: ${{ steps.config.outputs.post-publish-smoke }}
+      post-publish-smoke-variant: ${{ steps.config.outputs.post-publish-smoke-variant }}
+      post-publish-smoke-artifact: ${{ steps.config.outputs.post-publish-smoke-artifact }}
       package-manager: ${{ steps.config.outputs.package-manager }}
       lock-file: ${{ steps.config.outputs.lock-file }}
       registry-destinations: ${{ steps.config.outputs.registry-destinations }}
@@ -99,6 +106,7 @@ jobs:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
           RETRY_SHA256: ${{ inputs.retry-sha256 }}
           CLEANUP_UNUSED_DOCKER_IMAGES: ${{ inputs.cleanup-unused-docker-images }}
+          POST_PUBLISH_SMOKE: ${{ inputs.post-publish-smoke }}
           SOURCE_PATH: .container-candidate-source-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
@@ -119,7 +127,8 @@ jobs:
           destination_contract="$(python3 -I "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
           expected_namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" \
-            --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" '
+            --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" \
+            --argjson post_publish_smoke "$POST_PUBLISH_SMOKE" '
             def safe_component:
               type == "string" and length <= 64
               and test("^[a-z0-9]+(?:[._-][a-z0-9]+)*$");
@@ -131,6 +140,9 @@ jobs:
               type == "string" and length <= 255
               and test("^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
               and (split("/") | all(.[]; . != "." and . != ".."));
+            def safe_smoke_command:
+              type == "string" and length > 0 and length <= 4096
+              and (contains("\n") | not) and (contains("\r") | not);
           (.repository | ascii_downcase) == ($repository | ascii_downcase)
           and .registryNamespace == $namespace
             and ((.privateNodePackages // []) | type == "array")
@@ -138,6 +150,18 @@ jobs:
             and ((.privateNodePackages // []) | length == (unique | length))
             and (if has("cleanupUnusedDockerImages") then (.cleanupUnusedDockerImages | type == "boolean") else true end)
             and ((.cleanupUnusedDockerImages // false) == $cleanup_unused_docker_images)
+            and (
+              if $post_publish_smoke then
+                has("postPublishSmoke")
+                and (.postPublishSmoke | type == "object")
+                and (.postPublishSmoke | keys | sort == ["command","variant"])
+                and (.postPublishSmoke.variant | safe_component)
+                and (.postPublishSmoke.command | safe_smoke_command)
+                and (.postPublishSmoke.variant as $smoke_variant | any(.images[]; .variant == $smoke_variant))
+              else
+                (has("postPublishSmoke") | not)
+              end
+            )
             and ((.packageManager // "npm") | . == "npm" or . == "pnpm")
             and (.nextStableVersion | test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
             and (.images | type == "array" and length > 0)
@@ -199,6 +223,9 @@ jobs:
             echo "private-node-packages=$(jq -c '.privateNodePackages // []' "$CONFIG_PATH")"
             echo "has-private-node-packages=$(jq -r '((.privateNodePackages // []) | length > 0)' "$CONFIG_PATH")"
             echo "cleanup-unused-docker-images=$(jq -r '.cleanupUnusedDockerImages // false' "$CONFIG_PATH")"
+            echo "post-publish-smoke=$(jq -r 'has("postPublishSmoke")' "$CONFIG_PATH")"
+            echo "post-publish-smoke-variant=$(jq -r '.postPublishSmoke.variant // empty' "$CONFIG_PATH")"
+            echo "post-publish-smoke-artifact=$(jq -r 'if has("postPublishSmoke") then ("candidate-image-" + (.postPublishSmoke.variant | gsub("[^A-Za-z0-9._-]"; "-"))) else empty end' "$CONFIG_PATH")"
             echo "package-manager=$(jq -r '.packageManager // "npm"' "$CONFIG_PATH")"
             echo "lock-file=$(jq -r 'if (.packageManager // "npm") == "pnpm" then "pnpm-lock.yaml" else "package-lock.json" end' "$CONFIG_PATH")"
             echo "registry-destinations=$(jq -c '.destinations' <<<"$destination_contract")"
@@ -1582,6 +1609,82 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  post-publish-smoke:
+    if: >-
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && needs.publish-base.result == 'success' && needs.publish-derived.result == 'success' &&
+      needs.prepare.outputs.post-publish-smoke == 'true') }}
+    needs:
+      - public-call-guard
+      - prepare
+      - publish-base
+      - publish-derived
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.prepare.outputs.post-publish-smoke-artifact }}
+          path: candidate-image
+          merge-multiple: false
+      - name: Smoke the published candidate digest
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+          SMOKE_VARIANT: ${{ needs.prepare.outputs.post-publish-smoke-variant }}
+          # Package-registry credentials stay off this path: only GHCR pull via
+          # the job token above. NODE_AUTH_TOKEN and OIDC minting are unset.
+          NODE_AUTH_TOKEN: ''
+          NPM_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+        run: |
+          set -euo pipefail
+          [ -n "$SMOKE_VARIANT" ] || { echo "::error::post-publish smoke variant is missing"; exit 1; }
+          image_json="candidate-image/image.json"
+          [ -f "$image_json" ] || { echo "::error::published candidate image artifact is missing"; exit 1; }
+          repository="$(jq -er --arg variant "$SMOKE_VARIANT" '
+            select(.variant == $variant) | .repository | select(type == "string" and length > 0)
+          ' "$image_json")" || { echo "::error::published candidate repository is missing"; exit 1; }
+          digest="$(jq -er --arg variant "$SMOKE_VARIANT" '
+            select(.variant == $variant) | .indexDigest | select(test("^sha256:[0-9a-f]{64}$"))
+          ' "$image_json")" || { echo "::error::published candidate digest is missing"; exit 1; }
+          command="$(jq -er --arg variant "$SMOKE_VARIANT" '
+            .postPublishSmoke as $smoke
+            | select(($smoke | type) == "object")
+            | select($smoke.variant == $variant)
+            | $smoke.command
+            | select(type == "string" and length > 0 and length <= 4096 and (contains("\n") | not) and (contains("\r") | not))
+          ' "$CONFIG_PATH")" || { echo "::error::post-publish smoke command is missing"; exit 1; }
+          image_ref="$repository@$digest"
+          echo "Smoking published digest $image_ref"
+          /usr/bin/env -i \
+            PATH="/usr/bin:/bin:/usr/local/bin" \
+            HOME="$HOME" \
+            PWD="$PWD" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            IMAGE_REPOSITORY="$repository" \
+            IMAGE_DIGEST="$digest" \
+            IMAGE_REF="$image_ref" \
+            IMAGE_VARIANT="$SMOKE_VARIANT" \
+            /bin/bash --noprofile --norc -euo pipefail -c "$command"
+
   candidate-manifest:
     if: >-
       ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
@@ -1590,7 +1693,8 @@ jobs:
       format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
       'success' && needs.publish-base.result == 'success' && needs.publish-derived.result == 'success' &&
       needs.attest-sbom.result == 'success' && (needs.mirror-gar.result == 'success' ||
-      needs.mirror-gar.result == 'skipped')) }}
+      needs.mirror-gar.result == 'skipped') && (needs.post-publish-smoke.result == 'success' ||
+      needs.post-publish-smoke.result == 'skipped')) }}
     needs:
       - public-call-guard
       - prepare
@@ -1598,6 +1702,7 @@ jobs:
       - publish-derived
       - attest-sbom
       - mirror-gar
+      - post-publish-smoke
     permissions:
       actions: read
       contents: read
