@@ -86,19 +86,13 @@ on:
 
 jobs:
   lint-template:
-    # Runner routing is policy, not preference — see ADR 0033. In tier order:
-    # an explicit `runner` input wins; a caller outside Verjson gets hosted
-    # (portable, their billing); a Verjson PRIVATE repo gets the general
-    # self-hosted pool; anything else — public, or an event that carries no
-    # visibility — gets the ephemeral untrusted-PR pool. That last tier is
-    # fail-SAFE, not a fallback: unresolved visibility must never put fork code
-    # on the persistent pool. Both pools are org variables so a provider move
-    # (GCP -> DigitalOcean) is a variable flip, not a PR here.
-    # The owner is the installation profile CI_PROFILE_OWNER (default Verjson); a
-    # profile other than Verjson never reaches CI_LANE_FALLBACK for untrusted
-    # events (ADR 0240); an explicit caller `runner` input still wins first. Stamped by scripts/gen-runner-lane.py; do not hand-edit.
-    # runner-lane: caller-runner
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
+    # Runner routing is policy, not preference — see ADR 0033 / ADR 0235.
+    # Public Verjson calls take the untrusted hosted tail and ignore inputs.runner
+    # (Part of #1831). Private Verjson keeps the trusted lane and may pass
+    # inputs.runner; non-Verjson callers stay on hosted. Unmarked: the shared
+    # caller-runner catalog shape still falls through to CI_LANE_FALLBACK on
+    # public Verjson, so this job is hand-edited like the other FALLBACK adopters.
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     permissions:
       contents: read
     steps:

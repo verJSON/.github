@@ -1357,3 +1357,24 @@ to private Verjson or non-Verjson callers. The six keys leave `RELAY_BACKLOG`,
 the test snapshot, and `public-pr-runner-isolation.pending.tsv` together.
 `release.yml` `verify`'s pending digest is refreshed because that row binds
 this checker; the job is unchanged.
+
+## Amendment (2026-11-16, #1831) — helm-ci leaves the relay backlog
+
+**Finding.** `helm-ci.yml` / `lint-template` still resolved to a persistent
+runner for a public Verjson repository when the caller event was not a public
+pull request. It used the stamped `caller-runner` catalog shape, which honors
+`inputs.runner` on public calls and falls through to
+`vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK` when the untrusted lane is
+unset. Changing that shared catalog shape would also restamp Node CI, which
+this batch leaves alone.
+
+**Decision (Part of #1831).** `lint-template` drops the `runner-lane:
+caller-runner` marker and takes the same hand-edited expression as the shared
+FALLBACK adopters: `inputs.runner` is gated to private Verjson or non-Verjson
+callers, and
+`visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`
+sits ahead of the fallback tail. The key leaves `RELAY_BACKLOG`, the test
+snapshot, and `public-pr-runner-isolation.pending.tsv` together. The
+`caller-runner` catalog shape and Node CI markers stay unchanged.
+`release.yml` `verify`'s pending digest is refreshed because that row binds
+this checker; the job is unchanged.
