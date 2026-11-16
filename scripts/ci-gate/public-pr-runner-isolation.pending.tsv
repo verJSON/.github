@@ -20,5 +20,3 @@
 # refusals are decided before this list is read. No row may be added without
 # that code change; each leaves by moving to the ephemeral lane or, when head
 # detection finds no pattern, by gaining a reviewed entry.
-release.yml [workflow_dispatch]	publish	sha256:5781a7cf0231abae0fcccf27d5e13fff7a4572b09f107ea138d2a939ce726686	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; remote callee, placement unreadable; runner expr public-hosted gate (Part of #1831); generated caller pin refreshed to 910849d6
-release.yml [workflow_dispatch]	snapshot	sha256:455118d0c6e06cbd3708a8d35f3fda92ba3daaec8ebe715d52aae9357ce09056	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; remote callee, placement unreadable; runner expr public-hosted gate (Part of #1831); generated caller pin refreshed to 910849d6

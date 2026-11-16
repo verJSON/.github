@@ -50,6 +50,31 @@ def load_checker():
 # Loaded once up front so every expect() can call main() in-process (#1972).
 CHECKER = load_checker()
 
+def restore_verify_backlog_for_fixtures() -> None:
+    """Fixture-only: re-add retired backlog keys after the live leave."""
+    CHECKER.RELAY_BACKLOG = dict(CHECKER.RELAY_BACKLOG)
+    CHECKER.RELAY_BACKLOG[("release.yml [workflow_dispatch]", "publish")] = frozenset()
+    CHECKER.RELAY_BACKLOG[("release.yml [workflow_dispatch]", "snapshot")] = frozenset()
+    CHECKER.RELAY_BACKLOG[("release.yml [workflow_dispatch]", "verify")] = frozenset(
+        {"full-checkout", "relay-head", "runtime-checkout"}
+    )
+
+
+def self_hosted_release_yml(body: str) -> str:
+    """Rewrite the live public-hosted gate back to the pre-leave expression."""
+    public_gate = (
+        "github.event.repository.private != true && '[\"ubuntu-24.04\"]' || "
+        "github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || "
+        "'[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
+    )
+    legacy = (
+        "github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || "
+        "'[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
+    )
+    if public_gate not in body:
+        raise AssertionError("live release.yml missing the public-hosted release_runner_expr")
+    return body.replace(public_gate, legacy)
+
 
 # actions-ci runs the core and two probe shards. Unset (or `all`) runs
 # everything once; the partition contract pins exact check coverage.
@@ -2683,6 +2708,7 @@ def backlog_relay(name: str, job: str, steps: str, runs_on: str = "[self-hosted,
 
 
 RELAY_DIGEST_LINE = BACKLOG_DIGEST_LINE
+restore_verify_backlog_for_fixtures()
 OBSERVE_PLAIN = backlog_relay("release.yml", "publish", "- run: echo maintenance")
 OBSERVE_PLAIN_PENDING = backlog_row(OBSERVE_PLAIN, "release.yml [workflow_dispatch]", "publish")
 expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING}, 0,
@@ -3017,10 +3043,8 @@ for label, dockerfile in (
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
 # runner-canary.yml canary left on 2026-11-16 (Part of #1831) via reviewed entry.
-# release.yml verify left on 2026-11-16 (Part of #1831); fixtures temporarily restore the backlog key.
+# release.yml publish/snapshot/verify left on 2026-11-16 (Part of #1831); fixtures temporarily restore backlog keys.
 SNAPSHOT_RELAY_BACKLOG = {
-    ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
-    ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
 }
 
 
@@ -3535,6 +3559,10 @@ else:
         f"error={error or violations}, scans={scan_budget.scans}, loads={loads}"
     )
 
+# Fixtures above temporarily restore retired backlog keys. Reset to the live
+# empty backlog before the shrink/pending sync assertions (Part of #1831).
+CHECKER.RELAY_BACKLOG = {}
+
 grown = sorted(set(CHECKER.RELAY_BACKLOG) - set(SNAPSHOT_RELAY_BACKLOG))
 widened = sorted(
     (key, sorted(kinds - SNAPSHOT_RELAY_BACKLOG[key]))
@@ -3574,6 +3602,8 @@ if LIVE_PENDING != FROZEN:
 else:
     ok("the live pending list names exactly the frozen backlog")
 
+restore_verify_backlog_for_fixtures()
+
 # Round-4 finding 6: #1826 has landed, so the five pull_request rows that
 # waited on it are stale. The live tree must be clean with only the relay
 # backlog listed: no pull_request job may reach a persistent runner at all.
@@ -3612,29 +3642,6 @@ def live(path: str) -> str:
     with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
         return handle.read()
 
-
-def restore_verify_backlog_for_fixtures() -> None:
-    """Fixture-only: re-add verify's full-checkout tolerance after the live leave."""
-    CHECKER.RELAY_BACKLOG = dict(CHECKER.RELAY_BACKLOG)
-    CHECKER.RELAY_BACKLOG[("release.yml [workflow_dispatch]", "verify")] = frozenset(
-        {"full-checkout", "relay-head", "runtime-checkout"}
-    )
-
-
-def self_hosted_release_yml(body: str) -> str:
-    """Rewrite the live public-hosted gate back to the pre-leave expression."""
-    public_gate = (
-        "github.event.repository.private != true && '[\"ubuntu-24.04\"]' || "
-        "github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || "
-        "'[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
-    )
-    legacy = (
-        "github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || "
-        "'[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
-    )
-    if public_gate not in body:
-        raise AssertionError("live release.yml missing the public-hosted release_runner_expr")
-    return body.replace(public_gate, legacy)
 
 
 def install_lean_verify_fixture() -> None:

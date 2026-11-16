@@ -1529,3 +1529,22 @@ removed with the pending row; the isolation fixture suite temporarily
 restores that key against a synthetic self-hosted verify job so the
 full-checkout ratchet remains covered. Regenerate `.github/workflows/release.yml`
 from `scripts/gen-changelog-caller.sh release-node` at the existing contract pin.
+
+## Amendment (2026-11-16, #1831) — release.yml publish/snapshot leave via reviewed entries
+
+**Finding.** After `verify` left via the public-hosted `release_runner_expr`
+gate, `release.yml` / `publish` and `snapshot` remained the only relay-backlog
+rows. Both are remote reusable-workflow calls (`node-release.yml` /
+`changelog-release.yml` at the contract pin). The checker cannot read remote
+callee placement, so they stay undetermined for hosted proof even when the
+caller passes a public-hosted runner expression and `node-release` hardcodes
+`ubuntu-24.04`.
+
+**Decision (Part of #1831).** Both jobs move from `RELAY_BACKLOG` /
+`public-pr-runner-isolation.pending.tsv` onto
+`public-pr-runner-isolation.reviewed.tsv`. Justifications bind the caller job
+text and pin: publish because the callee hardcodes hosted runners; snapshot
+because the caller shares `release_runner_expr` with verify (#465) and is
+owner-dispatched on the default branch. The live frozen backlog is empty.
+Isolation fixtures that still exercise pending-row ratchets temporarily restore
+the retired keys.
