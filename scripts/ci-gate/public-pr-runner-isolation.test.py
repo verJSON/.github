@@ -3029,24 +3029,18 @@ for label, dockerfile in (
 # changelog/pulumi remaining/release-dispatch/propose left on 2026-11-15
 # (Part of #1831). helm-ci.yml lint-template left on 2026-11-16
 # (Part of #1831). container-deployment/review-producer/release retention
-# left on 2026-11-16 (Part of #1831).
+# left on 2026-11-16 (Part of #1831). seven TRUSTED||FALLBACK observe/
+# reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
     ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
-    ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
     ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
-    ('release-app-canary.yml [workflow_dispatch]', 'canary'): frozenset(),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
-    ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
-    ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
 }
 
@@ -3632,7 +3626,8 @@ else:
 # behavior changed. Head detection never read a program run by a bare
 # relative path (`scripts/x.sh`), and the backlog digest bound neither the
 # bytes a sparse checkout puts on disk nor the programs a full-checkout job
-# runs. These fixtures copy the live rework-reconcile job and script.
+# runs. These fixtures copy a live relay-backlog job and its sparse scripts
+# (capability-floor-observe after rework-reconcile left; Part of #1831).
 # ---------------------------------------------------------------------------
 def live(path: str) -> str:
     with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
@@ -3699,33 +3694,43 @@ jobs:
 
 
 REWORK = {
-    "rework-reconcile.yml": live(".github/workflows/rework-reconcile.yml"),
+    # After #1831 moved rework-reconcile off the backlog, these round-5 digests
+    # bind the live capability-floor-observe job that remains (Part of #1831).
+    "capability-floor-observe.yml": live(".github/workflows/capability-floor-observe.yml"),
     **{path: live(path) for path in (
-        "scripts/ci-telemetry/rework-reconcile.sh",
-        "scripts/ci-telemetry/rework-classify.sh",
-        "scripts/ci-telemetry/rework-aggregate.sh",
-        ".telemetry/rework-thresholds.json",
+        "scripts/capability-floor-discovery.py",
+        "scripts/capability-floor-audit.py",
+        "scripts/github_identity.py",
+        "scripts/shared_checkout_fetch.py",
+        "config/capability-floor-consumers.json",
+        "config/capability-floors.json",
+        "scripts/gen-ai-review-caller.sh",
+        "scripts/gen-ai-review-label-rearm-caller.sh",
+        "scripts/gen-ai-review-lifecycle-rearm-caller.sh",
+        "scripts/gen-changelog-caller.sh",
+        "scripts/gen-gate-rearm-caller.sh",
+        "scripts/gen-privileged-merge-caller.sh",
     )},
 }
-REWORK_LABEL = ("rework-reconcile.yml [workflow_dispatch]", "reconcile")
+REWORK_LABEL = ("capability-floor-observe.yml [workflow_dispatch]", "observe")
 REWORK_PENDING = backlog_row(REWORK, *REWORK_LABEL)
 expect({**REWORK, "pending.tsv": REWORK_PENDING}, 0,
-       ("PENDING: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'",),
-       "the live rework-reconcile job is ratcheted by its own backlog row", *PENDING_ARGS)
+       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
+       "the live capability-floor-observe job is ratcheted by its own backlog row", *PENDING_ARGS)
 expect_no_pending(
     {**REWORK, "pending.tsv": REWORK_PENDING,
-     "scripts/ci-telemetry/rework-reconcile.sh": REWORK["scripts/ci-telemetry/rework-reconcile.sh"]
+     "scripts/capability-floor-discovery.py": REWORK["scripts/capability-floor-discovery.py"]
      + 'gh pr checkout "$PR"\ngit fetch origin "refs/pull/$PR/head" && git checkout FETCH_HEAD\n'},
     "round-5 repro: a backlog job's bare-path script that starts checking out a pull request head is refused",
-    ("VIOLATION: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'", RELAY_REFUSAL),
+    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", RELAY_REFUSAL),
     *PENDING_ARGS,
 )
 expect_no_pending(
     {**REWORK, "pending.tsv": REWORK_PENDING,
-     "scripts/ci-telemetry/rework-reconcile.sh": REWORK["scripts/ci-telemetry/rework-reconcile.sh"]
-     + 'printf "%s\\n" "${EXTRA:-}" >>"$GITHUB_STEP_SUMMARY"\n'},
+     "scripts/capability-floor-discovery.py": REWORK["scripts/capability-floor-discovery.py"]
+     + 'print("digest-bump")\n'},
     "a backlog row stops applying when any file the job's sparse checkout holds changes",
-    ("VIOLATION: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'", "pending row no longer applies"),
+    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
     *PENDING_ARGS,
 )
 

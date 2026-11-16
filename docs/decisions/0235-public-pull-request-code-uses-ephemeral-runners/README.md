@@ -1400,3 +1400,26 @@ keys leave `RELAY_BACKLOG`, the test snapshot, and
 `public-pr-runner-isolation.pending.tsv` together. Public pull-request callers
 remain rejected by the existing sentinel jobs. `release.yml` `verify`'s pending
 digest is refreshed because that row binds this checker; the job is unchanged.
+
+## Amendment (2026-11-16, #1831) — TRUSTED||FALLBACK observe/reconcile set leave
+
+**Finding.** Seven relay jobs still resolved to a persistent runner for a public
+Verjson repository because their `runs-on` was only
+`fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || …)`:
+`dependency-supersession-observe` / `observe`,
+`dependency-supersession-reconcile` / `reconcile`,
+`release-app-canary` / `canary`,
+`renovate-compatibility-canary` / `receipt`,
+`renovate-compatibility-reconcile` / `observe`,
+`renovate-grouping-plan` / `plan`, and
+`rework-reconcile` / `reconcile`.
+
+**Decision (Part of #1831).** Each job takes the already-reviewed expression
+`github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED ||
+vars.CI_LANE_FALLBACK || …) || fromJSON(vars.CI_LANE_UNTRUSTED ||
+'["ubuntu-24.04"]')`. Private repositories keep the trusted/fallback pool;
+public and unclassified events take the untrusted hosted lane. The seven keys
+leave `RELAY_BACKLOG`, the test snapshot, and
+`public-pr-runner-isolation.pending.tsv` together. `release.yml` `verify`'s
+pending digest is refreshed because that row binds this checker; the job is
+unchanged.

@@ -447,15 +447,18 @@ untrusted_jobs="$(grep -cxF "    runs-on: \${{ fromJSON(vars.CI_LANE_UNTRUSTED |
 # runner-admission-reconcile.yml is absent because it must observe the general
 # pool from outside that pool (#401, ADR 0054).
 local_workflow=rework-reconcile.yml
+# Part of #1831: private keeps TRUSTED||FALLBACK; public/unclassified take
+# the untrusted hosted lane (same shape as the observe-set batch).
+expected_local_runs_on="runs-on: \${{ github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
 off_lane="$(
   grep -E '^    runs-on:' "$workflows/$local_workflow" \
-    | grep -vF "runs-on: \${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}" \
+    | grep -vF "$expected_local_runs_on" \
     || true
 )"
 if [ -n "$off_lane" ]; then
-  fail "$local_workflow has a repository-local job that does not select the trusted lane: $off_lane"
+  fail "$local_workflow has a repository-local job that drifted from the private→trusted / else→untrusted shape: $off_lane"
 else
-  pass "$local_workflow selects the trusted lane by name"
+  pass "$local_workflow selects private→trusted / else→untrusted by name"
 fi
 
 # Inverted AND pinned to the whole line. "No line says [self-hosted, general]"
@@ -1510,6 +1513,46 @@ grep -qF "visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubunt
   "$workflows/container-release.yml" \
   && pass "container deploy/release public routing uses the visibility STRING" \
   || fail "container deploy/release public routing drifted (Part of #1831)"
+
+# Part of #1831: plain TRUSTED||FALLBACK observe/reconcile/canary/receipt jobs
+# leave; private keeps trusted, public and unclassified take untrusted hosted.
+trusted_observe_jobs() {
+  cat <<'TARGETS'
+dependency-supersession-observe.yml observe
+dependency-supersession-reconcile.yml reconcile
+release-app-canary.yml canary
+renovate-compatibility-canary.yml receipt
+renovate-compatibility-reconcile.yml observe
+renovate-grouping-plan.yml plan
+rework-reconcile.yml reconcile
+TARGETS
+}
+while read -r wf_name job; do
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml} $job"
+  assert_route "$wf" "$job" Verjson/verjson-authn '' true \
+    '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+    '["self-hosted","trusted-canary"]' \
+    "$name — private Verjson keeps the trusted lane"
+  assert_route "$wf" "$job" Verjson/.github '' false \
+    '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+    '["self-hosted","untrusted-canary"]' \
+    "$name — public Verjson takes the untrusted hosted lane, not TRUSTED/FALLBACK"
+  assert_route "$wf" "$job" Verjson/.github '' false \
+    '["self-hosted","trusted-canary"]' '' \
+    '["ubuntu-24.04"]' \
+    "$name — public with unset untrusted lane takes the hosted tail"
+  assert_route "$wf" "$job" Verjson/.github '' '' \
+    '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
+    '["self-hosted","untrusted-canary"]' \
+    "$name — unresolved visibility fails safe to the untrusted lane"
+done < <(trusted_observe_jobs)
+grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/dependency-supersession-observe.yml" \
+  && grep -qF "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" \
+  "$workflows/rework-reconcile.yml" \
+  && pass "TRUSTED||FALLBACK observe set routes public/unclassified onto the untrusted hosted lane" \
+  || fail "TRUSTED||FALLBACK observe set public routing drifted (Part of #1831)"
 
 
 for job in validate preview-admission; do
