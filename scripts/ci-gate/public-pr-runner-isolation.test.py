@@ -2675,32 +2675,23 @@ PENDING_ARGS = ("--pending", "{dir}/pending.tsv")
 
 
 # The relay backlog is an exact pending ratchet keyed to the backlog digest. It
-# is frozen in code, so these fixtures use real backlog keys: runner-canary's
-# `canary` carried a relayed-head refusal when the backlog was frozen, and
-# release.yml's `publish` carried none.
+# is frozen in code, so these fixtures use real backlog keys. release.yml's
+# `publish` carries no refusal kinds (runner-canary left via reviewed entry;
+# Part of #1831).
 def backlog_relay(name: str, job: str, steps: str, runs_on: str = "[self-hosted, general]") -> dict[str, str]:
     return {name: relay_job("workflow_dispatch", steps, runs_on)["relay.yml"].replace("\n              j:\n", f"\n              {job}:\n")}
 
 
 RELAY_DIGEST_LINE = BACKLOG_DIGEST_LINE
-# Sparse, so its only refusal is the relayed head the backlog froze for it.
-SPARSE_HEAD = PROBES["workflow_dispatch"][0].replace(
-    "        - run: make", "            sparse-checkout: Makefile\n        - run: make"
-)
-CANARY_HEAD = backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD)
-code, output = run_checker(CANARY_HEAD)
-HEAD_RELAY_DIGEST = RELAY_DIGEST_LINE.search(output)
-HEAD_PENDING = (f"runner-canary.yml [workflow_dispatch]\tcanary\t{HEAD_RELAY_DIGEST.group(1)}\t#1831 backlog\n"
-                if HEAD_RELAY_DIGEST else "missing\n")
-expect({**CANARY_HEAD, "pending.tsv": HEAD_PENDING}, 0,
-       ("PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
-       "a backlog row ratchets a known relayed job", "--pending", "{dir}/pending.tsv")
-MOVED = backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD, "[self-hosted, other]")
-expect({**MOVED, "pending.tsv": HEAD_PENDING}, 1,
-       ("pending row no longer applies: backlog digest changed",),
-       "a backlog row stops applying when the selector changes", "--pending", "{dir}/pending.tsv")
 OBSERVE_PLAIN = backlog_relay("release.yml", "publish", "- run: echo maintenance")
 OBSERVE_PLAIN_PENDING = backlog_row(OBSERVE_PLAIN, "release.yml [workflow_dispatch]", "publish")
+expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING}, 0,
+       ("PENDING: release.yml [workflow_dispatch]: job 'publish'",),
+       "a backlog row ratchets a known relayed job", "--pending", "{dir}/pending.tsv")
+MOVED = backlog_relay("release.yml", "publish", "- run: echo maintenance", "[self-hosted, other]")
+expect({**MOVED, "pending.tsv": OBSERVE_PLAIN_PENDING}, 1,
+       ("pending row no longer applies: backlog digest changed",),
+       "a backlog row stops applying when the selector changes", "--pending", "{dir}/pending.tsv")
 expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING}, 0,
        ("PENDING: release.yml [workflow_dispatch]: job 'publish'",),
        "a backlog row ratchets a known relayed job with no refusal", "--pending", "{dir}/pending.tsv")
@@ -2712,9 +2703,9 @@ expect_no_pending(
     "--pending",
     "{dir}/pending.tsv",
 )
-expect({**backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD, "ubuntu-24.04"),
-        "pending.tsv": HEAD_PENDING},
-       1, ("STALE PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
+expect({**backlog_relay("release.yml", "publish", "- run: echo maintenance", "ubuntu-24.04"),
+        "pending.tsv": OBSERVE_PLAIN_PENDING},
+       1, ("STALE PENDING: release.yml [workflow_dispatch]: job 'publish'",),
        "a backlog row for a job moved to a hosted runner is stale", "--pending", "{dir}/pending.tsv")
 expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING,
         "reviewed.tsv": review_row(OBSERVE_PLAIN, "release.yml [workflow_dispatch]", "publish")},
@@ -2876,29 +2867,19 @@ expect_no_pending(
 )
 
 # The tolerated refusal kinds shrink with the job: a backlog job that no
-# longer carries one fails until RELAY_BACKLOG drops it.
-CANARY_PLAIN = backlog_relay("runner-canary.yml", "canary", "- run: echo canary")
-expect(
-    {**CANARY_PLAIN,
-     "pending.tsv": backlog_row(CANARY_PLAIN, "runner-canary.yml [workflow_dispatch]", "canary")},
-    1,
-    ("STALE BACKLOG: runner-canary.yml [workflow_dispatch]: job 'canary' no longer carries refusal kind relay-head",),
-    "a backlog key that tolerates a refusal kind the job no longer carries is stale",
-    *PENDING_ARGS,
-)
-
-# Tolerance comes only with the job's own pending row: a frozen key that has
-# left the pending list keeps no refusal kind, and no reviewed entry stands in.
-# Refusals are decided before the entry's digest is compared, so any digest
-# serves.
+# longer carries one fails until RELAY_BACKLOG drops it. publish freezes none;
+# gaining a head materialization is refused even with a matching pending row
+# (covered above). A frozen key that has left the pending list keeps no
+# refusal kind, and no reviewed entry stands in.
+HEADY_PUBLISH = backlog_relay("release.yml", "publish", PROBES["workflow_dispatch"][0])
 expect_no_pending(
     with_review(
-        CANARY_HEAD,
-        f"runner-canary.yml [workflow_dispatch]\tcanary\tsha256:{'e' * 64}"
+        HEADY_PUBLISH,
+        f"release.yml [workflow_dispatch]\tpublish\tsha256:{'e' * 64}"
         "\treviewed\tdynamic: head-materialization: claims the ref is safe\n",
     ),
     "a frozen backlog job without its pending row tolerates no refusal, even with a reviewed entry",
-    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", RELAY_REFUSAL),
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'", RELAY_REFUSAL),
     *REVIEWED_ARGS,
 )
 
@@ -3035,11 +3016,11 @@ for label, dockerfile in (
 # ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
+# runner-canary.yml canary left on 2026-11-16 (Part of #1831) via reviewed entry.
 SNAPSHOT_RELAY_BACKLOG = {
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
 }
 
 
@@ -3625,7 +3606,7 @@ else:
 # relative path (`scripts/x.sh`), and the backlog digest bound neither the
 # bytes a sparse checkout puts on disk nor the programs a full-checkout job
 # runs. These fixtures copy a live relay-backlog job
-# (runner-canary after ai-promotion-retry left; Part of #1831).
+# (reviewed runner-canary after it left the backlog; Part of #1831).
 # ---------------------------------------------------------------------------
 def live(path: str) -> str:
     with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
@@ -3692,37 +3673,41 @@ jobs:
 
 
 REWORK = {
-    # After #1831 moved ai-promotion-retry off the backlog, these round-5
-    # digests bind the live runner-canary canary job that remains
-    # (Part of #1831).
+    # After #1831 moved runner-canary off the backlog into reviewed, these
+    # round-5 digests bind the live reviewed canary job (Part of #1831).
     "runner-canary.yml": live(".github/workflows/runner-canary.yml"),
 }
 REWORK_LABEL = ("runner-canary.yml [workflow_dispatch]", "canary")
-REWORK_PENDING = backlog_row(REWORK, *REWORK_LABEL)
-REWORK_ARGS = (*PENDING_ARGS,)
-expect({**REWORK, "pending.tsv": REWORK_PENDING}, 0,
-       ("PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
-       "the live runner-canary canary job is ratcheted by its own backlog row", *REWORK_ARGS)
-# This key already tolerates relay-head, so appending a head checkout is not a
-# new refusal kind; the pending row fails on the digest change instead.
-expect_no_pending(
-    {**REWORK, "pending.tsv": REWORK_PENDING,
+REWORK_REVIEWED = next(
+    line + "\n"
+    for line in live("scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv").splitlines()
+    if line.startswith("runner-canary.yml [workflow_dispatch]\tcanary\t")
+)
+REWORK_ARGS = (*REVIEWED_ARGS,)
+expect({**REWORK, "reviewed.tsv": REWORK_REVIEWED}, 0,
+       ("REVIEWED: runner-canary.yml [workflow_dispatch]: job 'canary'",),
+       "the live runner-canary canary job is ratcheted by its own reviewed entry", *REWORK_ARGS)
+# Comments are not part of the review digest; mutate real YAML/script bytes.
+expect(
+    {**REWORK, "reviewed.tsv": REWORK_REVIEWED,
      "runner-canary.yml": REWORK["runner-canary.yml"].replace(
          'test "$RUNNER_NAME" = "$EXPECTED_RUNNER"',
-         'test "$RUNNER_NAME" = "$EXPECTED_RUNNER"\n          # digest-bump: gh pr checkout "$PR"',
+         'test "$RUNNER_NAME" = "$EXPECTED_RUNNER"\n          DIGEST_BUMP=gh-pr-checkout',
          1)},
-    "round-5 repro: a backlog job content change stops the pending row applying",
-    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", "pending row no longer applies"),
+    1,
+    ("STALE REVIEWED", "content changed since review"),
+    "round-5 repro: a reviewed job content change stops the reviewed entry applying",
     *REWORK_ARGS,
 )
-expect_no_pending(
-    {**REWORK, "pending.tsv": REWORK_PENDING,
+expect(
+    {**REWORK, "reviewed.tsv": REWORK_REVIEWED,
      "runner-canary.yml": REWORK["runner-canary.yml"].replace(
          "pwsh --version >/dev/null",
-         'pwsh --version >/dev/null\n          echo "digest-bump"',
+         'pwsh --version >/dev/null\n          DIGEST_BUMP=yes',
          1)},
-    "a backlog row stops applying when the job's workflow bytes change",
-    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", "pending row no longer applies"),
+    1,
+    ("STALE REVIEWED", "content changed since review"),
+    "a reviewed entry stops applying when the job's workflow bytes change",
     *REWORK_ARGS,
 )
 
@@ -3797,15 +3782,14 @@ expect({**LISTS_OBSERVE, "pending.tsv": LISTS_ROW}, 0,
        "a backlog row whose checkout holds the pending list still matches its own row", *PENDING_ARGS)
 
 # Round-5 should-fix (M1c): tolerance is the key's own frozen kinds, never a
-# kind another key carries. runner-canary's `canary` froze with only
-# relay-head; a head checkout with no sparse list adds a runtime-checkout
-# refusal, which fails with its own matching pending row in place.
-CANARY_UNBOUNDED = backlog_relay("runner-canary.yml", "canary", PROBES["workflow_dispatch"][0])
+# kind another key carries. release.yml `publish` froze with none; a head
+# checkout adds relay-head, which fails with its own matching pending row.
+CANARY_UNBOUNDED = backlog_relay("release.yml", "publish", PROBES["workflow_dispatch"][0])
 expect_no_pending(
     {**CANARY_UNBOUNDED,
-     "pending.tsv": backlog_row(CANARY_UNBOUNDED, "runner-canary.yml [workflow_dispatch]", "canary")},
+     "pending.tsv": backlog_row(CANARY_UNBOUNDED, "release.yml [workflow_dispatch]", "publish")},
     "a refusal kind outside the key's frozen set fails even with a matching pending row",
-    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", "has no sparse-checkout list",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'publish'", RELAY_REFUSAL,
      "a pending row cannot waive a refusal"),
     *PENDING_ARGS,
 )

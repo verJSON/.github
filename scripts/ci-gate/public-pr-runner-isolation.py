@@ -935,7 +935,9 @@ GIT_MATERIALIZE = re.compile(
     r"(?:fetch|checkout|switch|worktree|pull|reset|merge|cherry-pick|clone|am|apply)\b"
 )
 DOWNLOAD = re.compile(
-    r"\bcurl\b|\bwget\b|\bgh\s+api\b[^\n]*\b(?:tarball|zipball|archive)\b"
+    # Command-position only: image refs such as curlimages/curl@sha256:… must not
+    # count as a head-materializing download (Part of #1831 / runner-canary).
+    r"(?:^|[\s;&|(])(?:sudo\s+)?(?:curl|wget)\b|\bgh\s+api\b[^\n]*\b(?:tarball|zipball|archive)\b"
 )
 # `gh run download` is deliberately absent: workflow artifacts are not head
 # detection; FETCH below leaves any job that downloads them unresolved.
@@ -2708,6 +2710,7 @@ RELAY_HEAD_REFUSAL = (
 # ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
+# runner-canary.yml canary left on 2026-11-16 (Part of #1831) via reviewed entry after DOWNLOAD false-positive fix.
 # The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
@@ -2727,7 +2730,6 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     # programs it runs (tree_programs), never the whole tree.
     ('release.yml [workflow_dispatch]', 'verify'):
         frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
 }
 
 
