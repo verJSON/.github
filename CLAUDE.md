@@ -83,7 +83,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1905](https://github.com/VerJSON/.github/issues/1905) — F-1R + #2059 are on main; no further `.github` race fix. Remains open for F-1R fleet regeneration; natively blocked by #1933 (Gate A). Actions-disabled adopter enablement continues under #1985 (this issue blocks that one in the native graph). Verified 2026-11-15 via issue comments and native dependency API.
 
-- [#1831](https://github.com/VerJSON/.github/issues/1831) — Public/relay jobs still on the persistent runner backlog in `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` (ADR 0235). [#2121](https://github.com/verJSON/.github/pull/2121) moved public actionlint onto the ephemeral lane; other relay-backlog rows remain (63 lines in the pending TSV on main). Verified 2026-11-15 via pending TSV + `gh issue view` / `gh pr view 2121`.
+- [#1831](https://github.com/VerJSON/.github/issues/1831) — Canonical `.github` relay backlog is empty on main after #2152 (`public-pr-runner-isolation.pending.tsv` has 0 data rows; 5 reviewed entries). Remaining: adopter reusable rollout / live lane enforcement outside this repository. Verified 2026-11-16 via contents API on main `a1b57ea0` + `gh issue view`.
 
 - [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open, tracked separately from #1945 after the 2026-11-13 ARB dependency review. Do not treat agent review evidence as authoritative until its identity criteria pass.
 
