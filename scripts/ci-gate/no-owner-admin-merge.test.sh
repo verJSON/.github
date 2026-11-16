@@ -7,8 +7,11 @@ cd "$root"
 
 hits="$(
   # Production trees only; exclude tests, fixtures, NEXT, and docs.
-  # Match the merge invocation, not an unanchored `--admin` substring (#2153).
-  rg -n -e 'gh pr merge[^\n]*--admin' -e 'mergePullRequest[^\n]*[Aa]dmin' \
+  # Match merge + --admin on one line or across a short multiline run block
+  # (#2153; Bugbot multiline follow-up on #2155).
+  rg -n -U --multiline-dotall \
+    -e 'gh pr merge.{0,240}--admin' \
+    -e 'mergePullRequest.{0,240}[Aa]dmin' \
     --glob '!**/*test*' \
     --glob '!**/fixtures/**' \
     --glob '!NEXT/**' \
