@@ -42,10 +42,11 @@ if tail -n "+$receipt_line" "$canary" | grep 'npm run' >/dev/null; then
 else
   pass "receipt control job never executes candidate code"
 fi
-grep -qF "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')" "$reconcile" \
-  && [ "$(grep -cF "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" "$canary")" -eq 1 ] \
-  && [ "$(grep -cF "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')" "$canary")" -eq 1 ] \
-  && grep -qF "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')" "$planner" \
+private_gated="github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')"
+grep -qF "$private_gated" "$reconcile" \
+  && grep -qF "$private_gated" "$planner" \
+  && [ "$(grep -cF "$private_gated" "$canary")" -eq 1 ] \
+  && grep -qF "runs-on: \${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" "$canary" \
   && pass "new jobs use the canonical portable organization lane boundary" \
   || fail "runner selector bypasses the canonical lane boundary"
 grep -q 'dd08f8471fdfabbdbbb32051e03387fcf5df63bd' "$planner" \
