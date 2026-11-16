@@ -348,10 +348,13 @@ or a literal GitHub-hosted image.
    review digest binds; its entry was re-reviewed with that ref.
 
    `issue_comment` has no workflow in this repository. The one `workflow_run`
-   workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only
-   a trusted `Verjson/.github` revision. Downloading a workflow artifact is a
-   fetch, so a reviewed job that does so needs `dynamic: fetch`, and its
-   justification must say how the artifact is used.
+   workflow, `ai-promotion-retry.yml`, was a reviewed entry that checked out
+   only a trusted `Verjson/.github` revision (downloading a workflow artifact
+   is a fetch, so that reviewed job needed `dynamic: fetch` and a justification
+   for how the artifact is used). The 2026-11-16 `#1831` amendment retires that
+   reviewed row: the shared `resolve` job is now private-gated onto the
+   untrusted hosted lane for public evaluation, so the allowlist entry is
+   obsolete rather than a silent waiver.
 
 6. **Review procedure for adding or refreshing an entry.**
    1. Run `public-pr-runner-isolation.py --pending … --reviewed … .github/workflows`.
