@@ -1485,3 +1485,22 @@ Both keys leave `RELAY_BACKLOG`, the test snapshot, and
 `public-pr-runner-isolation.pending.tsv` together. `release.yml` `verify`'s
 pending digest is refreshed because that row binds this checker; the job is
 unchanged.
+
+## Amendment (2026-11-16, #1831) — runner-canary leaves via reviewed entry
+
+**Finding.** `runner-canary.yml` / `canary` stayed on the relay backlog because
+head detection treated the digest-pinned `curlimages/curl@sha256:…` image
+reference inside `docker run` as a host `curl` download (`\bcurl\b`), so the
+job appeared to materialize a relayed head and no reviewed entry could accept
+it.
+
+**Decision (Part of #1831).** `DOWNLOAD` matches `curl`/`wget` only in command
+position. With that false positive removed, canary's head detection finds no
+known materializing pattern. The job moves from `RELAY_BACKLOG` /
+`public-pr-runner-isolation.pending.tsv` onto
+`public-pr-runner-isolation.reviewed.tsv`: it remains self-hosted to prove the
+named runner, performs no repository checkout, and records dispatch metadata
+only. Fixture exemplars that used this job as the live sparse-digest or
+relay-head backlog target retarget to `release.yml` / `publish` and the
+live reviewed canary entry. `release.yml` `verify`'s pending
+digest is refreshed because that row binds this checker; the job is unchanged.
