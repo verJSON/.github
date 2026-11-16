@@ -54,16 +54,71 @@ def ruleset(
     }
 
 
-def merge_admission_ruleset(ruleset_id, *checks, enforcement="disabled"):
+def merge_admission_ruleset(ruleset_id, *checks, enforcement="disabled", scope="canary"):
     """ADR 0260's item-2 ruleset as GitHub returns it once created, by default disabled."""
     detail = ruleset(
         ruleset_id,
         name=MERGE_ADMISSION_BINDING["ruleset_name"],
+        include=list(MERGE_ADMISSION_BINDING["ref_include"]),
         bypass_actors=copy.deepcopy(MERGE_ADMISSION_BYPASS),
         rules=[required_checks_rule(*checks)],
     )
     detail["enforcement"] = enforcement
+    if scope == "canary":
+        detail["conditions"] = {
+            "ref_name": {
+                "include": list(MERGE_ADMISSION_BINDING["ref_include"]),
+                "exclude": [],
+            },
+            "repository_id": {
+                "repository_ids": [MERGE_ADMISSION_BINDING["canary_repository_id"]],
+            },
+        }
+    elif scope == "enrollment":
+        detail["conditions"] = {
+            "ref_name": {
+                "include": list(MERGE_ADMISSION_BINDING["ref_include"]),
+                "exclude": [],
+            },
+            "repository_property": {
+                "include": [{
+                    "name": MERGE_ADMISSION_BINDING["enrollment_property"],
+                    "property_values": [MERGE_ADMISSION_BINDING["enrollment_value"]],
+                    "source": "custom",
+                }],
+                "exclude": [{
+                    "name": MERGE_ADMISSION_BINDING["paused_property"],
+                    "property_values": [MERGE_ADMISSION_BINDING["paused_value"]],
+                    "source": "custom",
+                }],
+            },
+        }
     return detail
+
+
+def merge_admission_canary_content_responses():
+    """C8 reads the canary repository identity and caller/trigger presence."""
+    canary_id = MERGE_ADMISSION_BINDING["canary_repository_id"]
+    repository = MERGE_ADMISSION_BINDING["canary_repository"]
+    caller = MERGE_ADMISSION_BINDING["caller_path"]
+    trigger = MERGE_ADMISSION_BINDING["trigger_path"]
+    return {
+        f"repositories/{canary_id}": [{
+            "id": canary_id,
+            "full_name": repository,
+            "default_branch": "main",
+        }],
+        f"repos/{repository}/contents/{caller}?ref=main": [{
+            "name": caller.rsplit("/", 1)[-1],
+            "path": caller,
+            "type": "file",
+        }],
+        f"repos/{repository}/contents/{trigger}?ref=main": [{
+            "name": trigger.rsplit("/", 1)[-1],
+            "path": trigger,
+            "type": "file",
+        }],
+    }
 
 
 def merge_admission_contract():
@@ -116,6 +171,15 @@ MERGE_ADMISSION_BINDING = {
     "integration_id": 4528902,
     "app_id_variable": "AI_REVIEW_APP_ID",
     "ruleset_name": "merge-admission-required",
+    "canary_repository_id": 1269388380,
+    "canary_repository": "Verjson/.github",
+    "enrollment_property": "verjson-merge-admission",
+    "enrollment_value": "enforced",
+    "paused_property": "verjson-actions-state",
+    "paused_value": "paused",
+    "caller_path": ".github/workflows/merge-admission-caller.yml",
+    "trigger_path": ".github/workflows/merge-admission-trigger.yml",
+    "ref_include": ["~DEFAULT_BRANCH", "refs/heads/develop"],
 }
 APP_ID_VARIABLE_PATH = "orgs/Verjson/actions/variables/AI_REVIEW_APP_ID"
 PRE_CREATION_RECEIPT = (
@@ -233,7 +297,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 "    print('unexpected gh arguments', file=sys.stderr); sys.exit(90)\n"
                 "path = args[-1]\n"
                 "if path in json.loads(os.environ['FAILING_PATHS']):\n"
-                "    print('simulated HTTP failure', file=sys.stderr); sys.exit(1)\n"
+                "    print('gh: Not Found (HTTP 404)', file=sys.stderr); sys.exit(1)\n"
                 "responses = json.loads(os.environ['RESPONSES'])\n"
                 "if path not in responses:\n"
                 "    print('unexpected API path', file=sys.stderr); sys.exit(91)\n"
@@ -317,6 +381,15 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                     "integration_id": 4528902,
                     "app_id_variable": "AI_REVIEW_APP_ID",
                     "ruleset_name": "merge-admission-required",
+                    "canary_repository_id": 1269388380,
+                    "canary_repository": "Verjson/.github",
+                    "enrollment_property": "verjson-merge-admission",
+                    "enrollment_value": "enforced",
+                    "paused_property": "verjson-actions-state",
+                    "paused_value": "paused",
+                    "caller_path": ".github/workflows/merge-admission-caller.yml",
+                    "trigger_path": ".github/workflows/merge-admission-trigger.yml",
+                    "ref_include": ["~DEFAULT_BRANCH", "refs/heads/develop"],
                 },
                 "bypassless_required_workflows": [
                 {
@@ -465,6 +538,15 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 detail["rules"] = [required_checks_rule(
                     {"context": "merge-admission", "integration_id": 4528902}
                 )]
+                detail["conditions"] = {
+                    "ref_name": {
+                        "include": list(MERGE_ADMISSION_BINDING["ref_include"]),
+                        "exclude": [],
+                    },
+                    "repository_id": {
+                        "repository_ids": [MERGE_ADMISSION_BINDING["canary_repository_id"]],
+                    },
+                }
         details[13] = ruleset(
             13,
             include=["refs/heads/release/*"],
@@ -483,12 +565,18 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 },
                 "bypassless_required_workflows": [],
             },
+            extra_responses=merge_admission_canary_content_responses(),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("organization=Verjson", result.stdout)
         self.assertTrue(
-            all(call[-1].startswith("orgs/Verjson/") for call in calls),
+            all(
+                call[-1].startswith("orgs/Verjson/")
+                or call[-1].startswith("repositories/")
+                or call[-1].startswith("repos/Verjson/")
+                for call in calls
+            ),
             calls,
         )
 
@@ -1780,7 +1868,11 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             {"context": "merge-admission", "integration_id": 4528902},
         )
 
-        result, _ = self.run_audit([[{"id": 1}]], {1: detail})
+        result, _ = self.run_audit(
+            [[{"id": 1}]],
+            {1: detail},
+            extra_responses=merge_admission_canary_content_responses(),
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1867,14 +1959,17 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         self.assertNotIn("merge-admission-receipt=", result.stdout)
 
     def test_disabled_merge_admission_ruleset_bound_to_the_app_yields_the_full_receipt(self):
-        # C10: once the ruleset exists, even disabled, the receipt also reads its binding.
-        # It gates activation only: it checks no enrollment scope (C3 canary id, paused
-        # exclusion, C8 caller presence), so it must not claim to gate an enrollment edit.
+        # C10 + C8: once the ruleset exists, even disabled, the receipt also reads its
+        # binding and the canary enrollment scope (repository_id + caller/trigger).
         detail = merge_admission_ruleset(
             41, {"context": "merge-admission", "integration_id": 4528902}
         )
 
-        result, _ = self.run_audit([[{"id": 41}]], {41: detail})
+        result, _ = self.run_audit(
+            [[{"id": 41}]],
+            {41: detail},
+            extra_responses=merge_admission_canary_content_responses(),
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
@@ -1883,6 +1978,76 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             "ruleset=merge-admission-required ruleset_id=41 enforcement=disabled",
             result.stdout.splitlines(),
         )
+
+    def test_merge_admission_ruleset_with_wrong_repository_id_scope_fails(self):
+        detail = merge_admission_ruleset(
+            41, {"context": "merge-admission", "integration_id": 4528902}
+        )
+        detail["conditions"]["repository_id"]["repository_ids"] = [1, 2]
+
+        result, _ = self.run_audit(
+            [[{"id": 41}]],
+            {41: detail},
+            extra_responses=merge_admission_canary_content_responses(),
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("repository_id scope is [1, 2]", result.stderr)
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_merge_admission_ruleset_missing_caller_on_canary_fails(self):
+        detail = merge_admission_ruleset(
+            41, {"context": "merge-admission", "integration_id": 4528902}
+        )
+        responses = merge_admission_canary_content_responses()
+        caller_path = (
+            f"repos/{MERGE_ADMISSION_BINDING['canary_repository']}/contents/"
+            f"{MERGE_ADMISSION_BINDING['caller_path']}?ref=main"
+        )
+        del responses[caller_path]
+
+        result, _ = self.run_audit(
+            [[{"id": 41}]],
+            {41: detail},
+            extra_responses=responses,
+            failing_paths=[caller_path],
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "Verjson/.github default branch lacks "
+            ".github/workflows/merge-admission-caller.yml",
+            result.stderr,
+        )
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_merge_admission_enrollment_property_scope_requires_paused_exclusion(self):
+        detail = merge_admission_ruleset(
+            41,
+            {"context": "merge-admission", "integration_id": 4528902},
+            scope="enrollment",
+        )
+        detail["conditions"]["repository_property"]["exclude"] = []
+
+        result, _ = self.run_audit(
+            [[{"id": 41}]],
+            {41: detail},
+            extra_responses={
+                **merge_admission_canary_content_responses(),
+                "orgs/Verjson/properties/values?per_page=100": [[{
+                    "repository_id": MERGE_ADMISSION_BINDING["canary_repository_id"],
+                    "repository_name": ".github",
+                    "properties": [{
+                        "property_name": "verjson-merge-admission",
+                        "value": "enforced",
+                    }],
+                }]],
+            },
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("lacks verjson-actions-state=paused exclusion", result.stderr)
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
 
     def test_merge_admission_ruleset_that_does_not_require_the_context_fails(self):
         detail = merge_admission_ruleset(
@@ -2005,7 +2170,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         result, _ = self.run_audit(
             [[{"id": 41}]],
             {41: detail},
-            extra_responses={APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID", "value": "15368"}]},
+            extra_responses={
+                **merge_admission_canary_content_responses(),
+                APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID", "value": "15368"}],
+            },
         )
 
         self.assertEqual(result.returncode, 1, result.stdout)

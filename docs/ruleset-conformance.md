@@ -62,13 +62,19 @@ accepts the context in any ruleset, so otherwise the receipt could report the na
 ruleset absent while another one enforces the context.
 
 A receipt is printed only on exit `0`. The pre-creation receipt gates creating the
-ruleset; the full receipt gates activating it, and only that. It checks no enrollment
-scope: not that the scope is the C3 canary (`repository_id` 1269388380), not that
-paused repositories are excluded, and not that each enrolled repository carries the
-generated caller. An enrollment edit therefore also needs the C8 scope check, which is
-not implemented yet; until it is, no receipt gates an enrollment edit. Neither receipt
-is reusable across a later change: run the audit again immediately before each step.
-The variable's value is compared, never printed.
+ruleset; the full receipt gates activating it **and** any enrollment edit. Once the
+named ruleset exists and requires `merge-admission`, C8 also fails unless enrollment
+scope is exactly the C3 canary (`repository_id` 1269388380) **or** the
+`verjson-merge-admission=enforced` property set with `verjson-actions-state=paused`
+excluded, and each scoped repository carries
+`.github/workflows/merge-admission-caller.yml` and
+`.github/workflows/merge-admission-trigger.yml` on its default branch. Policy keys for
+that check live under `merge_admission_binding` in
+`config/org-ruleset-conformance-policy.json`. Operator steps for ruleset edits,
+rollback, foreign same-head PRs, and C7 recovery are in
+[merge-admission-runbook.md](merge-admission-runbook.md). Neither receipt is reusable
+across a later change: run the audit again immediately before each step. The
+variable's value is compared, never printed.
 
 The program has no mutation path. It calls only paginated GitHub REST GETs and
 does not print API response bodies, credential data, secret values, or variable
