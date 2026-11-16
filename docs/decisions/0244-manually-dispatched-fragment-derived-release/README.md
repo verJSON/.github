@@ -1,7 +1,7 @@
 # 0244 — Derive manually dispatched release versions from fragments
 
 - **Date:** 2026-10-28
-- **Status:** Accepted (2026-11-12): directed by the repository owner in [#1939](https://github.com/VerJSON/.github/issues/1939) and accepted after independent review of PR #1941; the push-guard limits below remain open under [#1942](https://github.com/VerJSON/.github/issues/1942)
+- **Status:** Accepted (2026-11-12): directed by the repository owner in [#1939](https://github.com/VerJSON/.github/issues/1939) and accepted after independent review of PR #1941; the push-guard ABA boundary below is recorded under closed [#1942](https://github.com/VerJSON/.github/issues/1942)
 - **Issues:** [#1939](https://github.com/VerJSON/.github/issues/1939), [#1940](https://github.com/VerJSON/.github/issues/1940)
 - **Category:** release automation and GitHub write authority
 - **Supersedes:** [ADR 0218](../0218-require-explicit-release-dispatch-version/README.md), and the scheduled dispatch provision of [ADR 0101](../0101-explicit-release-proposal-autonomy/README.md)
@@ -35,7 +35,7 @@ Generator and release caller tests cover all three caller modes, blank and expli
 
 Before an atomic branch-and-tag push, the pinned `release-push-guard.sh` reads the raw release commit with replacement objects disabled and requires its sole parent to be the authenticated dispatch SHA. It verifies the annotated tag targets that commit, and supplies a branch-specific `--force-with-lease` with the dispatch SHA as the expected old ref. The validated update is necessarily a direct fast-forward: the lease is a compare-and-swap condition, not permission to rewrite history or overwrite an existing tag. An advanced or rewound current branch, an existing conflicting tag, or an invalid parent rejects the whole atomic push. An already-present identical tag object is an idempotent no-op, not a newly created tag; Git does not transmit that ref as an update even if an empty-old-value tag lease is requested. The branch may advance in that case, without overwriting the tag, so this protocol does not prove that the tag was absent at the instant of publication. The control does not bypass GitHub rules or supply a bypass credential. Local bare-repository tests include a server enforcing `receive.denyNonFastForwards`, and the wrong-parent and replacement-object cases also run against a server that accepts a lease-satisfying rewrite so the guard's own refusal is what they prove; actual GitHub ruleset behavior remains unverified while Actions is paused.
 
-This guards the branch value at the atomic update. It cannot detect an ABA sequence in which a branch changes and then returns to the same dispatch SHA before the push. Such history requires separate audit evidence; do not claim the lease detects it. [#1942](https://github.com/VerJSON/.github/issues/1942) tracks the guard and its limits.
+This guards the branch value at the atomic update. It cannot detect an ABA sequence in which a branch changes and then returns to the same dispatch SHA before the push. Such history requires separate audit evidence; do not claim the lease detects it. Closed [#1942](https://github.com/VerJSON/.github/issues/1942) accepted the rewind guard and recorded ABA as an explicit non-goal.
 
 ## Proposed release-manager authority
 
