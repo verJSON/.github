@@ -5,7 +5,7 @@
 - **Issue:** [verJSON/.github#1945](https://github.com/verJSON/.github/issues/1945)
 - **Amends:** [ADR 0260](../0260-native-merge-admission-through-a-producer-posted-check/README.md) C11 only to the extent that autonomous (workflow/script) `--admin` is retired; the manual owner outage escape remains
 - **Extends:** [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md), [ADR 0260](../0260-native-merge-admission-through-a-producer-posted-check/README.md), [ADR 0202](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md)
-- **Related:** [#1990](https://github.com/verJSON/.github/issues/1990), [#1964](https://github.com/verJSON/.github/issues/1964), [ADR 0244](../0244-derive-manually-dispatched-release-versions-from-fragments/README.md) (push-guard ABA non-goal recorded under closed #1942)
+- **Related:** [#1990](https://github.com/verJSON/.github/issues/1990), [#1964](https://github.com/verJSON/.github/issues/1964), [ADR 0244](../0244-manually-dispatched-fragment-derived-release/README.md) (push-guard ABA non-goal recorded under closed #1942)
 - **Category:** merge-gate admission (sensitive class)
 
 ## Context
