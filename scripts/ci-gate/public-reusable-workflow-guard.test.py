@@ -42,12 +42,18 @@ WORKFLOWS = {
         },
         "attest-sbom": {"prepare", "publish-base", "publish-derived"},
         "mirror-gar": {"prepare", "publish-base", "publish-derived", "attest-sbom"},
+        "post-publish-smoke": {
+            "prepare",
+            "publish-base",
+            "publish-derived",
+        },
         "candidate-manifest": {
             "prepare",
             "publish-base",
             "publish-derived",
             "attest-sbom",
             "mirror-gar",
+            "post-publish-smoke",
         },
     },
 }
