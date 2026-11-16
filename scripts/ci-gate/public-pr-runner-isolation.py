@@ -2724,11 +2724,10 @@ RELAY_HEAD_REFUSAL = (
 # a new refusal; a kind the job no longer carries fails as STALE BACKLOG until
 # it is removed here.
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
-    ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
-    ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
-    # release.yml verify left the live backlog on 2026-11-16 (Part of #1831):
-    # public-hosted gate on release_runner_expr. Fixture suites that still
-    # exercise the full-checkout ratchet re-add this key temporarily.
+    # release.yml publish/snapshot left on 2026-11-16 (Part of #1831) via reviewed
+    # entries (remote callee placement unreadable). release.yml verify left the
+    # same day via the public-hosted release_runner_expr gate. Fixture suites
+    # that still exercise pending/full-checkout ratchets re-add keys temporarily.
 }
 
 
