@@ -378,6 +378,9 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
     " ".join(spelling.split())
     for expression in (
         'fromJSON(github.repository_owner == \'Verjson\' && (vars.CI_RUNNER_DEFAULT || \'["self-hosted","general"]\') || \'["ubuntu-24.04"]\')',
+        # Part of #1831: release_runner_expr public-hosted gate before private
+        # Verjson CI_RUNNER_DEFAULT (preserves #465 shared-pool invariant).
+        'fromJSON(github.event.repository.private != true && \'["ubuntu-24.04"]\' || github.repository_owner == \'Verjson\' && (vars.CI_RUNNER_DEFAULT || \'["self-hosted","general"]\') || \'["ubuntu-24.04"]\')',
         "(github.repository_owner != 'Verjson' || inputs.github-hosted-runner) && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         "fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
@@ -511,6 +514,9 @@ REVIEWED_REUSABLE_INPUT_EXPRESSIONS = frozenset(
     " ".join(spelling.split())
     for expression in (
         "github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'",
+        # Part of #1831: matching public-hosted gate for release snapshot/publish
+        # runner inputs emitted by gen-changelog-caller.sh.
+        "github.event.repository.private != true && '[\"ubuntu-24.04\"]' || github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'",
         "matrix.os",
         "matrix.runner",
         "matrix.runner_labels",

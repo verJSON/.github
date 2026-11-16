@@ -3017,6 +3017,7 @@ for label, dockerfile in (
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
 # runner-canary.yml canary left on 2026-11-16 (Part of #1831) via reviewed entry.
+# release.yml verify live pending left on 2026-11-16 (Part of #1831); RELAY_BACKLOG key retained for fixtures.
 SNAPSHOT_RELAY_BACKLOG = {
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),

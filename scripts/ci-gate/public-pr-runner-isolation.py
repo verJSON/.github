@@ -2711,6 +2711,7 @@ RELAY_HEAD_REFUSAL = (
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
 # runner-canary.yml canary left on 2026-11-16 (Part of #1831) via reviewed entry after DOWNLOAD false-positive fix.
+# release.yml verify left on 2026-11-16 (Part of #1831): public-hosted gate on release_runner_expr.
 # The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without

@@ -818,9 +818,11 @@ scripts through a variable.
   Markdown and link checks read.
 
   Every other form the trace cannot resolve refuses. For what remains, the
-  protection is code review of `main`, not this checker. The exception is
-  removed when #1831 moves `verify` off the persistent pool through the
-  generator and a regeneration.
+  protection is code review of `main`, not this checker. The live
+  `release.yml` `verify` job left the persistent pool on 2026-11-16 (public
+  hosted gate on `release_runner_expr`; see amendment below). The
+  `RELAY_BACKLOG` full-checkout tolerance and fixture suite remain until those
+  synthetic self-hosted verify fixtures are retired.
 
 **Trade-off.** Every converted job must now list what it reads, and adding a
 file to a job means editing its sparse list. The closure test catches a
@@ -1504,3 +1506,25 @@ only. Fixture exemplars that used this job as the live sparse-digest or
 relay-head backlog target retarget to `release.yml` / `publish` and the
 live reviewed canary entry. `release.yml` `verify`'s pending
 digest is refreshed because that row binds this checker; the job is unchanged.
+
+## Amendment (2026-11-16, #1831) — release.yml verify leaves via public-hosted gate
+
+**Finding.** `release.yml` / `verify` (and the matching `snapshot`/`publish`
+`runner:` inputs) used `release_runner_expr`, which for any `verJSON` owner
+resolved through `vars.CI_RUNNER_DEFAULT` to `["self-hosted","general"]`. The
+isolation checker treats `github.event.repository.private` as false, so the
+public `.github` tree still saw a persistent outcome and kept `verify` on the
+relay backlog despite ADR 0235's residual that the exception ends when the
+generator moves verify off that pool.
+
+**Decision (Part of #1831; preserves #465).** `release_runner_expr` now gates
+public repositories onto literal `["ubuntu-24.04"]` before the private Verjson
+`CI_RUNNER_DEFAULT` tail. `verify`, `snapshot`'s explicit `runner:`, and
+`publish`'s legacy `runner:` input share that one expression, so both halves of
+a release stay on one pool (#465). On the scanned public tree, `verify` no
+longer reaches a persistent runner and leaves `public-pr-runner-isolation.pending.tsv`.
+`publish` and `snapshot` remain pending: they are remote callees whose
+placement the checker cannot read. The `RELAY_BACKLOG` verify key and its
+full-checkout fixture suite stay until those synthetic fixtures are retired;
+only the live pending row is removed. Regenerate `.github/workflows/release.yml`
+from `scripts/gen-changelog-caller.sh release-node` at the existing contract pin.

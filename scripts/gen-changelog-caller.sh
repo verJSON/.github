@@ -750,7 +750,11 @@ EOF
 # mutates ruleset-protected `main` — queues silently: no check run, no error, no
 # signal. Substituted from a single variable so the three occurrences cannot
 # drift; the generated contract test asserts they are still identical.
-release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
+# Part of #1831 / ADR 0235: public repositories take the literal hosted image
+# before the private Verjson CI_RUNNER_DEFAULT tail, so release verify (and the
+# matching snapshot runner input) cannot land public dispatch on the persistent
+# pool. Private Verjson keeps the shared self-hosted pool (#465).
+release_runner_expr="github.event.repository.private != true && '[\"ubuntu-24.04\"]' || github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
 
 # The whole snapshot job of every release caller mode, and nothing in it is
 # adopter-authored. The generated contract test pins it against this function
@@ -2912,7 +2916,7 @@ ${write_permission}
       fragments: \${{ inputs.fragments }}
       component: \${{ inputs.component }}
       prefix: \${{ inputs.prefix || 'v' }}
-      runner: \${{ github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
+      runner: \${{ github.event.repository.private != true && '["ubuntu-24.04"]' || github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
 EOF
 }
 
