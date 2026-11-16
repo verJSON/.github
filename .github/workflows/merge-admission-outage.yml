@@ -1,0 +1,54 @@
+name: Merge admission outage
+
+# C10 (ii) of ADR 0260 (#2031). Reads the merge-admission producer and fails this
+# default-branch run when the producer is in outage.
+# The delivery channel is a failing run of this workflow on the default branch, owned by the Verjson/.github repository owner.
+# An Actions-wide outage or a billing limit that stops this monitor is the accepted C1 gap.
+# The monitor runs in GitHub Actions in the monitored repository, so it cannot see a platform outage that stops it too.
+on:
+  schedule:
+    # Offset from the producer's minute-0/15/30/45 sweep. The gap between these
+    # minutes is 15, so a 45-minute missing heartbeat is seen on the next firing.
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: merge-admission-outage
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    # A schedule event carries no repository record and always runs on the default
+    # branch. A manual dispatch of any other branch skips, so a branch copy of this
+    # file cannot page.
+    if: ${{ github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+    steps:
+      - name: Check out the merge-admission outage monitor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci-gate/merge-admission-outage.py
+          sparse-checkout-cone-mode: false
+      - name: Alert when the merge-admission producer is in outage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: python3 -I scripts/ci-gate/merge-admission-outage.py
+      - name: Remove the isolated outage-monitor checkout
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}
+        run: rm -rf ".outage-trust-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"

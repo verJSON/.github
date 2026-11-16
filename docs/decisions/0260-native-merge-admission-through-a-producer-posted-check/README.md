@@ -498,8 +498,10 @@ stale-SUCCESS window, scoped to two same-head classes plus the outage window:
 - *Sweep-bounded:* a permission downgrade, a ruleset edit, and a later-failing check from a
   non-Actions App. The window lasts until the next sweep (15-minute target, best-effort, as
   stated above) plus run latency. **Ceiling: 20 minutes.**
-- *Outage window:* unbounded in principle, bounded in practice by the C10 outage alert,
-  which does not exist yet (below).
+- *Outage window:* unbounded in principle, bounded in practice by the C10 outage alert.
+  *Amended 2026-11-16:* the alert has landed (the amendment below). An Actions-wide
+  outage or a billing limit that stops the monitor is the accepted remainder of this
+  window.
 
 A push to a commit that carries no `merge-admission` check run is outside the window: the
 required context is absent and blocks natively. **The ceilings are the owner's decision**
@@ -567,14 +569,12 @@ account's explicit-bypass path (the assertion, then `--admin`), a canary exercis
 the runbook states that a producer outage stalls autonomous merges until the owner merges by
 bypass.
 
-**Not yet done.** Each of these gates the canary ruleset (C3) and none is claimed here:
+**Not yet done.** Item 1 landed on 2026-11-16. Each remaining item gates the canary
+ruleset (C3):
 
-1. The C10 (ii) outage alert: failed runs, cancelled runs with at least one started job,
-   `was not evaluated` annotations, no producer run reaching `evaluate` and concluding
-   success for 45 minutes while open non-draft heads exist, and a disabled producer
-   schedule. A fixture proves it does not fire on displaced pending cancellations. It names
-   its delivery channel and owner, and either detects independently of Actions in the
-   monitored repository or names the Actions-wide or billing outage as the accepted C1 gap.
+1. **C10 (ii) outage alert — done 2026-11-16.** The monitor, the displaced-pending
+   fixture, the delivery channel, and the accepted Actions-wide or billing gap are the
+   amendment below.
 2. The C10 (iii) REST budget, measured on this repository, adopting one of the two
    mitigations above if it does not fit.
 3. The C10 (iv) consumer caller-and-trigger generator.
@@ -587,3 +587,68 @@ bypass.
    the paused-repository exclusion, and generated-caller presence), which every enrollment
    edit needs beside the full receipt, and C3-OBS (at least 20 merges across at least 3
    repositories).
+
+## 2026-11-16 amendment: C10 (ii) outage alert
+
+ARB-2031 C10 (ii) required an alert, before enrollment, on producer runs that do not
+conclude success, so the outage window accepted in C1 is seen rather than silent. This
+amendment ships that alert. It creates, edits, and enables no ruleset, and changes no
+organization property, variable, or secret.
+
+`Merge admission outage` (`.github/workflows/merge-admission-outage.yml`) runs on the
+default branch, on a 15-minute schedule offset from the producer sweep and on
+`workflow_dispatch`. Its only job reads with the job token and runs
+`scripts/ci-gate/merge-admission-outage.py`. The job fails when the script exits 1 or 2.
+The delivery channel is a failing run of this workflow on the default branch, owned by the Verjson/.github repository owner.
+An Actions-wide outage or a billing limit that stops this monitor is the accepted C1 gap.
+The owner is the .github PM the board named as rollout operator.
+
+The script alerts when any of these is true:
+
+- The producer workflow `merge-admission-caller.yml` is not `state=active`, including
+  `disabled_manually` and GitHub's `disabled_inactivity` after 60 days without activity.
+  This alert does not depend on an open pull request.
+- The run listing is truncated while every fetched run is still inside the 45-minute
+  window, so a failure on a later page cannot hide.
+- A completed run inside the window concluded `failure`, `timed_out`, or any other
+  conclusion other than `success` or `cancelled`.
+- A cancelled run inside the window has at least one job whose `started_at` is set.
+  A cancelled run with no jobs, and a cancelled run whose jobs never started, stay
+  quiet. Those are the displaced pending cancellations of the caller concurrency
+  group. On 2026-11-16 the live shape was a cancelled run with zero jobs (runs
+  43783573012, 43783524824, and 43783510768, read with `gh api`).
+- A run inside the window carries a job annotation whose message contains the producer's
+  `was not evaluated` text. The live read asks only started `evaluate` jobs for those
+  annotations, which is the step that prints the warning. A refusal notice
+  (`was not admitted`) does not match. The
+  producer exits 0 after the warning, so the run can still be a qualifying success; the
+  annotation is the signal, and the heartbeat does not also fire for that same run.
+- No producer run has reached the `evaluate` job and concluded success for 45 minutes,
+  measured from the qualifying run's `updated_at`, while at least one open non-draft
+  pull-request head exists. The job name is one ` / `-separated segment, `evaluate` or
+  `evaluate (...)`, which is the live name
+  `admit / evaluate (<head>, <pr>)`. A plan-only success, an in-progress run, and a job
+  named `preevaluate` or `validate-ai-review-key` do not reset the clock. With no
+  non-draft head open, the heartbeat stays quiet. At exactly 45 minutes it alerts; one
+  second sooner it does not.
+
+An unreadable listing, a missing job list on a cancelled run, or a non-JSON response
+exits 2. The monitor does not report quiet when it cannot see. Exit 2 does not print
+the response body. The snapshot keeps head SHAs and counts, not pull-request titles.
+
+**Accepted C1 gap.** The monitor runs in GitHub Actions in this repository. An
+Actions-wide outage or a billing limit that stops this workflow from starting is not
+detected. That is the accepted remainder of the outage window. A producer schedule that
+is disabled while this monitor still runs is detected by the workflow `state` read.
+
+The monitor does not post `merge-admission`, does not call the producer, and is not a
+completion trigger of the caller: it has no pull-request event. Rollback before
+enablement is deleting this workflow. The REST budget, the caller generator, the
+runbook, the hosted-minute budget, the C9 principal, and the C8 enrollment-scope check
+are unchanged and still gate the canary ruleset.
+
+**Verification.** `scripts/ci-gate/merge-admission-outage.test.py` (merge-gate) classifies
+fixtures for each alert and for the displaced-pending exception, collects a fake
+GET-only API including the jobless cancelled run, and checks the workflow's schedule,
+read-only permissions, ephemeral lane, default-branch guard, and the channel, owner,
+and gap sentences. The same sentences are in this amendment and in the workflow.
