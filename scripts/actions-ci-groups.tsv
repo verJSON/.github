@@ -293,6 +293,7 @@ merge-gate	bash scripts/assert-mergeable-head.required-workflow.test.sh
 merge-gate	bash scripts/assert-mergeable-head.review-receipt.test.sh
 merge-gate	bash scripts/assert-mergeable-head.merge-admission.test.sh
 merge-gate	bash scripts/ci-gate/merge-admission.test.sh
+merge-gate	bash scripts/ci-gate/no-owner-admin-merge.test.sh
 merge-gate	bash scripts/ci-gate/merge-admission-plan.test.sh
 merge-gate	python3 scripts/ci-gate/merge-admission-workflow.test.py
 merge-gate	python3 scripts/ci-gate/merge-admission-outage.test.py
