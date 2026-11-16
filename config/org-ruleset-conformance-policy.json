@@ -10,7 +10,16 @@
     "context": "merge-admission",
     "integration_id": 4528902,
     "app_id_variable": "AI_REVIEW_APP_ID",
-    "ruleset_name": "merge-admission-required"
+    "ruleset_name": "merge-admission-required",
+    "canary_repository_id": 1269388380,
+    "canary_repository": "Verjson/.github",
+    "enrollment_property": "verjson-merge-admission",
+    "enrollment_value": "enforced",
+    "paused_property": "verjson-actions-state",
+    "paused_value": "paused",
+    "caller_path": ".github/workflows/merge-admission-caller.yml",
+    "trigger_path": ".github/workflows/merge-admission-trigger.yml",
+    "ref_include": ["~DEFAULT_BRANCH", "refs/heads/develop"]
   },
   "bypassless_required_workflows": [
     {

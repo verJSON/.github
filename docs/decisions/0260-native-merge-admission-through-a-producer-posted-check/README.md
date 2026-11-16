@@ -515,8 +515,8 @@ acceptance lapses at the #1964 switch and must be re-decided then.
 **C8, Decision 2's scope.** Amended inline above: the canary first (`repository_id`
 1269388380), then an explicit enrollment property set only after a repository's caller,
 trigger, and a bound-App SUCCESS exist, with paused repositories excluded. The audit check
-that fails a scope including a repository without the generated caller is not implemented
-yet (below).
+that fails a scope including a repository without the generated caller lands in the
+2026-11-16 canary-gates amendment below.
 
 **C6, Decision 6's Renovate carve-out.** Amended inline above. The bypass contract is in
 `config/org-ruleset-conformance-policy.json` as the name-keyed (`ruleset_id: null`)
@@ -551,13 +551,12 @@ differs from it.
   the binding check accepts the context in any ruleset, so the receipt could otherwise
   report the named ruleset absent while another enforces it. A receipt prints only on
   exit 0, so any other conformance finding withholds it. **The pre-creation receipt gates
-  creation; the full receipt gates activation only.** It checks no enrollment scope: not the
-  C3 canary's `repository_id` 1269388380, not the paused-repository exclusion, and not C8's
-  caller presence. An enrollment edit therefore also needs the C8 scope check, which is not
-  done (below); until it lands, no receipt gates an enrollment edit. The scheduled
-  `org-ruleset-conformance.yml` run repeats the check daily with its unchanged no-argument
-  command. Verified read-only against the live organization on 2026-11-12: exit 0 with the
-  pre-creation receipt.
+  creation; the full receipt gates activation and enrollment edits.** Once the named
+  ruleset exists and requires the context, C8 also checks canary `repository_id`
+  1269388380 (or the enrollment property with paused exclusion) and caller/trigger
+  presence (canary-gates amendment below). The scheduled `org-ruleset-conformance.yml`
+  run repeats the check daily with its unchanged no-argument command. Verified read-only
+  against the live organization on 2026-11-12: exit 0 with the pre-creation receipt.
 - *Numbering.* Item (v), the runbook, moves before item (vi), the hosted-minute budget.
 
 **C11, ordering.** Nothing removes the OrganizationAdmin bypass from the item-2 ruleset or
@@ -569,24 +568,24 @@ account's explicit-bypass path (the assertion, then `--admin`), a canary exercis
 the runbook states that a producer outage stalls autonomous merges until the owner merges by
 bypass.
 
-**Not yet done.** Item 1 landed on 2026-11-16. Each remaining item gates the canary
-ruleset (C3):
+**Not yet done / done on this finish.** Item 1 landed on 2026-11-16. The remaining
+code gates for the canary ruleset (C3) land in the 2026-11-16 canary-gates amendment
+below; live ruleset enablement and Decision 7 canary receipts close #2031.
 
 1. **C10 (ii) outage alert — done 2026-11-16.** The monitor, the displaced-pending
    fixture, the delivery channel, and the accepted Actions-wide or billing gap are the
    amendment below.
-2. The C10 (iii) REST budget, measured on this repository, adopting one of the two
-   mitigations above if it does not fit.
-3. The C10 (iv) consumer caller-and-trigger generator.
-4. The C10 (v) runbook: ruleset-edit and arm-rotation caller dispatches, deactivating the
-   ruleset, closing a foreign same-head pull request, and C7 recovery.
-5. The C10 (vi) hosted-minute budget, before a generated caller lands on any private
-   repository (verjson-agents and verjson-ai are private).
-6. The C9 non-bypass canary principal.
-7. The C8 enrollment-scope audit check above (the C3 canary's `repository_id` 1269388380,
-   the paused-repository exclusion, and generated-caller presence), which every enrollment
-   edit needs beside the full receipt, and C3-OBS (at least 20 merges across at least 3
-   repositories).
+2. **C10 (iii) REST budget — done 2026-11-16.** Measured on this repository; fits the
+   Team job-token budget; no mitigation.
+3. **C10 (iv) consumer caller-and-trigger generator — done 2026-11-16.**
+4. **C10 (v) runbook — done 2026-11-16.**
+5. **C10 (vi) hosted-minute budget — done 2026-11-16.** Documented for the public
+   canary; private enrollment stays blocked until a private-minute ceiling holds.
+6. **C9 non-bypass canary principal — done 2026-11-16.** `lightningleap` in the runbook.
+7. **C8 enrollment-scope audit — done 2026-11-16.** Wired into the full receipt.
+   C3-OBS for canary-only close records ≥20 pre-merge bound-App `merge-admission`
+   SUCCESSes on this repository; the three-repository observation remains a wider
+   enrollment gate.
 
 ## 2026-11-16 amendment: C10 (ii) outage alert
 
@@ -645,10 +644,59 @@ The monitor does not post `merge-admission`, does not call the producer, and is 
 completion trigger of the caller: it has no pull-request event. Rollback before
 enablement is deleting this workflow. The REST budget, the caller generator, the
 runbook, the hosted-minute budget, the C9 principal, and the C8 enrollment-scope check
-are unchanged and still gate the canary ruleset.
+land in the canary-gates amendment below.
 
 **Verification.** `scripts/ci-gate/merge-admission-outage.test.py` (merge-gate) classifies
 fixtures for each alert and for the displaced-pending exception, collects a fake
 GET-only API including the jobless cancelled run, and checks the workflow's schedule,
 read-only permissions, ephemeral lane, default-branch guard, and the channel, owner,
 and gap sentences. The same sentences are in this amendment and in the workflow.
+
+## 2026-11-16 amendment: C10 (iii–vi), C8, C9 canary gates
+
+ARB-2031 required the remaining code gates before creating and enabling the canary
+ruleset. This amendment ships those gates. It creates, edits, and enables no ruleset
+by itself; the live `merge-admission-required` ruleset and Decision 7 canaries are the
+ops close of #2031 after this lands on `main`.
+
+**C10 (iii) REST budget.** Measured read-only on `Verjson/.github` on 2026-11-16: 56
+`Merge admission` runs in the prior hour (3 `schedule`, 53 `workflow_run`; 36 success,
+20 cancelled displaced-pending) with one open non-draft pull request. Estimated
+`GITHUB_TOKEN` use ≈ 720 calls/hour against the Team plan ≈ 1000/hour shared repository
+budget (ADR ~267–274). **Fits.** No skip-if-fresh sweep mitigation and no separately
+minted read-only App token.
+
+**C10 (iv) caller generator.** `scripts/gen-merge-admission-caller.sh` emits a consumer
+`merge-admission-caller.yml` pinned to
+`Verjson/.github/.github/workflows/merge-admission.yml@<40-hex>` plus a keyless
+`--trigger` workflow matching this repository's hand-authored trigger pattern.
+`scripts/ci-gate/merge-admission-caller-contract.test.sh` (merge-gate) pins the shape.
+This repository remains the producer host and keeps its relative-path caller; C8 checks
+file presence, not byte identity with the consumer generator.
+
+**C10 (v) runbook.** `docs/merge-admission-runbook.md` covers ruleset-edit and
+arm-rotation caller dispatches, deactivating the ruleset, closing a foreign same-head
+pull request, and C7 recovery (owner bypass; do not remove OrganizationAdmin before
+#1964). Linked from this ADR and `docs/ruleset-conformance.md`.
+
+**C10 (vi) hosted minutes.** The canary is public, so ephemeral/`CI_LANE_UNTRUSTED`
+hosted minutes for the 15-minute sweep and per-head evaluate are not billed. Private
+consumers (verjson-agents, verjson-ai) stay out of this close; before private
+enrollment, keep roughly `96 × (2 + 2N)` hosted minutes/day under the organization
+private-minute ceiling or attach a self-hosted untrusted lane (N = open non-draft
+heads).
+
+**C9.** Canary merge-button and auto-merge actor: organization member `lightningleap`
+(not an owner, not on the bypass list). Owners remain the C7 bypass path only.
+
+**C8.** `scripts/org-ruleset-conformance.py` extends the full merge-admission receipt:
+when `merge-admission-required` exists and requires the context, fail unless scope is
+exactly `repository_id` `[1269388380]` or the `verjson-merge-admission=enforced`
+property set with `verjson-actions-state=paused` excluded, and each scoped default
+branch carries the caller and trigger paths from `merge_admission_binding`. Policy keys
+and tests live beside the existing binding
+(`scripts/org_ruleset_conformance_test.py`).
+
+**Verification.** `bash scripts/ci-gate/merge-admission-caller-contract.test.sh`;
+`python3 scripts/org_ruleset_conformance_test.py`; read-only REST and hosted-minute
+figures above; runbook and ADR cross-links.

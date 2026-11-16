@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -135,7 +136,21 @@ def read_merge_admission_binding(value):
     binding = require_mapping(value, location)
     require_exact_keys(
         binding,
-        {"context", "integration_id", "app_id_variable", "ruleset_name"},
+        {
+            "context",
+            "integration_id",
+            "app_id_variable",
+            "ruleset_name",
+            "canary_repository_id",
+            "canary_repository",
+            "enrollment_property",
+            "enrollment_value",
+            "paused_property",
+            "paused_value",
+            "caller_path",
+            "trigger_path",
+            "ref_include",
+        },
         location,
     )
     variable = require_string(binding["app_id_variable"], f"{location}.app_id_variable")
@@ -144,6 +159,26 @@ def read_merge_admission_binding(value):
         raise AuditDataError(
             f"{location}.app_id_variable must be an organization variable name"
         )
+    canary_repository = require_string(
+        binding["canary_repository"], f"{location}.canary_repository"
+    )
+    if canary_repository.count("/") != 1:
+        raise AuditDataError(
+            f"{location}.canary_repository must be owner/name"
+        )
+    ref_include = require_array(binding["ref_include"], f"{location}.ref_include")
+    if not ref_include or any(
+        not isinstance(item, str) or not item.strip() for item in ref_include
+    ):
+        raise AuditDataError(
+            f"{location}.ref_include must be a non-empty array of non-empty strings"
+        )
+    for path_key in ("caller_path", "trigger_path"):
+        path = require_string(binding[path_key], f"{location}.{path_key}")
+        if not path.startswith(".github/workflows/") or not path.endswith((".yml", ".yaml")):
+            raise AuditDataError(
+                f"{location}.{path_key} must be a .github/workflows/*.yml path"
+            )
     return {
         "context": require_string(binding["context"], f"{location}.context"),
         "integration_id": require_positive_integer(
@@ -151,6 +186,25 @@ def read_merge_admission_binding(value):
         ),
         "app_id_variable": variable,
         "ruleset_name": require_string(binding["ruleset_name"], f"{location}.ruleset_name"),
+        "canary_repository_id": require_positive_integer(
+            binding["canary_repository_id"], f"{location}.canary_repository_id"
+        ),
+        "canary_repository": canary_repository,
+        "enrollment_property": require_string(
+            binding["enrollment_property"], f"{location}.enrollment_property"
+        ),
+        "enrollment_value": require_string(
+            binding["enrollment_value"], f"{location}.enrollment_value"
+        ),
+        "paused_property": require_string(
+            binding["paused_property"], f"{location}.paused_property"
+        ),
+        "paused_value": require_string(
+            binding["paused_value"], f"{location}.paused_value"
+        ),
+        "caller_path": require_string(binding["caller_path"], f"{location}.caller_path"),
+        "trigger_path": require_string(binding["trigger_path"], f"{location}.trigger_path"),
+        "ref_include": list(ref_include),
     }
 
 
@@ -766,15 +820,204 @@ def requires_context(ruleset: dict, context: str):
     )
 
 
-def merge_admission_receipt(merge_admission: dict, rulesets: list[dict], app_id_variable: str):
+def requires_bound_merge_admission(ruleset: dict, merge_admission: dict):
+    """True when the ruleset requires merge-admission bound to the policy App."""
+    context = merge_admission["context"]
+    app_id = merge_admission["integration_id"]
+    return any(
+        check.get("context") == context and check.get("integration_id") == app_id
+        for rule in ruleset["rules"]
+        if rule["type"] == "required_status_checks"
+        for check in rule["parameters"]["required_status_checks"]
+    )
+
+
+def repository_default_branch_file_exists(repository: str, path: str, default_branch: str):
+    """True when path exists on the repository default branch; False on HTTP 404."""
+    encoded = path.replace(" ", "%20")
+    # Query-position encoding: keep "/" literal (default-branch-uri-encoding.test.sh).
+    api_path = f"repos/{repository}/contents/{encoded}?ref={quote(default_branch)}"
+    result = subprocess.run(
+        [
+            "gh",
+            "api",
+            "--hostname",
+            "github.com",
+            "--method",
+            "GET",
+            "--paginate",
+            "--slurp",
+            api_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        pages = load_json(result.stdout, f"GitHub API response for {api_path}")
+        if not isinstance(pages, list) or not pages:
+            raise AuditDataError(f"GitHub API returned no pages for {api_path}")
+        return True
+    # gh exits 1 on 404; refuse to treat other failures as absence.
+    err = (result.stderr or "") + (result.stdout or "")
+    if "404" in err or "Not Found" in err:
+        return False
+    raise RuntimeError(f"GitHub API read failed for {api_path}")
+
+
+def repository_identity(repository_id: int):
+    """owner/name and default_branch for a numeric repository id."""
+    pages = gh_json_pages(f"repositories/{repository_id}")
+    if len(pages) != 1:
+        raise AuditDataError(f"repository {repository_id} returned {len(pages)} documents")
+    detail = require_mapping(pages[0], f"repository {repository_id}")
+    full_name = require_string(detail.get("full_name"), f"repository {repository_id}.full_name")
+    default_branch = require_string(
+        detail.get("default_branch"), f"repository {repository_id}.default_branch"
+    )
+    return full_name, default_branch
+
+
+def enrollment_property_include(conditions: dict, merge_admission: dict):
+    include = conditions.get("repository_property", {}).get("include") or []
+    return any(
+        isinstance(entry, dict)
+        and entry.get("name") == merge_admission["enrollment_property"]
+        and merge_admission["enrollment_value"] in (entry.get("property_values") or [])
+        for entry in include
+    )
+
+
+def paused_property_exclude(conditions: dict, merge_admission: dict):
+    exclude = conditions.get("repository_property", {}).get("exclude") or []
+    return any(
+        isinstance(entry, dict)
+        and entry.get("name") == merge_admission["paused_property"]
+        and merge_admission["paused_value"] in (entry.get("property_values") or [])
+        for entry in exclude
+    )
+
+
+def merge_admission_enrollment_findings(live: dict, merge_admission: dict, organization: str):
+    """ARB-2031 C8: canary repository_id scope, or enrollment property with paused excluded.
+
+    Also fails when any scoped repository lacks the caller or trigger on its default
+    branch. Pre-creation (ruleset absent) does not call this.
+    """
+    label = f"merge-admission ruleset {merge_admission['ruleset_name']} ({live['id']})"
+    findings = []
+    conditions = require_mapping(live.get("conditions"), f"{label}.conditions")
+    ref_name = require_mapping(conditions.get("ref_name"), f"{label}.conditions.ref_name")
+    include_refs = ref_name.get("include") or []
+    expected_refs = merge_admission["ref_include"]
+    if sorted(include_refs) != sorted(expected_refs):
+        findings.append(
+            f"{label}: ref_name.include is {include_refs!r}, expected {expected_refs!r}"
+        )
+
+    repository_ids = None
+    repo_id_block = conditions.get("repository_id")
+    if isinstance(repo_id_block, dict):
+        raw_ids = repo_id_block.get("repository_ids")
+        if isinstance(raw_ids, list):
+            repository_ids = raw_ids
+
+    canary_id = merge_admission["canary_repository_id"]
+    property_enrolled = enrollment_property_include(conditions, merge_admission)
+    paused_excluded = paused_property_exclude(conditions, merge_admission)
+
+    scoped_ids: list[int] = []
+    if repository_ids is not None and not property_enrolled:
+        if repository_ids != [canary_id]:
+            findings.append(
+                f"{label}: repository_id scope is {repository_ids!r}, expected "
+                f"exactly [{canary_id}] (C3 canary) or the enrollment property set"
+            )
+        else:
+            scoped_ids = [canary_id]
+    elif property_enrolled and repository_ids is None:
+        if not paused_excluded:
+            findings.append(
+                f"{label}: enrollment property "
+                f"{merge_admission['enrollment_property']}="
+                f"{merge_admission['enrollment_value']} lacks "
+                f"{merge_admission['paused_property']}="
+                f"{merge_admission['paused_value']} exclusion"
+            )
+        # Resolve enrolled repositories from the organization property values.
+        pages = gh_json_pages(f"orgs/{organization}/properties/values?per_page=100")
+        enrolled = []
+        for page in pages:
+            rows = page if isinstance(page, list) else [page]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                props = {
+                    item.get("property_name"): item.get("value")
+                    for item in (row.get("properties") or [])
+                    if isinstance(item, dict)
+                }
+                if props.get(merge_admission["enrollment_property"]) != merge_admission["enrollment_value"]:
+                    continue
+                if props.get(merge_admission["paused_property"]) == merge_admission["paused_value"]:
+                    continue
+                repo_id = row.get("repository_id")
+                if isinstance(repo_id, int) and repo_id > 0:
+                    enrolled.append(repo_id)
+        scoped_ids = enrolled
+        if not scoped_ids:
+            findings.append(
+                f"{label}: enrollment property scope matched no unpaused repository"
+            )
+    else:
+        findings.append(
+            f"{label}: enrollment scope must be exactly repository_id "
+            f"[{canary_id}] or the "
+            f"{merge_admission['enrollment_property']}="
+            f"{merge_admission['enrollment_value']} property set with paused repos excluded"
+        )
+
+    for repository_id in scoped_ids:
+        if repository_id == canary_id:
+            repository = merge_admission["canary_repository"]
+            # Prefer the policy's canary name; still confirm the id resolves.
+            resolved, default_branch = repository_identity(repository_id)
+            if resolved.lower() != repository.lower():
+                findings.append(
+                    f"{label}: canary repository_id {repository_id} resolves to "
+                    f"{resolved}, expected {repository}"
+                )
+                continue
+        else:
+            repository, default_branch = repository_identity(repository_id)
+        for path_key in ("caller_path", "trigger_path"):
+            path = merge_admission[path_key]
+            try:
+                present = repository_default_branch_file_exists(
+                    repository, path, default_branch
+                )
+            except (AuditDataError, RuntimeError) as error:
+                findings.append(f"{label}: cannot read {repository}/{path}: {error}")
+                continue
+            if not present:
+                findings.append(
+                    f"{label}: {repository} default branch lacks {path}"
+                )
+    return findings
+
+
+def merge_admission_receipt(
+    merge_admission: dict, rulesets: list[dict], app_id_variable: str, organization: str
+):
     """ARB-2031-2026-11-12 C10, two phases: before and after the ruleset exists.
 
     Before creation only the organization variable is compared, and the ruleset is
-    reported absent. Once it exists, even disabled, it must also require the context;
-    its binding is producer_binding_findings' to judge, like every other ruleset's.
-    The receipt is printed only when the whole audit conforms: the pre-creation one
-    gates creation, the full one gates activation only. It checks no enrollment scope,
-    so an enrollment edit also needs C8's scope check, which is not implemented yet.
+    reported absent. Once it exists, even disabled, it must also require the context
+    and pass C8 enrollment scope (canary repository_id or enrollment property with
+    paused exclusion and caller/trigger presence). Its binding is
+    producer_binding_findings' to judge, like every other ruleset's. The receipt is
+    printed only when the whole audit conforms: the pre-creation one gates creation,
+    the full one gates activation and enrollment edits.
     """
     context = merge_admission["context"]
     app_id = merge_admission["integration_id"]
@@ -804,6 +1047,13 @@ def merge_admission_receipt(merge_admission: dict, rulesets: list[dict], app_id_
         )
         if not requires_context(live, context):
             findings.append(f"{label}: does not require the {context} context")
+        elif requires_bound_merge_admission(live, merge_admission):
+            # C8 runs only once the named ruleset requires merge-admission bound to
+            # the policy App; unbound or wrong-App bindings already fail without
+            # enrollment reads.
+            findings.extend(
+                merge_admission_enrollment_findings(live, merge_admission, organization)
+            )
     else:
         label = f"merge-admission ruleset {name} is absent"
         receipt = f"merge-admission-receipt=pre-creation gates=creation {fields} ruleset_state=absent"
@@ -888,7 +1138,7 @@ def main(arguments: list[str] | None = None) -> int:
         rulesets, bypass_contracts, frozenset({paused_policy["baseline_ruleset_id"]})
     )
     admission_findings, admission_receipt = merge_admission_receipt(
-        merge_admission, rulesets, app_id_variable
+        merge_admission, rulesets, app_id_variable, organization
     )
     if (
         failures
