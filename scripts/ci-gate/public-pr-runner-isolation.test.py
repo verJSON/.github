@@ -3034,9 +3034,8 @@ for label, dockerfile in (
 # capability-floor-observe left on 2026-11-16 (Part of #1831).
 # ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
 # node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
+# node-ci / node-ci-protected build-test left on 2026-11-16 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
-    ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
@@ -3875,10 +3874,11 @@ expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "scripts/run.s
                True, "a git show inside a script the job runs is refused too")
 # A standalone workflow_call job checks out its caller's repository, so this
 # rule does not reach it; that exposure is the relay backlog's (#1831).
-# node-ci-protected.yml / build-test remains in RELAY_BACKLOG after
-# ai-promotion-retry left on 2026-11-16 (Part of #1831).
+# After node-ci build-test left RELAY_BACKLOG on 2026-11-16, this fixture keeps
+# a synthetic workflow_call job plus a still-backlogged release publish row so
+# the pending ledger is loaded while strict public-call still violates.
 CALLER_TREE = {
-    "node-ci-protected.yml": """
+    "synthetic-relay.yml": """
         on: workflow_call
         jobs:
           build-test:
@@ -3887,11 +3887,20 @@ CALLER_TREE = {
               - uses: actions/checkout@v4
               - run: docker build .
     """,
+    "release.yml": """
+        on: workflow_dispatch
+        jobs:
+          publish:
+            runs-on: [self-hosted, general]
+            steps:
+              - run: echo publish
+    """,
 }
-CALLER_LABEL = ("node-ci-protected.yml [workflow_call]", "build-test")
-expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 1,
-       ("PENDING: node-ci-protected.yml [workflow_call]: job 'build-test'",
-        "VIOLATION: node-ci-protected.yml [public pull_request workflow_call]: job 'build-test'",
+RELEASE_LABEL = ("release.yml [workflow_dispatch]", "publish")
+expect({**CALLER_TREE, "pending.tsv": backlog_row(
+            {"release.yml": CALLER_TREE["release.yml"]}, *RELEASE_LABEL)}, 1,
+       ("PENDING: release.yml [workflow_dispatch]: job 'publish'",
+        "VIOLATION: synthetic-relay.yml [public pull_request workflow_call]: job 'build-test'",
         "scenario digest sha256:"),
        "a generic relay backlog row cannot waive the strict public-call scenario",
        *PENDING_ARGS)
