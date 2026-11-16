@@ -108,6 +108,10 @@ RENDERED_WORKFLOWS = {
         (CONTRACT_REF, "--retry", '["CI"]', REQUIRED_CHECKS),
     ),
     "scripts/gen-gate-rearm-caller.sh": ((CONTRACT_REF,),),
+    "scripts/gen-merge-admission-caller.sh": (
+        (CONTRACT_REF, '["Merge admission trigger"]'),
+        ("--trigger",),
+    ),
     "scripts/gen-ai-review-caller.sh": ((CONTRACT_REF,),),
     "scripts/gen-ai-review-label-rearm-caller.sh": ((CONTRACT_REF,), ("--local",)),
     "scripts/gen-ai-review-lifecycle-rearm-caller.sh": ((CONTRACT_REF,), ("--local",)),

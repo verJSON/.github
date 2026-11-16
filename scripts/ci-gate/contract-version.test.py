@@ -242,6 +242,9 @@ GENERATED_HEADER_FORMATS = {
         "# scripts/gen-ai-review-lifecycle-rearm-caller.sh {sha}"
         " > .github/workflows/ai-review-lifecycle-rearm.yml"),
     "gate re-arm caller": "#   scripts/gen-gate-rearm-caller.sh {sha} > .github/workflows/gate-rearm.yml",
+    "merge admission caller": (
+        "#   scripts/gen-merge-admission-caller.sh {sha} "
+        "'[\"Merge admission trigger\"]' > .github/workflows/merge-admission-caller.yml"),
     "privileged merge caller": (
         "#   scripts/gen-privileged-merge-caller.sh {sha} '[{{\"name\":\"ci\"}}]'"
         " > .github/workflows/ai-privileged-merge.yml"),
@@ -283,6 +286,8 @@ def generator_invocations(sha):
         ("gen-ai-review-label-rearm-caller.sh", [sha]),
         ("gen-ai-review-lifecycle-rearm-caller.sh", [sha]),
         ("gen-gate-rearm-caller.sh", [sha]),
+        ("gen-merge-admission-caller.sh", [sha, '["Merge admission trigger"]']),
+        ("gen-merge-admission-caller.sh", ["--trigger"]),
         ("gen-renovate-compatibility-caller.sh", [sha, "@verjson/example", "1.2.3", "node"]),
         ("gen-privileged-merge-caller.sh", [sha, REQUIRED_CHECKS]),
         ("gen-privileged-merge-caller.sh", [sha, "--retry", '["ci"]', REQUIRED_CHECKS]),
