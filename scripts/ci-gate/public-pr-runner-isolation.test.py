@@ -3033,11 +3033,10 @@ for label, dockerfile in (
 # reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
 # capability-floor-observe left on 2026-11-16 (Part of #1831).
 # ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
+# node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 SNAPSHOT_RELAY_BACKLOG = {
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
-    ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),

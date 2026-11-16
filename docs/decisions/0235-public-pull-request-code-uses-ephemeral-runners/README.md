@@ -1467,3 +1467,21 @@ caller target retarget to `runner-canary.yml` / `canary` and
 `node-ci-protected.yml` / `build-test`. `release.yml` `verify`'s pending
 digest is refreshed because that row binds this checker; the job is
 unchanged.
+
+## Amendment (2026-11-16, #1831) — node-ci eligibility leaves
+
+**Finding.** `node-ci.yml` / `eligibility` and `node-ci-protected.yml` /
+`eligibility` still resolved to a persistent runner when a private Verjson
+caller supplied `inputs.runner` or landed on `CI_LANE_TRUSTED||FALLBACK`,
+because both jobs stamped the catalog `caller-runner` shape. Their
+`[workflow_call]` keys carried relay-backlog pending rows (head detection: no
+known pattern; reasons: fetch).
+
+**Decision (Part of #1831).** Both jobs stamp `untrusted-lane` instead:
+public pull-request events stay on literal `ubuntu-24.04`, and every other
+event takes `fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')`. The
+API-only eligibility probe does not need the caller's self-hosted runner.
+Both keys leave `RELAY_BACKLOG`, the test snapshot, and
+`public-pr-runner-isolation.pending.tsv` together. `release.yml` `verify`'s
+pending digest is refreshed because that row binds this checker; the job is
+unchanged.

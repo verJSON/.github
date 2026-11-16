@@ -325,7 +325,7 @@ def _runner_lane_site_matches(source: str, job_name: str, shape: str) -> bool:
 
 
 def test_node_ci_runner_lane_roles_are_explicit_on_both_workflows() -> None:
-    roles = {"eligibility": "caller-runner", "build-test": "secretless-first"}
+    roles = {"eligibility": "untrusted-lane", "build-test": "secretless-first"}
     workflow_paths = (
         ROOT / ".github/workflows/node-ci.yml",
         ROOT / ".github/workflows/node-ci-protected.yml",
@@ -351,22 +351,22 @@ def test_node_ci_runner_lane_roles_are_explicit_on_both_workflows() -> None:
 
 def test_runner_lane_site_rejects_missing_misplaced_and_wrong_role_markers() -> None:
     valid = (
-        "jobs:\n  eligibility:\n    # runner-lane: caller-runner\n"
-        + catalog.runs_on_line("caller-runner", "    ") + "\n"
+        "jobs:\n  eligibility:\n    # runner-lane: untrusted-lane\n"
+        + catalog.runs_on_line("untrusted-lane", "    ") + "\n"
         + "  build-test:\n    # runner-lane: secretless-first\n"
         + catalog.runs_on_line("secretless-first", "    ") + "\n"
     )
     mutations = (
-        (valid.replace("    # runner-lane: caller-runner\n", "", 1), "eligibility"),
-        (valid.replace("    # runner-lane: caller-runner\n    runs-on:",
-                       "    # runner-lane: caller-runner\n    steps: []\n    runs-on:", 1),
+        (valid.replace("    # runner-lane: untrusted-lane\n", "", 1), "eligibility"),
+        (valid.replace("    # runner-lane: untrusted-lane\n    runs-on:",
+                       "    # runner-lane: untrusted-lane\n    steps: []\n    runs-on:", 1),
          "eligibility"),
-        (valid.replace("    # runner-lane: caller-runner", "    # runner-lane: secretless-first", 1),
+        (valid.replace("    # runner-lane: untrusted-lane", "    # runner-lane: secretless-first", 1),
          "eligibility"),
-        (valid.replace("    # runner-lane: secretless-first", "    # runner-lane: caller-runner", 1),
+        (valid.replace("    # runner-lane: secretless-first", "    # runner-lane: untrusted-lane", 1),
          "build-test"),
     )
-    expected_roles = {"eligibility": "caller-runner", "build-test": "secretless-first"}
+    expected_roles = {"eligibility": "untrusted-lane", "build-test": "secretless-first"}
     for source, job_name in mutations:
         check(f"reject invalid {job_name} runner-lane marker",
               _runner_lane_site_matches(source, job_name, expected_roles[job_name]), False)

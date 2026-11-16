@@ -2706,6 +2706,7 @@ RELAY_HEAD_REFUSAL = (
 # reconcile/canary/receipt jobs left on 2026-11-16 (Part of #1831).
 # capability-floor-observe left on 2026-11-16 (Part of #1831).
 # ai-promotion-retry.yml [workflow_call] resolve left on 2026-11-16 (Part of #1831).
+# node-ci / node-ci-protected eligibility left on 2026-11-16 (Part of #1831).
 # The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
@@ -2719,9 +2720,7 @@ RELAY_HEAD_REFUSAL = (
 # it is removed here.
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
-    ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
-    ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     # The one full-checkout tolerance (Part of #1831): verify runs the release
