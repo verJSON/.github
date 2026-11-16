@@ -66,7 +66,7 @@ literal_hosted_job_sites() {
 }
 
 literal_hosted_sites="$(literal_hosted_job_sites "${workflow_files[@]}")"
-expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:verify-default-branch:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:cleanup_arm_receipt:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:invalid_verjson_route:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:validate_privileged_lane:    runs-on: ubuntu-24.04\napp-key-environment.yml:validate:    runs-on: ubuntu-24.04\ngate-rearm.yml:app-key-policy:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:acquire-private-node-dependencies:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:attest-sbom:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:candidate-manifest:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:evict-node-modules-transfer:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:mirror-gar:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:prepare:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-base:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-derived:    runs-on: ubuntu-24.04\ncontainer-release.yml:promote:    runs-on: ubuntu-24.04\nprivileged-merge-conformance.yml:audit:    runs-on: ubuntu-24.04'
+expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:verify-default-branch:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:cleanup_arm_receipt:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:invalid_verjson_route:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:validate_privileged_lane:    runs-on: ubuntu-24.04\napp-key-environment.yml:validate:    runs-on: ubuntu-24.04\ngate-rearm.yml:app-key-policy:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:acquire-private-node-dependencies:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:attest-sbom:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:candidate-manifest:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:evict-node-modules-transfer:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:mirror-gar:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:post-publish-smoke:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:prepare:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-base:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-derived:    runs-on: ubuntu-24.04\ncontainer-release.yml:promote:    runs-on: ubuntu-24.04\nprivileged-merge-conformance.yml:audit:    runs-on: ubuntu-24.04'
 expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
   $'container-candidate-publish.yml:public-call-guard:    runs-on: ubuntu-24.04' \
@@ -750,6 +750,7 @@ container-candidate-publish.yml publish-derived
 container-candidate-publish.yml attest-sbom
 container-candidate-publish.yml candidate-manifest
 container-candidate-publish.yml mirror-gar
+container-candidate-publish.yml post-publish-smoke
 container-release.yml promote
 TARGETS
 }
@@ -1451,7 +1452,7 @@ for wf in node-ci.yml node-ci-protected.yml; do
   fi
 done
 
-for job in publish-base publish-derived candidate-manifest; do
+for job in publish-base publish-derived post-publish-smoke candidate-manifest; do
   assert_route "$workflows/container-candidate-publish.yml" "$job" Verjson/.github '' false \
     '["self-hosted","trusted-canary"]' '["self-hosted","untrusted-canary"]' \
     'ubuntu-24.04' "container-candidate $job — Verjson publication uses fixed hosted provenance"

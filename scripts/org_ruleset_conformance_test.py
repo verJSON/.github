@@ -841,9 +841,18 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         self.assertNotIn("paused-relaxation=accepted", result.stdout)
 
     def run_with_paused_baseline(self, baseline):
-        """Audit the stand-in beside core-checks-node, the only reviewed contract present."""
+        """Audit the stand-in beside core-checks-node plus the pinned merge-admission contract."""
         core_checks_node = ruleset(
             20515817, name="core-checks-node", bypass_actors=copy.deepcopy(CORE_CHECKS_NODE_BYPASS)
+        )
+        # #2143 pinned merge-admission-required (27387670) into the live policy. The
+        # paused-baseline fixture must include that ruleset in its inventory or the
+        # audit fails closed as a stale bypass contract on every platform lane.
+        merge_admission = merge_admission_ruleset(
+            27387670,
+            {"context": "merge-admission", "integration_id": 4528902},
+            enforcement="active",
+            scope="canary",
         )
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
         policy["bypass_actor_contracts"] = [
@@ -853,9 +862,14 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             or contract["name"] == MERGE_ADMISSION_BINDING["ruleset_name"]
         ]
         return self.run_audit(
-            [[{"id": 20515817}, {"id": baseline["id"]}]],
-            {20515817: core_checks_node, baseline["id"]: baseline},
+            [[{"id": 20515817}, {"id": baseline["id"]}, {"id": 27387670}]],
+            {
+                20515817: core_checks_node,
+                baseline["id"]: baseline,
+                27387670: merge_admission,
+            },
             raw_policy=json.dumps(policy),
+            extra_responses=merge_admission_canary_content_responses(),
         )
 
     def test_paused_baseline_with_the_reviewed_core_checks_bypass_set_is_accepted(self):

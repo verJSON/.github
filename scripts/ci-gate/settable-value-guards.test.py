@@ -56,7 +56,7 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the
 # key and fails, and an entry that no longer matches a guard fails too.
-GUARD_COUNT = 568
+GUARD_COUNT = 569
 REASON_C = "CONTRACT_REF is the contract SHA the generator validated as 40 lowercase hex and embedded. "
 REASON_A = "accepted is generated_set_check argument 5; every call's literal argument is itself scanned as an argument guard. "
 REASON_P = "consumer_pattern is stamp_before argument 2; every call's literal argument is itself scanned as an argument guard. "
@@ -66,6 +66,7 @@ REASON_L = "the two legacy token names are fixed literals, split only to keep th
 REASON_GEN_REF = "ref is substituted at generation; the generator first requires it to be 40 lowercase hex. "
 REASON_GEN_SHA = "the value is substituted at generation from sha256sum output: 64 lowercase hex. "
 REASON_GEN_CLEANUP = "the value is substituted at generation from a jq boolean check: true or false. "
+REASON_GEN_POST_PUBLISH_SMOKE = "the value is substituted at generation from post_publish_smoke_mode: true or false only. "
 REASON_H = "hosted_image is assigned two fixed literals, the standard image shape and the same shape with a closed core-count suffix; no variable data reaches it (ADR 0238). "
 CT = "<gen-changelog-caller contract-test>"
 REVIEWED_UNCLASSIFIABLE = {
@@ -91,6 +92,8 @@ REVIEWED_UNCLASSIFIABLE = {
         REASON_GEN_REF,
     "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'cleanup-unused-docker-images: ⟦gen:cleanup_unused_docker_images⟧'":
         REASON_GEN_CLEANUP,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'post-publish-smoke: ⟦gen:post_publish_smoke⟧'":
+        REASON_GEN_POST_PUBLISH_SMOKE,
     "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'acquisition-sha256: ⟦gen:acquisition_sha256⟧'":
         REASON_GEN_SHA,
     "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'transfer-sha256: ⟦gen:transfer_sha256⟧'":

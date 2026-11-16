@@ -207,6 +207,10 @@ assert "secrets" not in validate, (
 )
 publish = caller["jobs"]["publish"]
 assert publish["with"]["cleanup-unused-docker-images"] is True
+assert publish["with"]["post-publish-smoke"] is False
+assert "post-publish-smoke" not in validate["with"], (
+    "pull-request validation must not carry the post-publish smoke opt-in"
+)
 assert publish["secrets"] == {
     "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
     "submodules-token": "${{ secrets.SUBMODULES_TOKEN }}",
@@ -249,6 +253,40 @@ jq '.cleanupUnusedDockerImages = "true"' \
 # jq's `error` exits 5; the message is the generator's own.
 (cd "$invalid_cleanup_consumer" && refuses 'candidate generator accepted a non-boolean cleanup setting' 5 \
   'cleanupUnusedDockerImages must be a boolean' "$generator" workflow "$ref" container-candidate.json)
+
+smoke_consumer="$tmp/smoke-generated"
+mkdir -p "$smoke_consumer/.github/workflows" "$smoke_consumer/scripts"
+jq --arg publisher "$publisher" \
+  '.postPublishSmoke = {"variant":"default","command":"node scripts/verify-oci-smoke.mjs --image \"$IMAGE_REF\""}
+   | .images[].provenance.builderIdentity = $publisher' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$smoke_consumer/container-candidate.json"
+(cd "$smoke_consumer" && "$generator" workflow "$ref" container-candidate.json) \
+  > "$smoke_consumer/.github/workflows/container-candidate.yml"
+SMOKE_CALLER="$smoke_consumer/.github/workflows/container-candidate.yml" python3 - <<'PY'
+import os
+import yaml
+
+with open(os.environ["SMOKE_CALLER"], encoding="utf-8") as stream:
+    caller = yaml.safe_load(stream)
+
+assert "post-publish-smoke" not in caller["jobs"]["validate"]["with"]
+assert caller["jobs"]["publish"]["with"]["post-publish-smoke"] is True
+PY
+invalid_smoke_consumer="$tmp/invalid-smoke-generated"
+mkdir -p "$invalid_smoke_consumer/.github/workflows"
+jq '.postPublishSmoke = {"variant":"default","command":""}' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$invalid_smoke_consumer/container-candidate.json"
+(cd "$invalid_smoke_consumer" && refuses 'candidate generator accepted an empty post-publish smoke command' 5 \
+  'postPublishSmoke.command must be a non-empty single-line shell command' \
+  "$generator" workflow "$ref" container-candidate.json)
+jq '.postPublishSmoke = {"variant":"missing","command":"true"}' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$invalid_smoke_consumer/container-candidate.json"
+(cd "$invalid_smoke_consumer" && refuses 'candidate generator accepted an unknown post-publish smoke variant' 5 \
+  'postPublishSmoke.variant must name an image in images[]' \
+  "$generator" workflow "$ref" container-candidate.json)
 
 workflow="$root/.github/workflows/container-candidate.yml"
 publish_workflow="$root/.github/workflows/container-candidate-publish.yml"
@@ -310,7 +348,8 @@ candidate_condition = (
     "&& needs.publish-base.result == 'success' "
     "&& needs.publish-derived.result == 'success' "
     "&& needs.attest-sbom.result == 'success' "
-    "&& (needs.mirror-gar.result == 'success' || needs.mirror-gar.result == 'skipped')"
+    "&& (needs.mirror-gar.result == 'success' || needs.mirror-gar.result == 'skipped') "
+    "&& (needs.post-publish-smoke.result == 'success' || needs.post-publish-smoke.result == 'skipped')"
 )
 mirror_gar_condition = (
     "always() && (" + authority_condition + ") "
@@ -319,6 +358,13 @@ mirror_gar_condition = (
     "&& needs.publish-derived.result == 'success' "
     "&& needs.attest-sbom.result == 'success' "
     "&& needs.prepare.outputs.has-gar == 'true'"
+)
+post_publish_smoke_condition = (
+    "always() && (" + authority_condition + ") "
+    "&& needs.prepare.result == 'success' "
+    "&& needs.publish-base.result == 'success' "
+    "&& needs.publish-derived.result == 'success' "
+    "&& needs.prepare.outputs.post-publish-smoke == 'true'"
 )
 expected_conditions = {
     "publish-base": (
@@ -341,6 +387,7 @@ expected_conditions = {
         "&& needs.publish-derived.result == 'success'"
     ),
     "mirror-gar": mirror_gar_condition,
+    "post-publish-smoke": post_publish_smoke_condition,
     "candidate-manifest": candidate_condition,
 }
 expected_acquisition_condition = (
@@ -375,8 +422,8 @@ def validate_authority(read_only, publication):
     }, "read-only entrypoint contains publication authority"
     assert set(publication["jobs"]) == {
         "prepare", "acquire-private-node-dependencies", "publish-base",
-        "publish-derived", "attest-sbom", "mirror-gar", "candidate-manifest",
-        "evict-node-modules-transfer", "public-call-guard"
+        "publish-derived", "attest-sbom", "mirror-gar", "post-publish-smoke",
+        "candidate-manifest", "evict-node-modules-transfer", "public-call-guard"
     }, "publication entrypoint has an unexpected static graph"
     for job_name in publication["jobs"]:
         assert publication["jobs"][job_name]["runs-on"] == "ubuntu-24.04", (
@@ -461,8 +508,21 @@ def validate_authority(read_only, publication):
             assert publication_job["outputs"].pop("publisher-workflow-ref", None) == (
                 "${{ steps.config.outputs.publisher-workflow-ref }}"
             )
+            # Post-publish smoke is publication-only; pull-request prepare stays smoke-free.
+            assert publication_job["outputs"].pop("post-publish-smoke", None) == (
+                "${{ steps.config.outputs.post-publish-smoke }}"
+            )
+            assert publication_job["outputs"].pop("post-publish-smoke-variant", None) == (
+                "${{ steps.config.outputs.post-publish-smoke-variant }}"
+            )
+            assert publication_job["outputs"].pop("post-publish-smoke-artifact", None) == (
+                "${{ steps.config.outputs.post-publish-smoke-artifact }}"
+            )
             publication_config = next(
                 step for step in publication_job["steps"] if step.get("id") == "config"
+            )
+            assert publication_config["env"].pop("POST_PUBLISH_SMOKE", None) == (
+                "${{ inputs.post-publish-smoke }}"
             )
             publisher_identity_block = (
                 "# contract-ref already equals job.workflow_sha. When it is also the source\n"
@@ -481,6 +541,40 @@ def validate_authority(read_only, publication):
             publication_config["run"] = publication_config["run"].replace(
                 publisher_identity_block, ""
             )
+            smoke_jq_binding = (
+                '  --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" \\\n'
+                '  --argjson post_publish_smoke "$POST_PUBLISH_SMOKE" \'\n'
+            )
+            read_only_jq_binding = (
+                '  --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" \'\n'
+            )
+            assert publication_config["run"].count(smoke_jq_binding) == 1
+            publication_config["run"] = publication_config["run"].replace(
+                smoke_jq_binding, read_only_jq_binding
+            )
+            smoke_command_def = (
+                "  def safe_smoke_command:\n"
+                '    type == "string" and length > 0 and length <= 4096\n'
+                '    and (contains("\\n") | not) and (contains("\\r") | not);\n'
+            )
+            assert publication_config["run"].count(smoke_command_def) == 1
+            publication_config["run"] = publication_config["run"].replace(smoke_command_def, "")
+            smoke_validation_block = (
+                "  and (\n"
+                "    if $post_publish_smoke then\n"
+                '      has("postPublishSmoke")\n'
+                '      and (.postPublishSmoke | type == "object")\n'
+                '      and (.postPublishSmoke | keys | sort == ["command","variant"])\n'
+                "      and (.postPublishSmoke.variant | safe_component)\n"
+                "      and (.postPublishSmoke.command | safe_smoke_command)\n"
+                "      and (.postPublishSmoke.variant as $smoke_variant | any(.images[]; .variant == $smoke_variant))\n"
+                "    else\n"
+                '      (has("postPublishSmoke") | not)\n'
+                "    end\n"
+                "  )\n"
+            )
+            assert publication_config["run"].count(smoke_validation_block) == 1
+            publication_config["run"] = publication_config["run"].replace(smoke_validation_block, "")
             publication_config_lines = publication_config["run"].splitlines()
             mirror_matrix_line = (
                 'mirror_matrix="$(jq -c \'[.[] | select(.gar.provider == "gar")] | '
@@ -488,13 +582,29 @@ def validate_authority(read_only, publication):
             )
             mirror_matrix_output_line = '  echo "mirror-matrix=$mirror_matrix"'
             publisher_output_line = '  echo "publisher-workflow-ref=$publisher_workflow_ref"'
+            smoke_output_lines = {
+                '  echo "post-publish-smoke=$(jq -r \'has("postPublishSmoke")\' "$CONFIG_PATH")"',
+                '  echo "post-publish-smoke-variant=$(jq -r \'.postPublishSmoke.variant // empty\' "$CONFIG_PATH")"',
+                (
+                    '  echo "post-publish-smoke-artifact=$(jq -r \'if has("postPublishSmoke") then '
+                    '("candidate-image-" + (.postPublishSmoke.variant | gsub("[^A-Za-z0-9._-]"; "-"))) '
+                    'else empty end\' "$CONFIG_PATH")"'
+                ),
+            }
             assert publication_config_lines.count(mirror_matrix_line) == 1
             assert publication_config_lines.count(mirror_matrix_output_line) == 1
             assert publication_config_lines.count(publisher_output_line) == 1
+            for line in smoke_output_lines:
+                assert publication_config_lines.count(line) == 1, line
             publication_config["run"] = "\n".join(
                 line
                 for line in publication_config_lines
-                if line not in {mirror_matrix_line, mirror_matrix_output_line, publisher_output_line}
+                if line not in {
+                    mirror_matrix_line,
+                    mirror_matrix_output_line,
+                    publisher_output_line,
+                    *smoke_output_lines,
+                }
             ) + ("\n" if publication_config["run"].endswith("\n") else "")
             assert read_only_job == publication_job, (
                 f"shared trusted-input job {job_name} drifted beyond its trust-isolated runner assignment"
@@ -552,7 +662,11 @@ def validate_authority(read_only, publication):
         "candidate manifest direct producers drifted"
     )
 
-candidate_producers = {"prepare", "publish-base", "publish-derived", "attest-sbom", "mirror-gar"}
+optional_candidate_producers = {"mirror-gar", "post-publish-smoke"}
+candidate_producers = {
+    "prepare", "publish-base", "publish-derived", "attest-sbom", "mirror-gar",
+    "post-publish-smoke",
+}
 candidate_job = publisher["jobs"]["candidate-manifest"]
 assert unguarded_condition(candidate_job) == candidate_condition
 
@@ -563,8 +677,8 @@ assert unguarded_condition(candidate_job) == candidate_condition
 def candidate_manifest_runs(results):
     return (
         unguarded_condition(candidate_job).startswith("always()")
-        and all(results[name] == "success" for name in candidate_producers - {"mirror-gar"})
-        and results["mirror-gar"] in ("success", "skipped")
+        and all(results[name] == "success" for name in candidate_producers - optional_candidate_producers)
+        and all(results[name] in ("success", "skipped") for name in optional_candidate_producers)
     )
 
 assert candidate_manifest_runs({
@@ -573,25 +687,31 @@ assert candidate_manifest_runs({
     "publish-derived": "success",
     "attest-sbom": "success",
     "mirror-gar": "skipped",
+    "post-publish-smoke": "skipped",
 }), "optional skipped dependency suppressed complete candidate manifest"
 for terminal_status in ("skipped", "cancelled", "failure"):
-    for producer in candidate_producers - {"mirror-gar"}:
+    for producer in candidate_producers - optional_candidate_producers:
         results = {name: "success" for name in candidate_producers}
         results["mirror-gar"] = "skipped"
+        results["post-publish-smoke"] = "skipped"
         results[producer] = terminal_status
         assert not candidate_manifest_runs(results), (
             f"{terminal_status} {producer} admitted candidate manifest"
         )
-for terminal_status in ("cancelled", "failure"):
-    results = {name: "success" for name in candidate_producers}
-    results["mirror-gar"] = terminal_status
-    assert not candidate_manifest_runs(results), (
-        f"{terminal_status} mirror-gar admitted candidate manifest"
-    )
+for optional in optional_candidate_producers:
+    for terminal_status in ("cancelled", "failure"):
+        results = {name: "success" for name in candidate_producers}
+        results["mirror-gar"] = "skipped"
+        results["post-publish-smoke"] = "skipped"
+        results[optional] = terminal_status
+        assert not candidate_manifest_runs(results), (
+            f"{terminal_status} {optional} admitted candidate manifest"
+        )
 
 for unsafe_needs in (
     candidate_producers - {"attest-sbom"},
     candidate_producers - {"mirror-gar"},
+    candidate_producers - {"post-publish-smoke"},
     candidate_producers | {"acquire-private-node-dependencies"},
 ):
     mutated = copy.deepcopy(publisher)
@@ -605,10 +725,13 @@ for unsafe_needs in (
 unsafe_conditions = [candidate_condition.removeprefix("always() && ")]
 unsafe_conditions.extend(
     candidate_condition.replace(f" && needs.{producer}.result == 'success'", "")
-    for producer in candidate_producers - {"mirror-gar"}
+    for producer in candidate_producers - optional_candidate_producers
 )
 unsafe_conditions.append(candidate_condition.replace(
     " && (needs.mirror-gar.result == 'success' || needs.mirror-gar.result == 'skipped')", ""
+))
+unsafe_conditions.append(candidate_condition.replace(
+    " && (needs.post-publish-smoke.result == 'success' || needs.post-publish-smoke.result == 'skipped')", ""
 ))
 for unsafe in unsafe_conditions:
     mutated = copy.deepcopy(publisher)
@@ -741,8 +864,27 @@ for job_name, job in publisher["jobs"].items():
         assert "actions" not in job.get("permissions", {}) or job["permissions"]["actions"] == "read", (
             f"{job_name} must not gain cache write authority"
         )
+smoke = publisher["jobs"]["post-publish-smoke"]
+assert set(smoke["needs"]) == {
+    "public-call-guard", "prepare", "publish-base", "publish-derived"
+}, "post-publish smoke must wait only for published digests"
+assert smoke["permissions"] == {
+    "actions": "read", "contents": "read", "packages": "read"
+}, "post-publish smoke must stay package-credential free"
+assert unguarded_condition(smoke) == post_publish_smoke_condition
+smoke_step = next(step for step in smoke["steps"] if step.get("name") == "Smoke the published candidate digest")
+assert smoke_step["env"]["NODE_AUTH_TOKEN"] == ""
+assert smoke_step["env"]["NPM_TOKEN"] == ""
+assert smoke_step["env"]["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] == ""
+assert smoke_step["env"]["ACTIONS_ID_TOKEN_REQUEST_URL"] == ""
+assert "published candidate digest is missing" in smoke_step["run"]
+assert "post-publish smoke command is missing" in smoke_step["run"]
+assert 'IMAGE_REF="$image_ref"' in smoke_step["run"]
+assert "/usr/bin/env -i" in smoke_step["run"]
+assert "secrets" not in smoke
 assert canary["jobs"]["validate"]["permissions"] == validation_permissions
 assert canary["jobs"]["publish"]["permissions"] == publication_permissions
+assert canary["jobs"]["publish"]["with"]["post-publish-smoke"] is False
 assert canary["jobs"]["validate"]["uses"] == "./.github/workflows/container-candidate.yml"
 assert canary["jobs"]["publish"]["uses"] == "./.github/workflows/container-candidate-publish.yml"
 assert canary["jobs"]["publish"]["if"] == (
@@ -986,6 +1128,7 @@ run_publish_prepare() {
   local repository=$3
   local source_commit=$4
   local cleanup=$5
+  local smoke=${6:-false}
 
   (
     cd "$consumer"
@@ -1001,6 +1144,7 @@ run_publish_prepare() {
       GITHUB_SHA="$source_commit" \
       JOB_WORKFLOW_SHA="$ref" \
       CLEANUP_UNUSED_DOCKER_IMAGES="$cleanup" \
+      POST_PUBLISH_SMOKE="$smoke" \
       RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
       RUNNER_TEMP="$runner_temp" \
       PATH="$mock_bin:$PATH" \
@@ -1101,6 +1245,68 @@ jq '.cleanupUnusedDockerImages = "true"' \
   > "$first_adoption/cleanup-setting-invalid-type.json"
 run_invalid_config cleanup-setting-invalid-type.json "$tmp/cleanup-setting-invalid-type-output" \
   'invalid or unauthorized candidate configuration'
+run_invalid_publish_config() {
+  local config_path=$1
+  local output=$2
+  local smoke=$3
+  local reason=$4
+  local status=0
+
+  (
+    cd "$first_adoption"
+    CONFIG_RELATIVE_PATH="$config_path" \
+      CONTAINER_DESTINATION_HELPER="$tmp/contract/scripts/container_registry_destinations.py" \
+      CONTRACT_REF="$ref" \
+      GITHUB_OUTPUT="$output" \
+      GITHUB_REF=refs/heads/main \
+      GITHUB_REPOSITORY=Verjson/example \
+      GITHUB_REPOSITORY_OWNER=Verjson \
+      GITHUB_RUN_ATTEMPT=1 \
+      GITHUB_RUN_ID=12345 \
+      GITHUB_SHA="$(git -C "$first_adoption" rev-parse HEAD)" \
+      JOB_WORKFLOW_SHA="$ref" \
+      CLEANUP_UNUSED_DOCKER_IMAGES=false \
+      POST_PUBLISH_SMOKE="$smoke" \
+      RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
+      RUNNER_TEMP="$runner_temp" \
+      PATH="$mock_bin:$PATH" \
+      SOURCE_PATH=. \
+      bash "$publish_prepare_script"
+  ) >"$tmp/invalid-publish-config.out" 2>"$tmp/invalid-publish-config.err" || status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "publish candidate config unexpectedly passed: $config_path (smoke=$smoke)" >&2
+    exit 1
+  fi
+  if [ "$status" -ne 1 ] || ! grep -qxF -- "::error::$reason" "$tmp/invalid-publish-config.out"; then
+    echo "publish candidate config $config_path was refused (exit $status, expected 1) without the reason: $reason" >&2
+    sed 's/^/diag - /' "$tmp/invalid-publish-config.out" "$tmp/invalid-publish-config.err" >&2
+    exit 1
+  fi
+}
+
+jq '.postPublishSmoke = {"variant":"default","command":"true"}' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$first_adoption/smoke-setting-mismatch.json"
+# Input remains false while the config claims smoke is configured.
+run_invalid_publish_config smoke-setting-mismatch.json "$tmp/smoke-setting-mismatch-output" false \
+  'invalid or unauthorized candidate configuration'
+jq '.postPublishSmoke = {"variant":"default","command":""}' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$first_adoption/smoke-command-missing.json"
+# Smoke is requested, but the reviewed command is empty.
+run_invalid_publish_config smoke-command-missing.json "$tmp/smoke-command-missing-output" true \
+  'invalid or unauthorized candidate configuration'
+smoke_ok_consumer="$tmp/smoke-ok-consumer"
+mkdir -p "$smoke_ok_consumer"
+jq '.postPublishSmoke = {"variant":"default","command":"node scripts/verify-oci-smoke.mjs --image \"$IMAGE_REF\""}' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$smoke_ok_consumer/container-candidate.json"
+smoke_ok_output="$tmp/smoke-ok-output"
+run_publish_prepare "$smoke_ok_consumer" "$smoke_ok_output" Verjson/example \
+  "$(git -C "$first_adoption" rev-parse HEAD)" false true
+grep -qx 'post-publish-smoke=true' "$smoke_ok_output"
+grep -qx 'post-publish-smoke-variant=default' "$smoke_ok_output"
+grep -qx 'post-publish-smoke-artifact=candidate-image-default' "$smoke_ok_output"
 
 cp "$root/scripts/fixtures/container-candidate/single.json" "$tmp/outside-candidate.json"
 run_invalid_config ../outside-candidate.json "$tmp/traversal-output" \
@@ -1225,17 +1431,25 @@ grep -qF 'python3 -I "$helper" spdx-evidence --manifest "$evidence_manifest"' "$
 grep -qF 'platforms:$platforms' "$publish_workflow"
 grep -q 'commit identity already records a different digest' "$publish_workflow"
 grep -q 'imagetools create -t "\$commit_tag"' "$publish_workflow"
-mirror_gar_job="$(awk '/^  mirror-gar:/{seen=1} /^  candidate-manifest:/{seen=0} seen' "$publish_workflow")"
+mirror_gar_job="$(awk '/^  mirror-gar:/{seen=1} /^  post-publish-smoke:/{seen=0} seen' "$publish_workflow")"
 grep -q "github.event_name == 'push'" <<<"$mirror_gar_job"
 grep -q "needs.prepare.outputs.has-gar == 'true'" <<<"$mirror_gar_job"
 grep -q 'id-token: write' <<<"$mirror_gar_job"
 grep -q 'google-github-actions/auth@[0123456789abcdef]\{40\}' <<<"$mirror_gar_job"
 grep -q 'steps.gar-auth.outputs.access_token' <<<"$mirror_gar_job"
 assert_absent -q 'steps.gar-auth.outputs.auth_token' <<<"$mirror_gar_job"
+post_publish_smoke_job="$(awk '/^  post-publish-smoke:/{seen=1} /^  candidate-manifest:/{seen=0} seen' "$publish_workflow")"
+grep -q "needs.prepare.outputs.post-publish-smoke == 'true'" <<<"$post_publish_smoke_job"
+grep -q 'published candidate digest is missing' <<<"$post_publish_smoke_job"
+grep -q 'post-publish smoke command is missing' <<<"$post_publish_smoke_job"
+grep -qF "NODE_AUTH_TOKEN: ''" <<<"$post_publish_smoke_job"
+assert_absent -q 'NODE_AUTH_TOKEN: ${{ secrets' <<<"$post_publish_smoke_job"
+assert_absent -q 'id-token: write' <<<"$post_publish_smoke_job"
 grep -qF '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant))' "$publish_workflow"
 grep -q -- '"cp", "--recursive"' "$root/scripts/container_registry_destinations.py"
 grep -q 'destination digest differs from the candidate digest' "$root/scripts/container_registry_destinations.py"
 grep -q 'needs.mirror-gar.result' "$publish_workflow"
+grep -q 'needs.post-publish-smoke.result' "$publish_workflow"
 grep -qF 'CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}' "$publish_workflow"
 grep -qF 'CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}' "$publish_workflow"
 grep -qF 'expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF"' "$publish_workflow"
@@ -1243,7 +1457,7 @@ if awk '/^  pull-request-build:/{seen=1} /^  publish-base:/{seen=0} seen' "$work
   echo "pull-request build exposes a publication capability" >&2
   exit 1
 fi
-attest_sbom_job="$(awk '/^  attest-sbom:/{seen=1} /^  candidate-manifest:/{seen=0} seen' "$publish_workflow")"
+attest_sbom_job="$(awk '/^  attest-sbom:/{seen=1} /^  mirror-gar:/{seen=0} seen' "$publish_workflow")"
 attest_sbom_permissions="$(awk '
   /^    permissions:$/ { seen=1; next }
   seen && /^    [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+:/ { exit }
@@ -1688,6 +1902,10 @@ with open(os.environ["DISK_HELPER"], encoding="utf-8") as stream:
 cleanup_schema = schema["properties"]["cleanupUnusedDockerImages"]
 assert cleanup_schema["type"] == "boolean"
 assert cleanup_schema["default"] is False
+smoke_schema = schema["properties"]["postPublishSmoke"]
+assert smoke_schema["type"] == "object"
+assert smoke_schema["required"] == ["variant", "command"]
+assert smoke_schema["additionalProperties"] is False
 assert "prune" not in disk_helper.lower(), "global prune is forbidden by the publisher contract"
 assert "docker image rm \"$removal_target\"" in disk_helper
 
@@ -1695,8 +1913,12 @@ prepare = workflow["jobs"]["prepare"]["steps"]
 config_step = next(step for step in prepare if step.get("id") == "config")
 assert 'type == "boolean"' in config_step["run"]
 assert 'cleanup-unused-docker-images=$(jq -r' in config_step["run"]
+assert 'post-publish-smoke=$(jq -r' in config_step["run"]
+assert 'has("postPublishSmoke")' in config_step["run"]
 workflow_call = workflow.get("on", workflow.get(True, {})).get("workflow_call", {})
 assert "disk-sha256" in workflow_call["inputs"]
+assert workflow_call["inputs"]["post-publish-smoke"]["type"] == "boolean"
+assert workflow_call["inputs"]["post-publish-smoke"]["required"] is True
 
 for job_name in ("publish-base", "publish-derived"):
     job = workflow["jobs"][job_name]

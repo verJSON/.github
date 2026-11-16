@@ -155,3 +155,21 @@ changelog contract; continue using
 `Verjson/.github/scripts/gen-changelog-caller.sh` for the changelog workflow,
 renderer, and contract test at one immutable SHA. Do not replace or hand-edit
 generated artifacts.
+
+### Post-publish OCI smoke
+
+To smoke a published candidate digest after credential-separated publication, declare
+an optional reviewed `postPublishSmoke` object and regenerate the caller:
+
+```json
+"postPublishSmoke": {
+  "variant": "cli",
+  "command": "node scripts/verify-oci-smoke.mjs --image \"$IMAGE_REF\""
+}
+```
+
+The generated publish job passes `post-publish-smoke: true`. The publisher then runs the
+command against the published `repository@sha256:…` digest with `IMAGE_REPOSITORY`,
+`IMAGE_DIGEST`, `IMAGE_REF`, and `IMAGE_VARIANT` set, and with no package-registry
+token. Absence of the object leaves smoke skipped. A configured smoke with a missing
+digest or command fails closed and blocks the candidate manifest.
