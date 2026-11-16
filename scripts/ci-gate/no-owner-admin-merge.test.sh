@@ -7,7 +7,8 @@ cd "$root"
 
 hits="$(
   # Production trees only; exclude tests, fixtures, NEXT, and docs.
-  rg -n -e '--admin' \
+  # Match the merge invocation, not an unanchored `--admin` substring (#2153).
+  rg -n -e 'gh pr merge[^\n]*--admin' -e 'mergePullRequest[^\n]*[Aa]dmin' \
     --glob '!**/*test*' \
     --glob '!**/fixtures/**' \
     --glob '!NEXT/**' \
