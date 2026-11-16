@@ -5,6 +5,6 @@ impact: patch
 title: Prove no-owner-admin-merge catches both --admin flag orderings
 ---
 
-Add explicit probes to `no-owner-admin-merge.test.sh` so the inventory pattern is
-shown to match `gh pr merge --admin …` and `gh pr merge … --admin`, and to reject
-non-merge `--admin` strings. Closes #2156.
+Rewrite `no-owner-admin-merge.test.sh` on python3 so merge-gate runners (no
+ripgrep) still fail closed, and add probes for both `gh pr merge --admin …` and
+`gh pr merge … --admin` plus a non-merge `--admin` negative. Closes #2156.
