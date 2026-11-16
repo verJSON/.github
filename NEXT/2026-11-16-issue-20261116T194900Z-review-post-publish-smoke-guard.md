@@ -1,6 +1,7 @@
 ---
 date: 2026-11-16
-issue: 2141
+id: 20261116T194900Z
+refs: 2141
 impact: patch
 title: Review the post-publish-smoke settable-value guard
 ---
