@@ -2700,6 +2700,7 @@ RELAY_HEAD_REFUSAL = (
 # (Part of #1831). generated-artifacts/notify-umbrella/pulumi-ci preview/
 # repo-hygiene/ui-ci left on 2026-11-15 (Part of #1831).
 # changelog/pulumi remaining/release-dispatch/propose left on 2026-11-15
+# (Part of #1831). helm-ci.yml lint-template left on 2026-11-16
 # (Part of #1831). The keys that remain are the
 # only ones a pending row may name; any other key, including every
 # pull_request job, is a format error, so the list cannot grow without
@@ -2730,7 +2731,6 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('container-release.yml [workflow_call]', 'retention'): frozenset({'relay-head', 'runtime-checkout'}),
     ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
     ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
-    ('helm-ci.yml [workflow_call]', 'lint-template'): frozenset({'relay-head'}),
     ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
     ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
     ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),

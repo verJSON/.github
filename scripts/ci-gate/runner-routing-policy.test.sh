@@ -1201,7 +1201,6 @@ policy_jobs() {
   cat <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
-helm-ci.yml lint-template
 TARGETS
 }
 
@@ -1248,6 +1247,7 @@ shared_fallback_jobs() {
 changelog-release.yml release
 changelog-validate.yml validate
 generated-artifacts.yml validate
+helm-ci.yml lint-template
 notify-umbrella.yml dispatch
 pulumi-ci.yml preview
 pulumi-ci.yml preview-admission
@@ -1263,6 +1263,7 @@ shared_runner_input_jobs() {
 changelog-release.yml release
 changelog-validate.yml validate
 generated-artifacts.yml validate
+helm-ci.yml lint-template
 notify-umbrella.yml dispatch
 pulumi-ci.yml preview
 release-dispatch.yml release-dispatch
@@ -1367,7 +1368,6 @@ while read -r wf_name job; do
 done <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
-helm-ci.yml lint-template
 container-candidate.yml prepare
 container-candidate.yml pull-request-build
 TARGETS
