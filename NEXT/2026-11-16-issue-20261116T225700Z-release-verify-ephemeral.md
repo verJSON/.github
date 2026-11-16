@@ -1,6 +1,6 @@
 ---
 date: 2026-11-16
-issue: 1831
+id: 20261116T225700Z
 impact: patch
 title: Route release verify off the persistent pool for public repositories
 ---
