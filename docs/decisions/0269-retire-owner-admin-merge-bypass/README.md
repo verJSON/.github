@@ -30,10 +30,12 @@ autonomous terminal path.
 ## Decision
 
 1. **No owner `--admin` on the autonomous terminal path.** Production workflows
-   and scripts in this repository must not invoke `gh pr merge --admin` (or
-   equivalent GraphQL `mergePullRequest` with admin bypass) for autonomous
-   merges. Inventory on 2026-11-16 found no live call sites; remaining `--admin`
-   strings are test and fixture negatives only.
+   and scripts in this repository must not invoke `gh pr merge --admin` under an
+   owner (or other human) principal, and must not use equivalent GraphQL
+   `mergePullRequest` admin bypass for that principal. Inventory on 2026-11-16
+   found no live call sites; remaining `--admin` strings are test and fixture
+   negatives only. This does not forbid the merge App from using its ruleset
+   bypass after evidence-bound admission (Decision 2).
 2. **Allowed merge principals.** Autonomous merges that the canonical contract
    owns go through the merge App under ruleset bypass only after
    `scripts/assert-mergeable-head.sh` prints `true` for the exact head (Gates
