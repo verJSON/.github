@@ -3,6 +3,7 @@
 - **Date:** 2026-11-16
 - **Status:** Accepted (ARB ratification in the default-pm session, 2026-11-16). Records the retirement already observed in this repository; creates no ruleset and changes no required check.
 - **Issue:** [verJSON/.github#1945](https://github.com/verJSON/.github/issues/1945)
+- **Amends:** [ADR 0260](../0260-native-merge-admission-through-a-producer-posted-check/README.md) C11 only to the extent that autonomous (workflow/script) `--admin` is retired; the manual owner outage escape remains
 - **Extends:** [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md), [ADR 0260](../0260-native-merge-admission-through-a-producer-posted-check/README.md), [ADR 0202](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md)
 - **Related:** [#1990](https://github.com/verJSON/.github/issues/1990), [#1964](https://github.com/verJSON/.github/issues/1964), [ADR 0244](../0244-derive-manually-dispatched-release-versions-from-fragments/README.md) (push-guard ABA non-goal recorded under closed #1942)
 - **Category:** merge-gate admission (sensitive class)
@@ -29,13 +30,16 @@ autonomous terminal path.
 
 ## Decision
 
-1. **No owner `--admin` on the autonomous terminal path.** Production workflows
-   and scripts in this repository must not invoke `gh pr merge --admin` under an
-   owner (or other human) principal, and must not use equivalent GraphQL
-   `mergePullRequest` admin bypass for that principal. Inventory on 2026-11-16
-   found no live call sites; remaining `--admin` strings are test and fixture
-   negatives only. This does not forbid the merge App from using its ruleset
-   bypass after evidence-bound admission (Decision 2).
+1. **No owner `--admin` in autonomous workflows.** Production workflows and
+   scripts in this repository must not invoke `gh pr merge --admin` (or
+   equivalent GraphQL admin bypass). Inventory on 2026-11-16 found no live call
+   sites; remaining `--admin` strings are test and fixture negatives only. This
+   does not forbid the merge App from using its ruleset bypass after
+   evidence-bound admission (Decision 2). It also does not revoke the
+   **manual** owner outage escape in ADR 0260 C11 / the merge-admission runbook:
+   a human may still run `assert-mergeable-head.sh` and then `gh pr merge
+   --admin` outside automation when the producer is down. That escape is
+   process, not an autonomous path, and stays until #1964 re-decides bypasses.
 2. **Allowed merge principals.** Autonomous merges that the canonical contract
    owns go through the merge App under ruleset bypass only after
    `scripts/assert-mergeable-head.sh` prints `true` for the exact head (Gates
