@@ -106,6 +106,47 @@ generator, its arguments excluding the contract SHA, and its output. For changel
 generation, the first argument is the generator mode. Every caller receives the one
 top-level immutable `contract_sha`; mutable branches and mixed pins are rejected.
 
+## Advisory quality review (optional)
+
+Canonical CI can run an advisory quality review of a pull request's filtered diff
+([#1820](https://github.com/VerJSON/.github/issues/1820),
+[ADR 0270](decisions/0270-advisory-quality-review-provider-port/README.md)). The
+review is never a required check and never feeds merge authorization.
+
+### Opt in
+
+1. Generate the thin caller at the same immutable contract SHA used by the rest of
+   the adopter set:
+
+   ```sh
+   scripts/gen-quality-review-caller.sh <40-hex-contract-sha> \
+     > .github/workflows/quality-review.yml
+   ```
+
+2. Set repository (or organization) variable `QUALITY_REVIEW` to `label` or `auto`
+   (`off` is the default). Optional overrides: `QUALITY_REVIEW_PROVIDER` (default
+   `jev`) and `QUALITY_REVIEW_MODEL` (must be a pinned manifest model, never
+   `*-latest`).
+
+3. Ensure the repository is on the `selected` list for the provider secret named in
+   `config/quality-review-providers.json` (today `JEV_API_KEY`). Standing
+   authorization is the two-key pair of mode variable plus secret selection; see
+   ADR 0270.
+
+### Invariants for adopters
+
+- The reusable workflow checks out no pull-request head code; the diff comes from
+  the REST API.
+- Fork and draft pull requests are skipped.
+- Provider outages, rate limits, and schema violations leave the job green and
+  report `quality evidence not obtained: …` so Gate C does not treat absence as a
+  failing required check.
+- Do not add `quality-review` to a required-check ruleset.
+
+Managed canaries already ship generated callers (`Verjson/.github` canary,
+`verJSON/verjson-ci`, `verJSON/verjson-git-runners`). Broader fleet opt-in
+continues under [#1820](https://github.com/VerJSON/.github/issues/1820).
+
 ## App roles and trust boundaries
 
 - Review authorization: Checks write, Contents read, Pull requests write, Metadata
