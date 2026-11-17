@@ -68,6 +68,7 @@ _VENDORED_PREFIXES = (
 class DiffFile:
     path: str
     patch: str
+    alt_path: str | None = None
 
 
 @dataclass
@@ -81,7 +82,12 @@ _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.MULTILINE)
 
 
 def parse_unified_diff(diff_text: str) -> list[DiffFile]:
-    """Split a unified diff into per-file patches."""
+    """Split a unified diff into per-file patches.
+
+    ``DiffFile.path`` is the destination (``b/``) path when present; callers that
+    filter sensitive paths should also consult ``should_drop_paths`` for both
+    sides of renames/deletes.
+    """
     if not diff_text.strip():
         return []
     matches = list(_DIFF_FILE_RE.finditer(diff_text))
@@ -91,8 +97,10 @@ def parse_unified_diff(diff_text: str) -> list[DiffFile]:
     for index, match in enumerate(matches):
         start = match.start()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(diff_text)
-        path = match.group(2)
-        files.append(DiffFile(path=path, patch=diff_text[start:end]))
+        a_path, b_path = match.group(1), match.group(2)
+        # Prefer b/ for identity; keep a/ available via drop check below.
+        path = b_path if b_path != "/dev/null" else a_path
+        files.append(DiffFile(path=path, patch=diff_text[start:end], alt_path=a_path if a_path != path else None))
     return files
 
 
@@ -139,6 +147,8 @@ def build_payload(
     accepted: list[DiffFile] = []
     for diff_file in parse_unified_diff(diff_text):
         reason = should_drop_path(diff_file.path)
+        if reason is None and diff_file.alt_path:
+            reason = should_drop_path(diff_file.alt_path)
         if reason:
             plan.dropped.append(f"{diff_file.path}:{reason}")
             continue

@@ -76,6 +76,29 @@ class PayloadFilterTest(unittest.TestCase):
         self.assertTrue(any(":vendored" in x for x in plan.dropped))
         self.assertTrue(any(":binary" in x for x in plan.dropped))
 
+
+    def test_drops_deleted_or_renamed_lockfile(self) -> None:
+        deleted = """diff --git a/package-lock.json b/package-lock.json
+deleted file mode 100644
+index 111..000
+--- a/package-lock.json
++++ /dev/null
+@@ -1 +0,0 @@
+-{}
+"""
+        plan = build_payload(deleted, token_cap=5000, total_budget=20000)
+        self.assertEqual(plan.chunks, [])
+        self.assertTrue(any(":lockfile" in x for x in plan.dropped))
+
+        renamed = """diff --git a/.env b/src/safe.py
+similarity index 100%
+rename from .env
+rename to src/safe.py
+"""
+        plan = build_payload(renamed, token_cap=5000, total_budget=20000)
+        self.assertEqual(plan.chunks, [])
+        self.assertTrue(any(":env" in x for x in plan.dropped))
+
     def test_over_cap_file_dropped(self) -> None:
         big = "diff --git a/big.py b/big.py\n" + ("+" + ("x" * 200) + "\n") * 50
         plan = build_payload(big, token_cap=10, total_budget=10000)
