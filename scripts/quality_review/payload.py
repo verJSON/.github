@@ -26,7 +26,7 @@ _LOCKFILE_NAMES = frozenset(
         "Package.resolved",
     }
 )
-_ENV_NAMES = frozenset({".env", ".env.local", ".env.production", ".env.development"})
+_ENV_NAMES = frozenset({".env", ".env.local", ".env.production", ".env.development", ".envrc"})
 _GENERATED_SUFFIXES = (".pb.go", ".pb.ts", "_pb2.py", ".generated.ts", ".generated.js")
 _BINARY_SUFFIXES = (
     ".png",
@@ -92,7 +92,8 @@ def parse_unified_diff(diff_text: str) -> list[DiffFile]:
         return []
     matches = list(_DIFF_FILE_RE.finditer(diff_text))
     if not matches:
-        return [DiffFile(path="unknown", patch=diff_text)]
+        # Fail closed: unparseable diffs must not bypass path filters (ADR 0270).
+        raise ValueError("unified diff has no diff --git headers")
     files: list[DiffFile] = []
     for index, match in enumerate(matches):
         start = match.start()
@@ -111,7 +112,12 @@ def should_drop_path(path: str) -> str | None:
     lower = posix.lower()
     if name in _LOCKFILE_NAMES or name.endswith(".lock") or name.endswith(".lockfile"):
         return "lockfile"
-    if name in _ENV_NAMES or name.startswith(".env."):
+    if (
+        name in _ENV_NAMES
+        or name.startswith(".env.")
+        or name.endswith(".env")
+        or name.endswith(".env.local")
+    ):
         return "env"
     if any(lower.startswith(prefix) or f"/{prefix}" in f"/{lower}" for prefix in _VENDORED_PREFIXES):
         return "vendored"

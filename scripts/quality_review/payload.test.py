@@ -63,9 +63,15 @@ class PayloadFilterTest(unittest.TestCase):
         self.assertEqual(should_drop_path("package-lock.json"), "lockfile")
         self.assertEqual(should_drop_path("gradle.lockfile"), "lockfile")
         self.assertEqual(should_drop_path(".env"), "env")
+        self.assertEqual(should_drop_path("secrets.env"), "env")
+        self.assertEqual(should_drop_path(".envrc"), "env")
         self.assertEqual(should_drop_path("vendor/x.go"), "vendored")
         self.assertEqual(should_drop_path("assets/logo.png"), "binary")
         self.assertIsNone(should_drop_path("src/app.py"))
+
+    def test_unparseable_diff_fails_closed(self) -> None:
+        with self.assertRaises(ValueError):
+            build_payload("not a unified diff", token_cap=5000, total_budget=20000)
 
     def test_build_payload_filters_and_keeps_source(self) -> None:
         plan = build_payload(SAMPLE, token_cap=5000, total_budget=20000)
