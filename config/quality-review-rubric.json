@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "screening_threshold": 0.55,
+  "confidence_floor": 0.5,
+  "severity_levels": ["low", "medium", "high"],
+  "dimensions": [
+    {
+      "id": "correctness",
+      "kind": "probability",
+      "prompt": "Is the change correct for its stated intent?"
+    },
+    {
+      "id": "security",
+      "kind": "level",
+      "prompt": "What is the security impact of this change?",
+      "levels": ["low", "medium", "high"]
+    },
+    {
+      "id": "reliability",
+      "kind": "level",
+      "prompt": "What is the reliability impact of this change?",
+      "levels": ["low", "medium", "high"]
+    },
+    {
+      "id": "compatibility",
+      "kind": "level",
+      "prompt": "What is the compatibility impact of this change?",
+      "levels": ["low", "medium", "high"]
+    },
+    {
+      "id": "test_gap",
+      "kind": "probability",
+      "prompt": "Does this change leave a material test gap?"
+    }
+  ]
+}

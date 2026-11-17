@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "default_provider": "jev",
+  "providers": {
+    "jev": {
+      "adapter": "jev",
+      "endpoint": "https://api.typesafe.ai/v1/systemone",
+      "secret_name": "JEV_API_KEY",
+      "default_model": "jev-1.14.0",
+      "request_token_cap": 12000,
+      "timeout_seconds": 30,
+      "max_retries": 2
+    },
+    "fake": {
+      "adapter": "fake",
+      "endpoint": null,
+      "secret_name": null,
+      "default_model": "fake-0",
+      "request_token_cap": 12000,
+      "timeout_seconds": 30,
+      "max_retries": 0
+    }
+  }
+}
