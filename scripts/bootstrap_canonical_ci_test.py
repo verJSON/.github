@@ -15,6 +15,12 @@ bootstrap = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(bootstrap)
 
+VERIFY_PATH = Path(__file__).with_name("bootstrap_caller_delivery_verify.py")
+VERIFY_SPEC = importlib.util.spec_from_file_location("bootstrap_caller_delivery_verify", VERIFY_PATH)
+delivery_verify = importlib.util.module_from_spec(VERIFY_SPEC)
+assert VERIFY_SPEC.loader is not None
+VERIFY_SPEC.loader.exec_module(delivery_verify)
+
 
 SHA = "a" * 40
 
@@ -134,6 +140,88 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.BootstrapError, "caller output is a symlink"):
             bootstrap.generate_callers(bootstrap.validate_manifest(manifest()), self.workspace, self.contract, "dry-run")
         self.assertTrue(output.is_symlink())
+        self.assertFalse((output.parent / "missing-target").exists())
+
+    def test_dry_run_rejects_parent_and_dangling_parent_symlinks(self):
+        workflows = self.repository / ".github/workflows"
+        for kind in ("resolving-parent", "dangling-parent"):
+            with self.subTest(kind=kind):
+                if workflows.exists() or workflows.is_symlink():
+                    if workflows.is_dir() and not workflows.is_symlink():
+                        for child in workflows.iterdir():
+                            child.unlink()
+                        workflows.rmdir()
+                    else:
+                        workflows.unlink()
+                if kind == "resolving-parent":
+                    target = self.repository / "elsewhere"
+                    target.mkdir(exist_ok=True)
+                    workflows.symlink_to(target)
+                else:
+                    workflows.symlink_to("missing-dir")
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "caller output parent is a symlink"):
+                    bootstrap.generate_callers(
+                        bootstrap.validate_manifest(manifest()), self.workspace, self.contract, "dry-run"
+                    )
+                self.assertTrue(workflows.is_symlink())
+
+    def test_dry_run_reports_custom_unmanaged_caller_as_drifted(self):
+        output = self.repository / ".github/workflows/ai-privileged-merge.yml"
+        output.write_text("customer-owned\n", encoding="utf-8")
+        receipt = bootstrap.generate_callers(
+            bootstrap.validate_manifest(manifest()), self.workspace, self.contract, "dry-run"
+        )
+        self.assertEqual(receipt[0]["status"], "drifted")
+        self.assertEqual(output.read_text(encoding="utf-8"), "customer-owned\n")
+
+    def test_apply_rejects_non_authorizing_delivery_preview(self):
+        gh = FakeGitHub(variable_current=False, secret_present=False)
+        preview = {"status": "observed", "readyForApply": False, "plan": {}}
+        with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "secret"}):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "not ready for apply"):
+                bootstrap.converge(
+                    bootstrap.validate_manifest(manifest()),
+                    gh,
+                    self.workspace,
+                    self.contract,
+                    "apply",
+                    delivery_preview=preview,
+                )
+        self.assertEqual(gh.calls, [])
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "not ready for apply"):
+            bootstrap.generate_callers(
+                bootstrap.validate_manifest(manifest()),
+                self.workspace,
+                self.contract,
+                "apply",
+                delivery_preview=preview,
+            )
+
+    def test_apply_holds_even_when_preview_claims_ready(self):
+        preview = {"status": "observed", "readyForApply": True}
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "caller delivery is unavailable"):
+            bootstrap.generate_callers(
+                bootstrap.validate_manifest(manifest()),
+                self.workspace,
+                self.contract,
+                "apply",
+                delivery_preview=preview,
+            )
+
+    def test_delivery_preview_verifier_rejects_false_and_malformed(self):
+        with self.assertRaisesRegex(delivery_verify.DeliveryVerifyError, "not ready for apply"):
+            delivery_verify.require_delivery_preview_ready_for_apply({"readyForApply": False})
+        with self.assertRaisesRegex(delivery_verify.DeliveryVerifyError, "malformed"):
+            delivery_verify.require_delivery_preview_shape({"status": "observed"})
+        with self.assertRaisesRegex(delivery_verify.DeliveryVerifyError, "malformed"):
+            delivery_verify.require_delivery_preview_ready_for_apply({"readyForApply": "yes"})
+        delivery_verify.require_delivery_preview_ready_for_apply({"readyForApply": True})
+        with self.assertRaisesRegex(delivery_verify.DeliveryVerifyError, "caller delivery is unavailable"):
+            delivery_verify.reject_bootstrap_caller_apply(
+                callers=[{"output": "x"}],
+                delivery_preview={"readyForApply": True},
+            )
+        delivery_verify.reject_bootstrap_caller_apply(callers=[], delivery_preview={"readyForApply": False})
 
     def test_cli_held_or_invalid_apply_never_writes_receipt_over_caller(self):
         output = self.repository / ".github/workflows/ai-privileged-merge.yml"

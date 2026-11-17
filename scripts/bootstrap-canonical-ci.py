@@ -14,6 +14,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app_client_id_contract import is_valid_client_id  # noqa: E402
+from bootstrap_caller_delivery_verify import (  # noqa: E402
+    DeliveryVerifyError,
+    reject_bootstrap_caller_apply,
+)
 
 
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -278,23 +282,71 @@ def app_expectations(manifest: dict[str, Any], live: dict[int, dict[str, Any]]) 
     return receipt
 
 
-def generate_callers(manifest: dict[str, Any], workspace: Path, contract_root: Path, mode: str) -> list[dict[str, str]]:
-    if mode == "apply" and manifest["callers"]:
-        raise BootstrapError("caller delivery is unavailable until conflict-safe ownership is implemented")
+def inspect_caller_output(repository: Path, output_relative: str) -> Path:
+    """Reject symlinks (including dangling) on the output path or parents under repository.
+
+    ``is_symlink()`` is consulted before ``exists()`` / ``is_dir()`` so a dangling
+    symlink is never mistaken for an absent path.
+    """
+    relative = Path(output_relative)
+    current = repository
+    parts = relative.parts
+    for index, part in enumerate(parts):
+        current = current / part
+        if current.is_symlink():
+            if index == len(parts) - 1:
+                raise BootstrapError(f"caller output is a symlink: {output_relative}")
+            raise BootstrapError(f"caller output parent is a symlink: {output_relative}")
+        if index < len(parts) - 1 and not current.is_dir():
+            raise BootstrapError(f"caller output parent escapes or is absent: {output_relative}")
+    output = repository / relative
+    try:
+        resolved_parent = output.parent.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise BootstrapError(f"caller output parent escapes or is absent: {output_relative}") from error
+    if resolved_parent != repository and repository not in resolved_parent.parents:
+        raise BootstrapError(f"caller output parent escapes or is absent: {output_relative}")
+    return output
+
+
+def hold_caller_apply(
+    manifest: dict[str, Any],
+    mode: str,
+    *,
+    delivery_preview: Any | None = None,
+) -> None:
+    if mode != "apply":
+        return
+    try:
+        reject_bootstrap_caller_apply(
+            callers=manifest["callers"],
+            delivery_preview=delivery_preview,
+        )
+    except DeliveryVerifyError as error:
+        raise BootstrapError(str(error)) from error
+
+
+def generate_callers(
+    manifest: dict[str, Any],
+    workspace: Path,
+    contract_root: Path,
+    mode: str,
+    *,
+    delivery_preview: Any | None = None,
+) -> list[dict[str, str]]:
+    hold_caller_apply(manifest, mode, delivery_preview=delivery_preview)
     receipt: list[dict[str, str]] = []
     workspace_root = workspace.resolve(strict=True)
     for caller in manifest["callers"]:
         repository = (workspace_root / caller["repository"]).resolve(strict=True)
         if repository != workspace_root and workspace_root not in repository.parents:
             raise BootstrapError("caller repository escapes workspace")
-        if not (repository / ".git").exists() and not (repository / ".git").is_file():
+        git_dir = repository / ".git"
+        if git_dir.is_symlink():
             raise BootstrapError(f"caller repository is not a Git worktree: {caller['repository']}")
-        output = repository / caller["output"]
-        resolved_parent = output.parent.resolve(strict=True) if output.parent.is_dir() else None
-        if resolved_parent is None or (resolved_parent != repository and repository not in resolved_parent.parents):
-            raise BootstrapError(f"caller output parent escapes or is absent: {caller['output']}")
-        if output.is_symlink():
-            raise BootstrapError(f"caller output is a symlink: {caller['output']}")
+        if not git_dir.exists() and not git_dir.is_file():
+            raise BootstrapError(f"caller repository is not a Git worktree: {caller['repository']}")
+        output = inspect_caller_output(repository, caller["output"])
         generator = contract_root / "scripts" / GENERATORS[caller["generator"]]
         arguments = list(caller["arguments"])
         if caller["generator"] == "changelog":
@@ -306,6 +358,7 @@ def generate_callers(manifest: dict[str, Any], workspace: Path, contract_root: P
         result = subprocess.run(command, cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode:
             raise BootstrapError(f"generator failed for {caller['repository']}/{caller['output']}")
+        # Leaf symlinks were rejected above; exists() here only distinguishes absent vs file.
         current = output.read_bytes() if output.exists() else None
         status = "current" if current == result.stdout else "drifted"
         receipt.append({"repository": caller["repository"], "output": caller["output"], "status": status})
@@ -314,10 +367,17 @@ def generate_callers(manifest: dict[str, Any], workspace: Path, contract_root: P
     return receipt
 
 
-def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_root: Path, mode: str) -> dict[str, Any]:
+def converge(
+    manifest: dict[str, Any],
+    gh: GitHub,
+    workspace: Path,
+    contract_root: Path,
+    mode: str,
+    *,
+    delivery_preview: Any | None = None,
+) -> dict[str, Any]:
     manifest = validate_manifest(manifest)
-    if mode == "apply" and manifest["callers"]:
-        raise BootstrapError("caller delivery is unavailable until conflict-safe ownership is implemented")
+    hold_caller_apply(manifest, mode, delivery_preview=delivery_preview)
     reject_environment_only_app_keys(manifest["secrets"])
     contract_head = subprocess.run(
         ["git", "-C", str(contract_root), "rev-parse", "HEAD"], text=True,
@@ -337,7 +397,13 @@ def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_roo
         missing = [spec["environment"] for name, spec in manifest["secrets"].items() if not secret_values[name]]
         if missing:
             raise BootstrapError(f"secret environment {missing[0]} is missing")
-    caller_plan = generate_callers(manifest, workspace, contract_root, "dry-run" if mode == "apply" else mode)
+    caller_plan = generate_callers(
+        manifest,
+        workspace,
+        contract_root,
+        "dry-run" if mode == "apply" else mode,
+        delivery_preview=delivery_preview,
+    )
     authenticated = gh.json("/user").get("login")
     if not isinstance(authenticated, str) or not authenticated:
         raise BootstrapError("authenticated GitHub identity is unavailable")
@@ -397,7 +463,13 @@ def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_roo
                 receipt["status"] = "failed"
                 raise ConvergenceError("organization secret write outcome uncertain", receipt) from error
     try:
-        receipt["callers"] = generate_callers(manifest, workspace, contract_root, "apply") if mode == "apply" else caller_plan
+        receipt["callers"] = (
+            generate_callers(
+                manifest, workspace, contract_root, "apply", delivery_preview=delivery_preview,
+            )
+            if mode == "apply"
+            else caller_plan
+        )
     except (BootstrapError, OSError) as error:
         receipt["callers"] = caller_plan
         receipt["status"] = "failed"

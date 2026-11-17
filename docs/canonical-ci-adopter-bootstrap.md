@@ -38,11 +38,14 @@ an unused role rather than broadening it.
 ## Run
 
 `apply` currently rejects any manifest containing generated callers before
-performing local or remote writes. Caller delivery is held until the shared
-ownership and conflict-safe delivery contract in [#1965](https://github.com/VerJSON/.github/issues/1965)
-is implemented. Use `dry-run` or `check` to inspect caller drift; those modes do
-not deliver files. A manifest with no callers may still apply its separately
-authorized organization settings.
+performing local or remote writes. Caller delivery is owned by the verjson-ci
+adapter ([#1965](https://github.com/VerJSON/.github/issues/1965), ADR 0251);
+this bootstrap is verifier/consumer only and does not write callers. Use
+`dry-run` or `check` to inspect caller drift, custom content, and symlink
+targets (including dangling and parent-path symlinks); those modes do not
+deliver files. A delivery preview with `readyForApply: false` (for example a
+held verjson-ci draft preview) never authorizes apply. A manifest with no
+callers may still apply its separately authorized organization settings.
 
 ```sh
 python3 scripts/bootstrap-canonical-ci.py dry-run adopter.json \
