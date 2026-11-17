@@ -30,13 +30,16 @@ GATE_PATH=.github/workflows/gate-rearm.yml
 PINNED_SHA=24db445fe410df7bfbd740d8766b2d9ad8e73915
 MARKER="<!-- independent-review:v1 pr:$PR head:$HEAD_SHA verdict:approved -->"
 ARB_RUN=arb-test-2026-11-17
-ARB_SLATE=e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d
+# #2189: digest is SHA-256 of the canonical-slate-json fence body (single JSON line).
+ARB_SLATE_JSON="$(jq -nc --arg run "$ARB_RUN" \
+  '{issue:"verJSON/.github#2189",items:["S-1"],run_id:$run,status:"APPROVED"}')"
+ARB_SLATE="$(printf '%s' "$ARB_SLATE_JSON" | sha256sum | awk '{print $1}')"
 ARB_ARCHIVE_REPO=verJSON/.github
 ARB_ARCHIVE_SHA=ee9899ba3803ed95f5883bd65a30952777f4ce7b
 ARB_ARCHIVE_PATH=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
 CITATION="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH -->"
-# Sanitized archive body must contain both run id and slate digest (#2184).
-ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'
+# Archive must carry a recomputable canonical-slate-json fence (#2189).
+ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'"\`\`\`canonical-slate-json"$'\n'"$ARB_SLATE_JSON"$'\n'"\`\`\`"$'\n'
 ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
 
 mkdir -p "$tmp/bin"
@@ -181,13 +184,50 @@ run
 expect "a valid ADR 0202 marker without a preceding arb-consensus citation fails Gate R" 6 \
   "an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge"
 
-# Archive must actually cite the slate digest (fail closed).
+# Archive must carry a recomputable canonical-slate-json fence (fail closed; #2189).
 reset_env
-ARCHIVE_B64="$(printf '%s' "run \`$ARB_RUN\` only" | base64 -w0 2>/dev/null || printf '%s' "run \`$ARB_RUN\` only" | base64)"
+ARCHIVE_B64="$(printf '%s' "run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`" | base64 -w0 2>/dev/null || printf '%s' "run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`" | base64)"
 export ARCHIVE_B64
 run
-expect "a citation whose archive omits the slate digest fails Gate R" 6 \
-  "arb-consensus archive does not cite slate digest $ARB_SLATE"
+expect "a citation whose archive omits the canonical-slate-json fence fails Gate R" 6 \
+  "arb-consensus archive has no canonical-slate-json fence"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
+# Wrong encoding (pretty-printed slate) must not verify even if the digest string appears.
+reset_env
+pretty="$(jq -n --arg run "$ARB_RUN" \
+  '{issue:"verJSON/.github#2189",items:["S-1"],run_id:$run,status:"APPROVED"}')"
+pretty_archive="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'"\`\`\`canonical-slate-json"$'\n'"$pretty"$'\n'"\`\`\`"$'\n'
+ARCHIVE_B64="$(printf '%s' "$pretty_archive" | base64 -w0 2>/dev/null || printf '%s' "$pretty_archive" | base64)"
+export ARCHIVE_B64
+run
+expect "a citation whose archive uses a pretty-printed slate fails Gate R" 6 \
+  "canonical-slate-json fence must contain a single JSON line"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
+# Digest mismatch: fence hashes to a different value than the citation claims.
+reset_env
+other_json="$(jq -nc --arg run "$ARB_RUN" \
+  '{issue:"verJSON/.github#2189",items:["S-2"],run_id:$run,status:"APPROVED"}')"
+mismatch_archive="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'"\`\`\`canonical-slate-json"$'\n'"$other_json"$'\n'"\`\`\`"$'\n'
+ARCHIVE_B64="$(printf '%s' "$mismatch_archive" | base64 -w0 2>/dev/null || printf '%s' "$mismatch_archive" | base64)"
+export ARCHIVE_B64
+run
+expect "a citation whose archive slate digest does not match fails Gate R" 6 \
+  "does not match citation digest $ARB_SLATE"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
+# Truncated / invalid JSON inside the fence fails closed.
+reset_env
+bad_json_archive="# chair"$'\n'"\`\`\`canonical-slate-json"$'\n'"{run_id"$'\n'"\`\`\`"$'\n'
+ARCHIVE_B64="$(printf '%s' "$bad_json_archive" | base64 -w0 2>/dev/null || printf '%s' "$bad_json_archive" | base64)"
+export ARCHIVE_B64
+run
+expect "a citation whose archive slate JSON is invalid fails Gate R" 6 \
+  "canonical-slate-json fence is not valid JSON"
 ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
 export ARCHIVE_B64
 

@@ -72,12 +72,14 @@ chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH"
 export JOBS_DIR="$tmp/jobs"
 ARB_RUN=arb-test-2026-11-17
-ARB_SLATE=e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d
+ARB_SLATE_JSON="$(jq -nc --arg run "$ARB_RUN" \
+  '{issue:"verJSON/.github#2189",items:["S-1"],run_id:$run,status:"APPROVED"}')"
+ARB_SLATE="$(printf '%s' "$ARB_SLATE_JSON" | sha256sum | awk '{print $1}')"
 ARB_ARCHIVE_REPO=verJSON/.github
 ARB_ARCHIVE_SHA=ee9899ba3803ed95f5883bd65a30952777f4ce7b
 ARB_ARCHIVE_PATH=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
 CITATION="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH -->"
-ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'
+ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'"\`\`\`canonical-slate-json"$'\n'"$ARB_SLATE_JSON"$'\n'"\`\`\`"$'\n'
 ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
 export ARCHIVE_B64
 REVIEWS_FIXTURE="$(jq -nc --arg head "$HEAD_SHA" --arg citation "$CITATION"   --arg marker "<!-- independent-review:v1 pr:121 head:$HEAD_SHA verdict:approved -->"   '[{id:81,state:"COMMENTED",commit_id:$head,user:{login:"independent-reviewer",type:"User"},body:$citation},

@@ -161,11 +161,13 @@ write_base() {
   jq -nc --arg head "$EXPECTED_HEAD_SHA" \
     '{id:9001,name:"AI review authorization",head_sha:$head,status:"completed",conclusion:"success",app:{id:15368,slug:"github-actions"}}' >"$CHECK_FILE"
   ARB_RUN=arb-test-2026-11-17
-  ARB_SLATE=e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d
+  ARB_SLATE_JSON="$(jq -nc --arg run "$ARB_RUN" \
+    '{issue:"verJSON/.github#2189",items:["S-1"],run_id:$run,status:"APPROVED"}')"
+  ARB_SLATE="$(printf '%s' "$ARB_SLATE_JSON" | sha256sum | awk '{print $1}')"
   ARB_ARCHIVE_REPO=verJSON/.github
   ARB_ARCHIVE_SHA=ee9899ba3803ed95f5883bd65a30952777f4ce7b
   ARB_ARCHIVE_PATH=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
-  ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'
+  ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'"\`\`\`canonical-slate-json"$'\n'"$ARB_SLATE_JSON"$'\n'"\`\`\`"$'\n'
   ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
   export ARCHIVE_B64
   jq -nc --arg head "$EXPECTED_HEAD_SHA" --arg login "${EXPECTED_APP_SLUG}[bot]" --arg check "$AUTHORIZATION_CHECK_ID" \

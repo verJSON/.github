@@ -57,9 +57,8 @@ approval semantics for Verjson-gated mutation follow the same authority.
 
    Gate R / `scripts/ci-gate/independent-review-receipt.sh` are unchanged in the
    landing PR for this ADR. The preceding COMMENT review must cite the ARB run
-   id and slate digest. Parsing that digest in the gate is an explicit
-   integration constraint (follow-on on #2182); until then operators archive the
-   chair record with the receipt.
+   id and slate digest. Digest binding is defined in the 2026-11-17 amendment
+   (#2189); operators still archive the chair record with the receipt.
 6. **Non-PR identity-mutation decisions** must cite the same ARB run id and
    slate digest in their decision record until a dedicated evidence surface
    exists.
@@ -77,8 +76,9 @@ approval semantics for Verjson-gated mutation follow the same authority.
   never personal CODEOWNERS.
 - Product control-plane approval kinds may admit `arb-consensus` (identity ADR
   0009 / verJSON/verjson-agent-identity#36).
-- Until the gate parses slate digests, process + archived chair records close
-  the trust gap as an integration constraint, not as silent weakening.
+- Gate R binds the citation slate digest to a recomputed SHA-256 over the
+  archived canonical slate (amendment below); substring presence alone is not
+  sufficient.
 
 ## Verification
 
@@ -86,7 +86,19 @@ approval semantics for Verjson-gated mutation follow the same authority.
   0202 exact-head receipt whose preceding COMMENT cites run
   `arb-0271-2026-11-17` and slate digest
   `e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d`.
-- Follow-on issues track gate digest parsing and any ruleset change to
-  `require_code_owner_review`.
+- Follow-on issues track any ruleset change to `require_code_owner_review`.
+
+## Amendment 2026-11-17 — Gate R recomputes the slate digest (#2189)
+
+`scripts/ci-gate/arb-consensus-citation.sh` must not accept a citation merely
+because the archived chair record contains the 64-hex digest string. It
+extracts the first Markdown fenced block whose info string is exactly
+`canonical-slate-json`, takes the fence body with one trailing newline removed
+if present, requires that body to be a single UTF-8 JSON object line whose
+`run_id` string equals the citation run id, and accepts the citation only when
+lowercase hex SHA-256 of those exact body bytes equals the citation's
+`slate:` digest. Missing fence, multi-line body, JSON decode/schema failure,
+`run_id` mismatch, or digest mismatch fails closed. The ADR 0202 receipt marker
+stays digest-free.
 
 [arb-record]: ./arb-record.md
