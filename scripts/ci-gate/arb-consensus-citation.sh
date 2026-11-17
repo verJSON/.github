@@ -115,6 +115,9 @@ archive_repo_cf="$(printf '%s' "$archive_repo" | tr '[:upper:]' '[:lower:]')"
 # Fail closed: the immutable archive must contain both the run id and the slate digest.
 # Parse .content locally so test stubs that return the Contents JSON object work
 # without implementing gh's --jq filter.
+# Re-assert 40-hex in this block: citation_re already matched, but gh api ?ref=
+# must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
+[[ "$archive_sha" =~ ^[0-9a-f]{40}$ ]]   || { echo "::error::arb-consensus archive sha is not a 40-hex object name"; exit 1; }
 archive_json="$(gh api "repos/$archive_repo/contents/$archive_path?ref=$archive_sha")" || {
   echo "::error::could not fetch arb-consensus archive $archive_repo@$archive_sha:$archive_path"
   exit 3
