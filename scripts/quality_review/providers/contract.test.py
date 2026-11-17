@@ -188,6 +188,13 @@ class JevStubContractTest(unittest.TestCase):
         with self.assertRaises(Exception):
             evaluator.evaluate({"diff": "demo"}, QUESTIONS)
 
+    def test_jev_rejects_non_serializable_state(self) -> None:
+        from quality_review.providers.jev import JevError
+
+        evaluator = JevEvaluator(api_key="test-key", endpoint=self.endpoint, model="jev-1.14.0", max_retries=0)
+        with self.assertRaises(JevError):
+            evaluator.evaluate({"blob": object()}, QUESTIONS)
+
 
 if __name__ == "__main__":
     unittest.main()
