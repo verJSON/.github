@@ -190,7 +190,7 @@ jobs:
           SUMMARY: ${{ steps.evaluate.outputs.summary || steps.diff.outputs.summary || steps.mode.outputs.summary }}
         run: |
           set -euo pipefail
-          # Do not read .quality-review-contract here: this step runs under
+          # Do not read the contract checkout here: this step runs under
           # always() and must stay safe if the symlink refusal stopped checkout.
           summary="${SUMMARY:-quality evidence not obtained: skipped}"
           mkdir -p "$RUNNER_TEMP/quality-review"
