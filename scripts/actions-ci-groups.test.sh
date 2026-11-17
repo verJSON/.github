@@ -1573,6 +1573,9 @@ NON_GATE_MODULES = {
     "scripts/ci-gate/settable_value_guards.py": (
         "shell guard scanner imported by settable-value-guards.test.py"
     ),
+    "scripts/ci-gate/agent_delivery_claim_ledger.py": (
+        "operator read-only claim ledger imported by its registered test (#2212)"
+    ),
     "scripts/ci-gate/conformance/adopter.py": (
         "adopter fixture loader imported by conformance.test.py"
     ),
