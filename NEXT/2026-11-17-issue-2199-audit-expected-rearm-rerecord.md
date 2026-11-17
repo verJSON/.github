@@ -1,5 +1,5 @@
 ---
-impact: docs
+impact: patch
 title: Re-record arm audit expectations after lifecycle-rearm shrink
 ---
 

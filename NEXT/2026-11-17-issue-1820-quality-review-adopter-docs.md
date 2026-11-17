@@ -1,5 +1,5 @@
 ---
-impact: docs
+impact: patch
 title: Document advisory quality-review adopter opt-in
 ---
 
