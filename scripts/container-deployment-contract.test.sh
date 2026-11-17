@@ -519,13 +519,8 @@ grep -q 'MAX_RUN_RECORDS' "$root/scripts/container_deployment_transport.py"
 grep -q 'deployment-receipt' "$root/scripts/container_deployment_transport.py"
 grep -q 'fetch_deployment_receipt' "$root/scripts/container_deployment_transport.py"
 grep -q '_run_deployment_receipt_transport' "$root/scripts/container_deployment_controller.py"
-# Parent transport owns rollback receipt retrieval; the evidence child never sees the digest flag or GitHub tokens.
-if grep -n -- '--rollback-receipt' "$root/scripts/container_deployment_controller.py" \
-  | grep -v 'add_argument\|rollback_receipt\|rollback-receipt", default' \
-  | grep -q 'command.extend'; then
-  echo "controller still forwards --rollback-receipt to evidenceCommand" >&2
-  exit 1
-fi
+# Parent transport owns rollback receipt retrieval; the evidence child never sees the digest flag.
+# Use assert_absent (file scan) — never pipe into grep -q (pipefail-sigpipe / #1430).
 assert_absent -q 'command.extend(("--rollback-receipt"' "$root/scripts/container_deployment_controller.py"
 # Evidence/probe child allowlist must stay credential-free.
 python3 - "$root/scripts/container_deployment_controller.py" <<'PY'
