@@ -7,6 +7,7 @@ surface ``result.summary`` (including "quality evidence not obtained").
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -118,8 +119,16 @@ def run_review(
             model=model,
         )
     except JevError as exc:
+        # Keep advisory green; surface detail on stderr so workflow
+        # `summary="$(python3 …)"` capture stays a single summary line (#2174).
+        print(f"::warning::quality-review JevError: {exc}", file=sys.stderr, flush=True)
         return _not_obtained(str(exc))
     except Exception as exc:  # noqa: BLE001 — advisory path stays green
+        print(
+            f"::warning::quality-review unexpected failure: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         return _not_obtained(f"unexpected failure: {exc}")
 
 

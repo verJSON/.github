@@ -19,10 +19,8 @@ jobs:
     uses: ./.github/workflows/quality-review.yml
     secrets: inherit
     with:
-      # For same-repo canary, the contract scripts come from the called workflow's
-      # ref; pass the caller's head SHA only as an opaque pin for the reusable
-      # workflow's contract checkout of Verjson/.github@ref. On this canary the
-      # head is this repository, so github.sha is the PR head — but the reusable
-      # workflow checks out Verjson/.github at contract_ref WITHOUT using PR
-      # tree content for execution beyond that pin. Prefer base SHA for stability.
-      contract_ref: ${{ github.event.pull_request.base.sha }}
+      # Same-repo canary: pin the PR head so Evaluate runs the scripts under
+      # review (the reusable workflow YAML is already the head version via the
+      # local `uses:` path). The reusable still never executes untrusted head
+      # *beyond* that pin — it only reads scripts from Verjson/.github@contract_ref.
+      contract_ref: ${{ github.event.pull_request.head.sha }}
