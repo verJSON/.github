@@ -96,3 +96,19 @@ host observation receipt, fleet, and checked-out source. It cannot create an
 admitted receipt or execute a deployment. The mutating path still requires the
 reviewed authorization and exact workflow-run binding described above. This
 keeps the dry-run useful without treating observation as deployment approval.
+
+## 2026-11-17 — Clear `verjson-git-runners` production environment reviewers
+
+Live `GET /repos/Verjson/verjson-git-runners/environments/production` still carried a
+`required_reviewers` rule for team `devs` (protection rule id `63767988`) alongside the
+sole `branch_policy` rule. That reviewer gate contradicts this ADR's decision that the
+`production` environment requires no environment reviewer and that deployment authority
+comes from exact-head independent receipts instead.
+
+default-pm cleared `reviewers` via `PUT .../environments/production` on 2026-11-17.
+Postimage: `protection_rules` contains only `branch_policy` id `63767137`;
+`deployment_branch_policy` remains `protected_branches=true`,
+`custom_branch_policies=false`. Issue [#629](https://github.com/Verjson/.github/issues/629)
+and [verjson-git-runners#197](https://github.com/Verjson/verjson-git-runners/issues/197)
+remain open for host-evidence secrets and a live non-prod canary → stop → rollback
+receipt under the credential-free transport from [#1281](https://github.com/verJSON/.github/issues/1281)/[#2203](https://github.com/verJSON/.github/pull/2203).
