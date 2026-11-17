@@ -78,8 +78,7 @@ jobs:
           # actions/checkout follows a symlink at its path and empties the target (ADR 0236).
           if [ -L .quality-review-contract ]; then
             summary='quality evidence not obtained: .quality-review-contract is a symlink'
-            printf '%s
-' "$summary" >>"$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$summary" >>"$GITHUB_STEP_SUMMARY"
             echo "summary=$summary" >>"$GITHUB_OUTPUT"
             echo "ok=false" >>"$GITHUB_OUTPUT"
             exit 0
