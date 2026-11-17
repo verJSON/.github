@@ -93,12 +93,14 @@ def subprocess_scanner(binary: Path) -> Scanner:
             return []
         if completed.returncode == 1:
             findings = _parse_findings(completed.stdout)
-            if findings is None:
+            # Exit 1 with no parseable non-empty findings report is treated as a
+            # scanner failure (gitleaks also uses 1 for fatal/partial errors).
+            if findings is None or len(findings) == 0:
                 raise RuntimeError(
-                    "gitleaks exit 1 without a JSON findings report: "
+                    "gitleaks exit 1 without non-empty JSON findings: "
                     f"{(completed.stderr or completed.stdout or '').strip()}"
                 )
-            return findings or ["gitleaks reported findings"]
+            return findings
         raise RuntimeError(
             f"gitleaks failed (exit {completed.returncode}): "
             f"{(completed.stderr or completed.stdout or '').strip()}"

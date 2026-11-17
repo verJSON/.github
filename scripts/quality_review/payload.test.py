@@ -124,6 +124,16 @@ class GitleaksFailClosedTest(unittest.TestCase):
         self.assertEqual(_parse_findings("[]"), [])
         self.assertEqual(_parse_findings('[{"RuleID":"aws-key"}]'), ["aws-key"])
 
+        def empty_report(_chunk: str) -> list[str]:
+            findings = _parse_findings("[]")
+            if findings is None or len(findings) == 0:
+                raise RuntimeError("gitleaks exit 1 without non-empty JSON findings")
+            return findings
+
+        empty = scan_chunks(["a", "b"], scanner=empty_report)
+        self.assertEqual(empty.sent, [])
+        self.assertIn("failed", empty.reason or "")
+
         def ambiguous(_chunk: str) -> list[str]:
             # Mimic subprocess_scanner's fail-closed path for exit 1 without JSON.
             findings = _parse_findings("fatal: repository not found")
