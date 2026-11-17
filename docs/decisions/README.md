@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0271](0271-arb-consensus-is-approval-authority/README.md) | 2026-11-17 | ARB consensus is the approval authority; personal CODEOWNERS are not |
 | [0270](0270-advisory-quality-review-provider-port/README.md) | 2026-11-17 | Advisory quality review through a provider-neutral evaluation port |
 | [0269](0269-retire-owner-admin-merge-bypass/README.md) | 2026-11-16 | Retire owner `--admin` merge bypass from the autonomous terminal path |
 | [0268](0268-bootstrap-generated-gate-callers-and-subset-pin-swaps/README.md) | 2026-11-15 | A review-caller bootstrap may move generated gate callers and a subset of mirrored pins |

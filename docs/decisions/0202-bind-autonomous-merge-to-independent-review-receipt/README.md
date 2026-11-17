@@ -188,3 +188,19 @@ base and diff-digest binding and staleness on a base change are the target contr
 the #1964 switch-on and the reviewer-ruleset re-enable. Shared-account review is a
 named, time-boxed exception until #1964. See [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md),
 Decisions 5 to 9.
+
+## 2026-11-17 amendment — Autonomous delivery approval kind is `arb-consensus` (ADR 0271)
+
+**What.** [ADR 0271](../0271-arb-consensus-is-approval-authority/README.md) sets ARB
+consensus as the approval authority for architecture ADRs and autonomous merge
+adjudication. For the autonomous delivery path, items 2–3 of the 2026-10-22
+amendment above are superseded to the extent that they required a direct human
+session as the approval identity: the approval kind is `arb-consensus`, carried
+by this ADR's exact-head receipt. The maintain/admin `User` that posts the
+receipt publishes ARB adjudication (run id + slate digest cited in the preceding
+COMMENT), not personal CODEOWNERS opinion. Personal CODEOWNERS are not approval
+authority. Customer IdP direct-human session evidence ownership is unchanged.
+
+**Unchanged.** The receipt marker bytes, Gate R consumption, and the protected
+native human merge path's non-consumption of the receipt (pending #1990) are
+unchanged here.
