@@ -1,0 +1,106 @@
+# Agent delivery claim dispatcher (ADR 0243 amendment 2026-11-17, #2191).
+# On Renovate opened/synchronize (and the needs-changelog-context signal), claim
+# exactly one delivery job per (repository, pull_request, head_sha). Posts a
+# visible PR comment receipt. Does not write NEXT/ fragments.
+name: agent delivery claim
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  claim:
+    if: ${{ github.event.pull_request.user.login == 'renovate[bot]' || github.event.pull_request.user.login == 'renovate' }}
+    runs-on: ${{ github.event.repository.private != true && 'ubuntu-24.04' || (github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: agent-delivery-claim-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out pull request head for signal evaluation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse a symlink at the .agent-delivery-claim-trusted checkout path
+        run: |
+          if [ -L .agent-delivery-claim-trusted ]; then
+            echo "::error::.agent-delivery-claim-trusted is a symlink; actions/checkout would empty its target"
+            exit 1
+          fi
+      - name: Check out trusted claim scripts from the base ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .agent-delivery-claim-trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci-gate/agent_delivery_claim.py
+            scripts/changelog.py
+          sparse-checkout-cone-mode: false
+      - name: Detect needs-changelog-context signal
+        id: signal
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ] || [ -z "${HEAD_SHA:-}" ]; then
+            echo "signal=skip" >>"$GITHUB_OUTPUT"
+            echo "needs-changelog-context: not a pull request"
+            exit 0
+          fi
+          err="$(mktemp)"
+          trap 'rm -f "$err"' EXIT
+          set +e
+          message="$(python3 -I "$GITHUB_WORKSPACE/.agent-delivery-claim-trusted/scripts/changelog.py" needs-changelog-context \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --author "${PR_AUTHOR:-}" 2>"$err")"
+          status=$?
+          set -e
+          case "$status:$message" in
+            0:*)
+              echo "signal=clear" >>"$GITHUB_OUTPUT"
+              echo "needs-changelog-context cleared; no claim"
+              ;;
+            1:needs-changelog-context:*)
+              echo "signal=claim" >>"$GITHUB_OUTPUT"
+              {
+                printf '### needs-changelog-context\n\n'
+                printf '%s\n' "$message"
+              } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+              ;;
+            *)
+              echo "signal=skip" >>"$GITHUB_OUTPUT"
+              printf '::warning title=needs-changelog-context::handoff check could not run; skipping claim\n'
+              cat "$err" >&2 || true
+              ;;
+          esac
+      - name: Claim agent delivery job
+        if: ${{ steps.signal.outputs.signal == 'claim' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAX_CONCURRENT: "8"
+        run: |
+          set -euo pipefail
+          [[ "$REPOSITORY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]
+          [[ "$PULL_REQUEST" =~ ^[123456789][0123456789]{0,14}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          python3 -I "$GITHUB_WORKSPACE/.agent-delivery-claim-trusted/scripts/ci-gate/agent_delivery_claim.py" \
+            --repository "$REPOSITORY" \
+            --pull-request "$PULL_REQUEST" \
+            --head-sha "$HEAD_SHA" \
+            --max-concurrent "$MAX_CONCURRENT" \
+            --store comment | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
