@@ -270,8 +270,8 @@ bad_citation_body="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$
 bad_citation="$(review 81 COMMENTED "$HEAD_SHA" independent-reviewer User "$bad_citation_body")"
 REVIEWS_FIXTURE="[$bad_citation,$receipt]"
 run
-expect "a citation whose archive locator is not verJSON/.github fails Gate R" 6 \
-  "arb-consensus archive locator must name verJSON/.github"
+expect "a citation whose archive locator is not $ARB_ARCHIVE_REPO fails Gate R" 6 \
+  "arb-consensus archive locator must name $ARB_ARCHIVE_REPO"
 
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
