@@ -71,6 +71,8 @@ platform	python3 scripts/ci-gate/renovate-compatibility-app-token.test.py
 platform	python3 scripts/ci-gate/renovate-generated-callers.test.py
 platform	python3 scripts/ci-gate/dependency-supersession.test.py
 platform	python3 scripts/ci-gate/dependency-supersession-workflow.test.py
+platform	python3 scripts/ci-gate/agent-delivery-claim.test.py
+platform	python3 scripts/ci-gate/agent-delivery-claim-workflow.test.py
 platform	bash scripts/retired-release-tooling.test.sh
 platform	bash .github/actions/setup-verjson-node/configure-git.test.sh
 platform	bash scripts/ci-gate/pulumi-comment.test.sh
