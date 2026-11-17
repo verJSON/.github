@@ -81,7 +81,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1905](https://github.com/VerJSON/.github/issues/1905) — F-1R + #2059 are on main; no further `.github` race fix. Remains open for F-1R fleet regeneration; natively blocked by #1933 (Gate A). Actions-disabled adopter enablement continues under #1985 (this issue blocks that one in the native graph). Verified 2026-11-15 via issue comments and native dependency API.
 
-- [#1831](https://github.com/VerJSON/.github/issues/1831) — Canonical `.github` relay backlog is empty on main after #2152 (`public-pr-runner-isolation.pending.tsv` has 0 data rows; 5 reviewed entries). Remaining: adopter reusable rollout / live lane enforcement outside this repository. Verified 2026-11-16 via contents API on main `a1b57ea0` + `gh issue view`.
+- [#1831](https://github.com/VerJSON/.github/issues/1831) — Canonical `.github` relay backlog empty and §3 live enforcement done; remaining owner decision is §4 `allows_public_repositories` on runner groups (`DigitalOcean`/`GitHub`/`runner-fleet-recovery`/`verjson-runner-canary` still `true` as of 2026-11-17). Verified 2026-11-17 via pending TSV + live runner-group API.
 
 - [#1964](https://github.com/VerJSON/.github/issues/1964) — Define issuer-bound agent-to-agent review authority; open, tracked separately from #1945 after the 2026-11-13 ARB dependency review. Do not treat agent review evidence as authoritative until its identity criteria pass.
 
@@ -97,15 +97,13 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1763](https://github.com/verJSON/.github/issues/1763) — Authorization arm could wait indefinitely on a lost runner assignment. ADR 0230 watchdog is on org ruleset 20722935 at `gate-rearm@24db445f` (live `gh api` 2026-11-15); [#2114](https://github.com/verJSON/.github/pull/2114) bound the same watchdog on `ai-review-merge.yml`. Open until a live cancel receipt exists. Original stuck runs: verjson-payments 37352915856 / 38427381694.
 
-- [#1810](https://github.com/Verjson/.github/issues/1810) — Armed repositories still missing generated completeness callers; quiet expected finding in `config/audit-expected-findings.json`. Admission callers are present fleet-wide after #1401 closed (live contents probe 2026-11-15 on the original four). Consumer regen under #1982 / completeness set.
+- [#2199](https://github.com/verJSON/.github/issues/2199) — Armed adopters still missing generated completeness callers after #1810 closed (mostly `ai-review-lifecycle-rearm.yml`); quiet expectation re-recorded in #2201. [#2200](https://github.com/verJSON/.github/issues/2200) tracks missing dispatchable admission callers on verjson-authz / verjson-vault. Verified 2026-11-17 via live arm audit (verdict match after re-record).
 
 - [#1667](https://github.com/Verjson/.github/issues/1667) — Track configurable generated OCI candidate destinations for GHCR, GAR, and Sonatype Nexus. Opened 2026-10-01 after live issue searches and checking related [.github#1264](https://github.com/Verjson/.github/issues/1264), [.github#1186](https://github.com/Verjson/.github/issues/1186), and [verjson-ci#30](https://github.com/Verjson/verjson-ci/issues/30); those cover adopter rollout and GitLab CE Nexus engine work, not registry-neutral canonical publisher destinations.
 
 - [#1692](https://github.com/Verjson/.github/issues/1692) — Target current `main` HEAD in dev via a fast, validated image path and promote one fully verified pinned digest set from nonprod to prod with separate environment controls; opened 2026-10-05 after confirming the candidate and release generators lack a general app deployment caller.
 
 - [#1655](https://github.com/Verjson/.github/issues/1655) — Signed merge-gate provenance rollout, opened 2026-09-28 after #1339 met its evidence gate; ADR 0211 still requires a real `pull_request_target` capture before rollout.
-
-- [#1423](https://github.com/Verjson/.github/issues/1423) — CLI Projects PR admission accepts only the byte-exact caller generated at v4.2.0 (sha256 `d23be004…`, #1862); the `721856f9…` legacy digest is rotation-only. After ruleset 21830367 is rotated to #1862's merge and [verjson-cli-projects#159](https://github.com/Verjson/verjson-cli-projects/pull/159) lands that caller on main, null the digest and rotate 21830367 again (ack `ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187`); the audit reports `rotation pending` until then. Verified 2026-10-20 by a read-only `verify_consumer_workflow` against cli-projects main `44a0dc49`. See [ADR 0212](docs/decisions/0212-cli-projects-admission-accepts-only-generated-caller/README.md).
 
 - [#1363](https://github.com/Verjson/.github/issues/1363) — Split AI authorization-arm enrollment from `verjson-core-checks` (ADR 0206). `#1401` and `verjson-agents#417` are closed; live 2026-11-15 `gh api` shows `verjson-agents` with `verjson-stack=actions` and `verjson-core-checks=enforced` plus a default-branch admission caller. Property split / ruleset retarget and #1385 key custody remain. Ruleset 20722935 currently pins `gate-rearm@24db445f`.
 
