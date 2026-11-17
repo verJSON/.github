@@ -145,7 +145,7 @@ case "$citation_status" in
     exit 3
     ;;
   *)
-    if printf '%s\n' "$citation_out" | grep -q '^::error::'; then
+    if grep -q '^::error::' <<<"$citation_out"; then
       printf '%s\n' "$citation_out" >&2
     else
       echo "::error::an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge" >&2

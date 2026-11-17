@@ -131,9 +131,9 @@ archive_text="$(printf '%s' "$archive_b64" | tr -d '\n\r ' | base64 -d 2>/dev/nu
   echo "::error::arb-consensus archive $archive_repo@$archive_sha:$archive_path is not decodable"
   exit 1
 }
-printf '%s' "$archive_text" | grep -Fq -- "$run_id" \
+grep -Fq -- "$run_id" <<<"$archive_text" \
   || { echo "::error::arb-consensus archive does not cite run id $run_id"; exit 1; }
-printf '%s' "$archive_text" | grep -Fq -- "$slate_digest" \
+grep -Fq -- "$slate_digest" <<<"$archive_text" \
   || { echo "::error::arb-consensus archive does not cite slate digest $slate_digest"; exit 1; }
 
 # Re-fetch the citation review to prove it was not edited after listing.
