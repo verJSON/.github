@@ -191,12 +191,13 @@ jobs:
         run: |
           set -euo pipefail
           summary="${SUMMARY:-quality evidence not obtained: skipped}"
+          export SUMMARY="$summary"
           mkdir -p "$RUNNER_TEMP/quality-review"
           python3 -I - <<'PY' >"$RUNNER_TEMP/quality-review/report.json"
           import json, os
           print(json.dumps({
               "obtained": False,
-              "summary": os.environ.get("SUMMARY", ""),
+              "summary": os.environ.get("SUMMARY") or "quality evidence not obtained: skipped",
               "provider": None,
               "model": None,
               "answers": [],
