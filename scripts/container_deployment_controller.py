@@ -1915,6 +1915,87 @@ def _run_host_export_transport(
     return result
 
 
+def _build_deployment_receipt_request(
+    receipt_digest_value: str,
+    *,
+    purpose: str = "rollback",
+    source_attempt_id: str | None = None,
+    retained_receipt_authority: str | None = None,
+) -> dict[str, Any]:
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    repository_id = os.environ.get("GITHUB_REPOSITORY_ID")
+    if not isinstance(repository, str) or not repository:
+        raise DeploymentError("deployment receipt repository identity is unavailable")
+    if not isinstance(repository_id, str) or re.fullmatch(r"[1-9][0-9]*", repository_id) is None:
+        raise DeploymentError("deployment receipt repository identity is unavailable")
+    if DIGEST.fullmatch(receipt_digest_value) is None:
+        raise DeploymentError("rollback receipt identity must be a canonical digest")
+    if purpose not in ("rollback", "resume"):
+        raise DeploymentError("deployment receipt purpose is invalid")
+    if source_attempt_id is not None and (
+        not isinstance(source_attempt_id, str)
+        or re.fullmatch(r"[1-9][0-9]*\.[1-9][0-9]*", source_attempt_id) is None
+    ):
+        raise DeploymentError("source attempt identity is invalid")
+    if retained_receipt_authority is not None and (
+        not isinstance(retained_receipt_authority, str)
+        or re.fullmatch(
+            r"[1-9][0-9]*\.[1-9][0-9]*/[1-9][0-9]*@sha256:[0-9a-f]{64}",
+            retained_receipt_authority,
+        )
+        is None
+    ):
+        raise DeploymentError("retained receipt authority is invalid")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    return {
+        "schemaVersion": 1,
+        "operation": "deployment-receipt",
+        "issuedAt": _timestamp(now),
+        "expiresAt": _timestamp(now + timedelta(minutes=15)),
+        "github": {
+            "repository": repository,
+            "repositoryId": int(repository_id),
+        },
+        "receiptDigest": receipt_digest_value,
+        "purpose": purpose,
+        "sourceAttemptId": source_attempt_id,
+        "retainedReceiptAuthority": retained_receipt_authority,
+    }
+
+
+def _run_deployment_receipt_transport(
+    request: dict[str, Any], timeout_seconds: int = ADMISSION_EVIDENCE_SECONDS
+) -> dict[str, Any]:
+    token = os.environ.get("GITHUB_TOKEN")
+    if not isinstance(token, str) or not token:
+        raise DeploymentError("job-scoped GitHub token is required for receipt retrieval")
+    with tempfile.TemporaryDirectory(prefix="deployment-receipt-request-") as temporary:
+        root = Path(temporary)
+        request_path = root / "request.json"
+        output_path = root / "deployment-receipt.json"
+        _write(request_path, request)
+        try:
+            ProcessAdapter._invoke(
+                [
+                    "python3", "scripts/container_deployment_transport.py",
+                    "--request", str(request_path), "--output", str(output_path),
+                ],
+                {"GITHUB_TOKEN": token},
+                control=True,
+                timeout_seconds=timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError, DeploymentError):
+            raise DeploymentError("canonical deployment receipt transport failed") from None
+        result = _load(output_path)
+    if (
+        result.get("schemaVersion") != 1
+        or result.get("requestDigest") != canonical_digest(request)
+        or result.get("outcome") != "passed"
+    ):
+        raise DeploymentError("canonical deployment receipt transport differs from request")
+    return result
+
+
 def _collect_evidence(
     config: dict[str, Any],
     manifest_identity: str,
@@ -1939,6 +2020,11 @@ def _collect_evidence(
     host_config = _object(fleet_config.get("hostEvidence"), "hostEvidence")
     if set(host_config) != {"doContext", "doSshKey", "maxAgeSeconds"}:
         raise DeploymentError("hostEvidence fields differ")
+    if rollback_receipt:
+        if DIGEST.fullmatch(rollback_receipt) is None:
+            raise DeploymentError("rollback receipt identity must be a canonical digest")
+        if not os.environ.get("GITHUB_TOKEN"):
+            raise DeploymentError("job-scoped GitHub token is required for receipt retrieval")
     command = [
         *_command(config, "evidenceCommand"),
         "--manifest-identity",
@@ -1946,10 +2032,6 @@ def _collect_evidence(
         "--fleet",
         fleet_selector,
     ]
-    if rollback_receipt:
-        if DIGEST.fullmatch(rollback_receipt) is None:
-            raise DeploymentError("rollback receipt identity must be a canonical digest")
-        command.extend(("--rollback-receipt", rollback_receipt))
     evidence = ProcessAdapter._run(
         command, timeout_seconds=ADMISSION_EVIDENCE_SECONDS
     )
@@ -1994,10 +2076,13 @@ def _collect_evidence(
         raise DeploymentError("evidence command substituted manifest identity")
     evidence["manifestIdentity"] = manifest_identity
     if rollback_receipt:
-        source = _object(evidence.get("rollbackSource"), "rollbackSource")
+        receipt_request = _build_deployment_receipt_request(rollback_receipt)
+        receipt_result = _run_deployment_receipt_transport(receipt_request)
+        source = _object(receipt_result.get("rollbackSource"), "rollbackSource")
         validate_receipt(source)
         if receipt_digest(source) != rollback_receipt:
             raise DeploymentError("retrieved rollback receipt differs from requested digest")
+        evidence["rollbackSource"] = source
         evidence["rollbackReceiptIdentity"] = rollback_receipt
     request = _build_host_export_request(config, evidence, fleet_selector)
     host_result = _run_host_export_transport(request)

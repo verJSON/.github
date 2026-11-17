@@ -20,6 +20,7 @@ SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
 CANARY_PATH = '.github/workflows/runner-canary.yml'
 CANARY_REPOSITORY = 'Verjson/.github'
+# deployment-receipt uses the job GITHUB_TOKEN (actions:read), not an App JWT.
 PERMISSIONS = {
     'manifest': {'metadata': 'read', 'contents': 'read', 'attestations': 'read'},
     'probe': {'metadata': 'read', 'contents': 'read', 'actions': 'write'},
@@ -39,6 +40,21 @@ HOST_EXPORT_APP_KEY_ENV = 'RUNNER_HOST_EVIDENCE_APP_PRIVATE_KEY'
 RUNS_PAGE_SIZE = 100
 MAX_RUN_RECORDS = 1_000
 MAX_RUN_REQUESTS = 40
+MAX_ARTIFACT_DOWNLOADS = 20
+ATTEMPT_ID = re.compile(r'[1-9][0-9]*\.[1-9][0-9]*')
+RETAINED_RECEIPT_AUTHORITY = re.compile(
+    r'(?P<attemptId>[1-9][0-9]*\.[1-9][0-9]*)/'
+    r'(?P<artifactId>[1-9][0-9]*)@'
+    r'(?P<digest>sha256:[0-9a-f]{64})'
+)
+DEPLOYMENT_ARTIFACT_NAME = re.compile(
+    r'^runner-deployment-(?P<runId>[1-9][0-9]*)-(?P<runAttempt>[1-9][0-9]*)-'
+    r'(?P<kind>admitted|progress(?:-[1-9][0-9]*)?|final)$'
+)
+RECEIPT_MEMBER = re.compile(
+    r'^(?:deployment-receipts/)?revision-(?P<revision>\d{4})\.json$'
+)
+ARTIFACT_KIND_RANK = {'progress': 0, 'admitted': 1, 'final': 2}
 
 
 class TransportError(ValueError):
@@ -100,9 +116,50 @@ def decode(raw):
         raise TransportError('transport JSON is invalid') from None
 
 
+def _validate_request_lifetime(value, now):
+    issued, expires = timestamp(value['issuedAt']), timestamp(value['expiresAt'])
+    require(issued == int(issued) and expires == int(expires), 'request timestamps must use whole seconds')
+    require(issued <= now < expires and expires - issued <= 1800, 'request is stale or exceeds bounded lifetime')
+
+
+def _validate_repository_name(name, field):
+    require(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+', name)
+            and name.split('/')[1] not in ('.', '..'), f'{field} is invalid')
+
+
 def validate_request(value, now):
     require(isinstance(value, dict), 'request must be an object')
     operation = value.get('operation')
+    require(value.get('schemaVersion') == 1 and type(value.get('schemaVersion')) is int, 'unsupported request version')
+    if operation == 'deployment-receipt':
+        object_keys(
+            value,
+            (
+                'schemaVersion', 'operation', 'issuedAt', 'expiresAt', 'github',
+                'receiptDigest', 'purpose', 'sourceAttemptId', 'retainedReceiptAuthority',
+            ),
+            'request',
+        )
+        require(operation == 'deployment-receipt', 'unsupported transport operation')
+        _validate_request_lifetime(value, now)
+        github = value['github']
+        object_keys(github, ('repository', 'repositoryId'), 'GitHub authority')
+        _validate_repository_name(github['repository'], 'repository identity')
+        require(positive(github['repositoryId']), 'reviewed numeric GitHub identities are required')
+        require(isinstance(value['receiptDigest'], str) and DIGEST.fullmatch(value['receiptDigest']),
+                'receipt digest is invalid')
+        require(value['purpose'] in ('rollback', 'resume'), 'deployment receipt purpose is invalid')
+        source = value['sourceAttemptId']
+        require(source is None or (isinstance(source, str) and ATTEMPT_ID.fullmatch(source)),
+                'source attempt identity is invalid')
+        authority = value['retainedReceiptAuthority']
+        require(
+            authority is None
+            or (isinstance(authority, str) and RETAINED_RECEIPT_AUTHORITY.fullmatch(authority)),
+            'retained receipt authority is invalid',
+        )
+        return value
+
     common = ('schemaVersion', 'operation', 'attemptId', 'fleetSelector', 'lane',
               'issuedAt', 'expiresAt', 'deploymentContractCommit', 'configDigest',
               'planDigest', 'action', 'rollbackOfAttempt', 'github', 'release')
@@ -110,9 +167,8 @@ def validate_request(value, now):
         object_keys(value, (*common, 'hostExport'), 'request')
     else:
         object_keys(value, (*common, 'probe'), 'request')
-    require(value['schemaVersion'] == 1 and type(value['schemaVersion']) is int, 'unsupported request version')
     require(operation in ('manifest', 'probe', 'host-export'), 'unsupported transport operation')
-    require(isinstance(value['attemptId'], str) and re.fullmatch(r'[1-9][0-9]*\.[1-9][0-9]*', value['attemptId']), 'attempt identity is invalid')
+    require(isinstance(value['attemptId'], str) and ATTEMPT_ID.fullmatch(value['attemptId']), 'attempt identity is invalid')
     require(isinstance(value['deploymentContractCommit'], str) and SHA.fullmatch(value['deploymentContractCommit']), 'deployment contract must be immutable')
     require(isinstance(value['configDigest'], str) and DIGEST.fullmatch(value['configDigest']), 'admitted configuration digest is invalid')
     require((operation != 'probe' and value['planDigest'] is None) or
@@ -121,23 +177,19 @@ def validate_request(value, now):
     rollback = value['rollbackOfAttempt']
     require((value['action'] == 'deploy' and rollback is None) or
             (value['action'] == 'rollback' and isinstance(rollback, str)
-             and re.fullmatch(r'[1-9][0-9]*\.[1-9][0-9]*', rollback) and rollback != value['attemptId']),
+             and ATTEMPT_ID.fullmatch(rollback) and rollback != value['attemptId']),
             'rollback attempt identity is invalid')
     for field in ('fleetSelector', 'lane'):
         require(isinstance(value[field], str) and re.fullmatch(r'[a-z][a-z0-9_-]{1,31}', value[field]), f'{field} is invalid')
-    issued, expires = timestamp(value['issuedAt']), timestamp(value['expiresAt'])
-    require(issued == int(issued) and expires == int(expires), 'request timestamps must use whole seconds')
-    require(issued <= now < expires and expires - issued <= 1800, 'request is stale or exceeds bounded lifetime')
+    _validate_request_lifetime(value, now)
     github = value['github']
     object_keys(github, ('repository', 'repositoryId', 'appId', 'installationId'), 'GitHub authority')
-    require(isinstance(github['repository'], str) and re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+', github['repository'])
-            and github['repository'].split('/')[1] not in ('.', '..'), 'repository identity is invalid')
+    _validate_repository_name(github['repository'], 'repository identity')
     require(all(positive(github[k]) for k in ('repositoryId', 'appId', 'installationId')), 'reviewed numeric GitHub identities are required')
     release = value['release']
     object_keys(release, ('repository', 'assetId', 'manifestDigest', 'variant', 'imageDigest',
                          'sourceCommit', 'sourceRef', 'signerWorkflow', 'signerCommit'), 'release')
-    require(isinstance(release['repository'], str) and re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+', release['repository'])
-            and release['repository'].split('/')[1] not in ('.', '..'), 'release repository is invalid')
+    _validate_repository_name(release['repository'], 'release repository')
     require(positive(release['assetId']), 'release asset identity is required')
     for field in ('manifestDigest', 'imageDigest'):
         require(isinstance(release[field], str) and DIGEST.fullmatch(release[field]), f'{field} is invalid')
@@ -741,6 +793,245 @@ def probe_runner(api, value, token, *, record_intent, clock=time.time, sleep=tim
             'artifactDigest': artifact['digest'], 'receipt': receipt}
 
 
+def _receipt_helpers():
+    import importlib.util
+    path = Path(__file__).with_name('container_deployment_preflight.py')
+    require(path.is_file(), 'deployment receipt preflight is unavailable')
+    spec = importlib.util.spec_from_file_location('container_deployment_preflight', path)
+    require(spec is not None and spec.loader is not None, 'deployment receipt preflight is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.receipt_digest, module.validate_receipt_chain, module.PreflightError
+
+
+def _artifact_kind_rank(kind):
+    base = kind.split('-', 1)[0]
+    return ARTIFACT_KIND_RANK.get(base, 99)
+
+
+def _parse_deployment_artifact(artifact):
+    require(isinstance(artifact, dict), 'artifact inventory entry is invalid')
+    name = artifact.get('name')
+    matched = DEPLOYMENT_ARTIFACT_NAME.fullmatch(name) if isinstance(name, str) else None
+    if matched is None:
+        return None
+    if artifact.get('expired') is not False:
+        return None
+    require(positive(artifact.get('id')), 'artifact identity is invalid')
+    require(isinstance(artifact.get('digest'), str) and DIGEST.fullmatch(artifact['digest']),
+            'artifact archive digest is invalid')
+    return {
+        'id': artifact['id'],
+        'name': name,
+        'digest': artifact['digest'],
+        'runId': int(matched.group('runId')),
+        'runAttempt': int(matched.group('runAttempt')),
+        'kind': matched.group('kind'),
+        'attemptId': f"{matched.group('runId')}.{matched.group('runAttempt')}",
+    }
+
+
+def complete_artifacts(api, path, token, request_budget):
+    require(type(request_budget) is int and request_budget > 0,
+            'artifact inventory request budget is exhausted')
+    separator = '&' if '?' in path else '?'
+    first_page_path = f'{path}{separator}per_page={RUNS_PAGE_SIZE}&page=1'
+    first_page = api.call('GET', first_page_path, token)
+    require(isinstance(first_page, dict), 'artifact inventory baseline is unavailable')
+    total_count = first_page.get('total_count')
+    require(type(total_count) is int and 0 <= total_count <= MAX_RUN_RECORDS,
+            'artifact inventory total is not a bounded complete query')
+    page_count = max(1, (total_count + RUNS_PAGE_SIZE - 1) // RUNS_PAGE_SIZE)
+    require(page_count <= request_budget,
+            'artifact inventory exceeds the remaining request budget')
+    artifacts = []
+    for page_number in range(1, page_count + 1):
+        page = first_page if page_number == 1 else api.call(
+            'GET', f'{path}{separator}per_page={RUNS_PAGE_SIZE}&page={page_number}', token
+        )
+        require(isinstance(page, dict)
+                and type(page.get('total_count')) is int and page['total_count'] == total_count
+                and isinstance(page.get('artifacts'), list)
+                and len(page['artifacts']) <= RUNS_PAGE_SIZE,
+                'artifact inventory page is not a trusted complete query')
+        artifacts.extend(page['artifacts'])
+    require(len(artifacts) == total_count and all(isinstance(item, dict) for item in artifacts),
+            'artifact inventory is incomplete')
+    ids = [item.get('id') for item in artifacts]
+    require(all(positive(item_id) for item_id in ids), 'artifact inventory has invalid identity')
+    require(len(set(ids)) == len(ids), 'artifact inventory has duplicate identity')
+    return artifacts, request_budget - page_count
+
+
+def _prefer_deployment_artifact(candidates):
+    require(candidates, 'deployment receipt artifact was not found')
+    ranked = sorted(
+        candidates,
+        key=lambda item: (_artifact_kind_rank(item['kind']), item['id']),
+    )
+    best_rank = _artifact_kind_rank(ranked[0]['kind'])
+    preferred = [item for item in ranked if _artifact_kind_rank(item['kind']) == best_rank]
+    require(len(preferred) == 1, 'deployment receipt artifact identity is ambiguous')
+    return preferred[0]
+
+
+def _decode_receipt_archive(archive):
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            members = bundle.infolist()
+            require(members, 'deployment receipt archive is empty')
+            receipts = {}
+            for member in members:
+                require(not member.is_dir(), 'deployment receipt archive layout is invalid')
+                matched = RECEIPT_MEMBER.fullmatch(member.filename)
+                require(matched is not None and 0 < member.file_size <= MAX_BYTES,
+                        'deployment receipt archive layout is invalid')
+                revision = int(matched.group('revision'))
+                require(revision not in receipts, 'deployment receipt archive repeats a revision')
+                receipts[revision] = decode(bundle.read(member))
+    except (zipfile.BadZipFile, RuntimeError):
+        raise TransportError('deployment receipt archive is invalid') from None
+    require(receipts and min(receipts) == 0 and set(receipts) == set(range(len(receipts))),
+            'deployment receipt revisions are not contiguous')
+    return [receipts[index] for index in range(len(receipts))]
+
+
+def _select_receipt(chain, receipt_digest_fn, requested, purpose):
+    matches = [
+        receipt for receipt in chain
+        if receipt_digest_fn(receipt) == requested
+    ]
+    require(matches, 'requested deployment receipt was not found')
+    require(len(matches) == 1, 'requested deployment receipt digest is ambiguous')
+    selected = matches[0]
+    if purpose == 'rollback':
+        require(selected.get('outcome') in ('failed', 'interrupted'),
+                'rollback source attempt must be failed or interrupted')
+    return selected
+
+
+def _inspect_artifact(api, token, artifact, receipt_digest_fn, validate_chain, PreflightError,
+                      requested, purpose):
+    archive = api.call(
+        'GET',
+        f"/repos/{artifact['_repository']}/actions/artifacts/{artifact['id']}/zip",
+        token,
+        binary=True,
+    )
+    require(digest(archive) == artifact['digest'], 'artifact archive digest differs')
+    chain = _decode_receipt_archive(archive)
+    try:
+        validate_chain(chain)
+    except PreflightError as error:
+        raise TransportError(f'deployment receipt chain is invalid: {error}') from None
+    selected = _select_receipt(chain, receipt_digest_fn, requested, purpose)
+    return {
+        'artifactId': artifact['id'],
+        'artifactName': artifact['name'],
+        'artifactDigest': artifact['digest'],
+        'sourceAttemptId': artifact['attemptId'],
+        'rollbackSource': selected,
+        'retainedRevisions': chain,
+    }
+
+
+def fetch_deployment_receipt(api, value, token, *, clock=time.time):
+    validate_request(value, clock())
+    require(isinstance(token, str) and token and '\n' not in token,
+            'job-scoped GitHub token is required')
+    receipt_digest_fn, validate_chain, PreflightError = _receipt_helpers()
+    repository = value['github']['repository']
+    repository_id = value['github']['repositoryId']
+    repo = api.call('GET', f'/repositories/{repository_id}', token)
+    require(positive(repo.get('id')) and repo['id'] == repository_id
+            and repo.get('full_name') == repository, 'receipt API repository identity differs')
+    requested = value['receiptDigest']
+    purpose = value['purpose']
+    authority = value.get('retainedReceiptAuthority')
+    source_attempt = value.get('sourceAttemptId')
+    request_budget = MAX_RUN_REQUESTS
+
+    if isinstance(authority, str):
+        matched = RETAINED_RECEIPT_AUTHORITY.fullmatch(authority)
+        require(matched is not None, 'retained receipt authority is invalid')
+        artifact_id = int(matched.group('artifactId'))
+        attempt_id = matched.group('attemptId')
+        metadata = api.call('GET', f'/repos/{repository}/actions/artifacts/{artifact_id}', token)
+        require(isinstance(metadata, dict) and metadata.get('expired') is False,
+                'deployment receipt artifact is expired')
+        parsed = _parse_deployment_artifact(metadata)
+        require(parsed is not None and parsed['attemptId'] == attempt_id,
+                'retained receipt artifact identity differs')
+        parsed['_repository'] = repository
+        result = _inspect_artifact(
+            api, token, parsed, receipt_digest_fn, validate_chain, PreflightError,
+            requested, purpose,
+        )
+        validate_request(value, clock())
+        return {
+            'schemaVersion': 1,
+            'requestDigest': digest(canonical(value)),
+            'outcome': 'passed',
+            **result,
+        }
+
+    if isinstance(source_attempt, str):
+        run_id = source_attempt.split('.', 1)[0]
+        artifacts, request_budget = complete_artifacts(
+            api, f'/repos/{repository}/actions/runs/{run_id}/artifacts', token, request_budget
+        )
+        candidates = []
+        for item in artifacts:
+            parsed = _parse_deployment_artifact(item)
+            if parsed is None or parsed['attemptId'] != source_attempt:
+                continue
+            parsed['_repository'] = repository
+            candidates.append(parsed)
+        selected_artifact = _prefer_deployment_artifact(candidates)
+        result = _inspect_artifact(
+            api, token, selected_artifact, receipt_digest_fn, validate_chain, PreflightError,
+            requested, purpose,
+        )
+        validate_request(value, clock())
+        return {
+            'schemaVersion': 1,
+            'requestDigest': digest(canonical(value)),
+            'outcome': 'passed',
+            **result,
+        }
+
+    artifacts, request_budget = complete_artifacts(
+        api, f'/repos/{repository}/actions/artifacts', token, request_budget
+    )
+    downloads = 0
+    matches = []
+    for item in artifacts:
+        parsed = _parse_deployment_artifact(item)
+        if parsed is None:
+            continue
+        require(downloads < MAX_ARTIFACT_DOWNLOADS,
+                'deployment receipt search exceeded the download budget')
+        downloads += 1
+        parsed['_repository'] = repository
+        try:
+            result = _inspect_artifact(
+                api, token, parsed, receipt_digest_fn, validate_chain, PreflightError,
+                requested, purpose,
+            )
+        except TransportError:
+            continue
+        matches.append(result)
+        require(len(matches) == 1, 'requested deployment receipt digest is ambiguous')
+    require(matches, 'requested deployment receipt was not found')
+    validate_request(value, clock())
+    return {
+        'schemaVersion': 1,
+        'requestDigest': digest(canonical(value)),
+        'outcome': 'passed',
+        **matches[0],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request', required=True, type=Path)
@@ -753,26 +1044,33 @@ def main():
     require(not args.output.exists() and not intent_path.exists(), 'output or dispatch intent already exists; reconcile before retry')
     def record_intent(value):
         persist_record(intent_path, value)
-    role = value['operation'].replace('-', '_').upper()
-    if value['operation'] == 'host-export':
-        jwt = mint_host_export_app_jwt(
-            value['github']['appId'],
-            os.environ.get(HOST_EXPORT_APP_KEY_ENV),
-            time.time(),
-        )
+    if value['operation'] == 'deployment-receipt':
+        token = os.environ.get('GITHUB_TOKEN')
+        require(isinstance(token, str) and token and '\n' not in token,
+                'job-scoped GitHub token is required')
+        api = GitHubHTTP()
+        result = fetch_deployment_receipt(api, value, token)
     else:
-        jwt = os.environ.get(f'VERJSON_DEPLOYMENT_{role}_APP_JWT')
-    api = GitHubHTTP()
-    token = installation_token(api, value, jwt, time.time())
-    if value['operation'] == 'manifest':
-        result = fetch_manifest(api, value, token)
-    elif value['operation'] == 'probe':
-        result = probe_runner(api, value, token, record_intent=record_intent)
-    else:
-        manifest_result = None
-        if value['hostExport']['purpose'] != 'capacity':
-            manifest_result = fetch_manifest(api, value, token)
-        result = host_export(value, token, manifest_result)
+        role = value['operation'].replace('-', '_').upper()
+        if value['operation'] == 'host-export':
+            jwt = mint_host_export_app_jwt(
+                value['github']['appId'],
+                os.environ.get(HOST_EXPORT_APP_KEY_ENV),
+                time.time(),
+            )
+        else:
+            jwt = os.environ.get(f'VERJSON_DEPLOYMENT_{role}_APP_JWT')
+        api = GitHubHTTP()
+        token = installation_token(api, value, jwt, time.time())
+        if value['operation'] == 'manifest':
+            result = fetch_manifest(api, value, token)
+        elif value['operation'] == 'probe':
+            result = probe_runner(api, value, token, record_intent=record_intent)
+        else:
+            manifest_result = None
+            if value['hostExport']['purpose'] != 'capacity':
+                manifest_result = fetch_manifest(api, value, token)
+            result = host_export(value, token, manifest_result)
     persist_record(args.output, result)
 
 

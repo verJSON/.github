@@ -16,15 +16,16 @@ fields fail closed. `validate_request` is the authoritative schema:
 
 | Fields | Required binding |
 | --- | --- |
-| `schemaVersion`, `operation` | Version 1; `manifest`, `probe`, or read-only `host-export` |
-| `attemptId`, `deploymentContractCommit`, `configDigest`, `planDigest` | Deployment run/attempt, immutable contract SHA, admitted configuration digest, approved plan digest (nullable only before plan approval for evidence reads) |
-| `action`, `rollbackOfAttempt` | Deploy with null predecessor, or rollback naming a different run/attempt |
-| `fleetSelector`, `lane` | Separate fleet and lane identifiers, never interchangeable |
+| `schemaVersion`, `operation` | Version 1; `manifest`, `probe`, read-only `host-export`, or parent-owned `deployment-receipt` |
+| `attemptId`, `deploymentContractCommit`, `configDigest`, `planDigest` | Deployment run/attempt, immutable contract SHA, admitted configuration digest, approved plan digest (nullable only before plan approval for evidence reads). Omitted for `deployment-receipt`. |
+| `action`, `rollbackOfAttempt` | Deploy with null predecessor, or rollback naming a different run/attempt. Omitted for `deployment-receipt`. |
+| `fleetSelector`, `lane` | Separate fleet and lane identifiers, never interchangeable. Omitted for `deployment-receipt`. |
 | `issuedAt`, `expiresAt` | Whole-second UTC timestamps; at most 30 minutes and not expired |
-| `github` | Exact repository name/ID and dedicated role App/installation IDs |
-| `release` | Immutable historical signed-source repository, asset ID, raw manifest digest, variant/image digest, source commit/main ref, canonical signer workflow and immutable signer commit |
+| `github` | Exact repository name/ID; App/installation IDs for App-minted roles. `deployment-receipt` binds repository name/ID only and authenticates with the job `GITHUB_TOKEN`. |
+| `release` | Immutable historical signed-source repository, asset ID, raw manifest digest, variant/image digest, source commit/main ref, canonical signer workflow and immutable signer commit. Omitted for `deployment-receipt`. |
 | `probe` | Exact runner ID/name/label, unique transaction UUID, workflow ID, reviewed canary tag and commit |
 | `hostExport` | Project, DigitalOcean context and SSH-key selector, exact runner set, freshness limit, observation purpose, and selected runner for post-update evidence |
+| `receiptDigest`, `purpose`, `sourceAttemptId`, `retainedReceiptAuthority` | `deployment-receipt` only: canonical receipt digest; `rollback` or `resume`; optional source attempt or retained authority locator |
 
 Every operation carries the complete transaction request, including manifest
 reads. Preplan evidence reads bind the admitted configuration with a null
@@ -73,17 +74,20 @@ reads; probe dispatch is rejected before credentials are obtained.
 The trusted parent uses separate short-lived App JWTs for the manifest and
 probe roles: `VERJSON_DEPLOYMENT_MANIFEST_APP_JWT` and
 `VERJSON_DEPLOYMENT_PROBE_APP_JWT`. Host export uses a separate App private key;
-the broker mints its short-lived JWT internally. No ambient `GH_TOKEN`, SSH
-agent, HOME configuration, DigitalOcean token, or runner-control credential is
-authority for host observation. The broker validates each live App installation
-and its exact permissions, then scopes each installation token to one
-repository.
+the broker mints its short-lived JWT internally. Deployment-receipt retrieval
+uses the workflow job `GITHUB_TOKEN` with `actions: read` only — no App JWT and
+no installation token. No ambient `GH_TOKEN`, SSH agent, HOME configuration,
+DigitalOcean token, or runner-control credential is authority for host
+observation or receipt retrieval by the evidence adapter. The broker validates
+each live App installation and its exact permissions, then scopes each
+installation token to one repository.
 
 | Role | Exact App permissions, including implicit metadata |
 | --- | --- |
 | Manifest | `metadata: read`, `contents: read`, `attestations: read` on the release repository |
 | Probe | `metadata: read`, `contents: read`, `actions: write` on `Verjson/.github` |
 | Host export | `metadata: read`, `contents: read`, `attestations: read`, `organization_self_hosted_runners: read` on the observation repository |
+| Deployment receipt | Job `GITHUB_TOKEN` with workflow `actions: read`; omitted from the App `PERMISSIONS` table |
 
 The host-export App identity is reviewed configuration; its private key is
 `RUNNER_HOST_EVIDENCE_APP_PRIVATE_KEY`. The reusable workflow reads
