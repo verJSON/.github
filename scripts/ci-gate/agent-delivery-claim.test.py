@@ -21,6 +21,8 @@ PR = 42
 HEAD = "a" * 40
 OTHER_HEAD = "b" * 40
 TRUSTED = "github-actions[bot]"
+RUN_ID = "1234567890"
+WORKFLOW = ".github/workflows/agent-delivery-claim.yml"
 
 
 def claim_id_factory(seq: list[str] | None = None):
@@ -40,12 +42,15 @@ class AgentDeliveryClaimTest(unittest.TestCase):
     def store(self, **kwargs):
         return MODULE.MemoryClaimStore(**kwargs)
 
-    def claim(self, store, *, repo=REPO, pr=PR, head=HEAD, max_concurrent=8, ids=None):
+    def claim(self, store, *, repo=REPO, pr=PR, head=HEAD, max_concurrent=8, ids=None,
+               run_id=RUN_ID, workflow_path=WORKFLOW):
         return MODULE.claim_delivery(
             store,
             repository=repo,
             pull_request=pr,
             head_sha=head,
+            run_id=run_id,
+            workflow_path=workflow_path,
             max_concurrent=max_concurrent,
             new_claim_id=claim_id_factory(ids),
         )
@@ -77,6 +82,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
                         repository=REPO,
                         pull_request=PR,
                         head_sha=HEAD,
+                        run_id=RUN_ID,
+                        workflow_path=WORKFLOW,
                         max_concurrent=8,
                         new_claim_id=shared_ids,
                     )
@@ -154,8 +161,9 @@ class AgentDeliveryClaimTest(unittest.TestCase):
         self.assertTrue(body.startswith(marker) or marker in body)
         self.assertRegex(
             marker,
-            rf"^<!-- agent-delivery-claim:v1 repo:{re.escape(REPO)} "
-            rf"pr:{PR} head:{HEAD} claim_id:{'f' * 32} -->$",
+            rf"^<!-- agent-delivery-claim:v2 repo:{re.escape(REPO)} "
+            rf"pr:{PR} head:{HEAD} claim_id:{'f' * 32} "
+            rf"run:{RUN_ID} workflow:{re.escape(WORKFLOW)} -->$",
         )
         lowered = body.lower()
         for forbidden in ("token", "secret", "password", "authorization:", "bearer "):
@@ -175,6 +183,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=8,
             new_claim_id=claim_id_factory(["1" * 32]),
             worker=worker,
@@ -184,6 +194,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=8,
             new_claim_id=claim_id_factory(["2" * 32]),
             worker=worker,
@@ -209,6 +221,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         outcome = worker.run(claim)
         self.assertEqual(outcome.status, "failed")
@@ -233,6 +247,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         outcome = worker.run(claim)
         self.assertEqual(outcome.status, "failed")
@@ -262,6 +278,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         outcome = worker.run(claim)
         self.assertEqual(outcome.status, "completed")
@@ -284,6 +302,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         outcome = worker.run(claim)
         self.assertEqual(outcome.status, "queued")
@@ -334,6 +354,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=8,
             new_claim_id=claim_id_factory(["1" * 32]),
             worker=worker,
@@ -343,6 +365,8 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=8,
             new_claim_id=claim_id_factory(["2" * 32]),
             worker=worker,
@@ -351,6 +375,41 @@ class AgentDeliveryClaimTest(unittest.TestCase):
         self.assertFalse(second.created)
         self.assertEqual(calls, ["1" * 32])
 
+
+
+    def test_new_claims_require_run_id_and_workflow_path(self):
+        store = self.store()
+        with self.assertRaisesRegex(MODULE.ClaimRefusal, "run id"):
+            MODULE.claim_delivery(
+                store,
+                repository=REPO,
+                pull_request=PR,
+                head_sha=HEAD,
+                run_id="",
+                workflow_path=WORKFLOW,
+                new_claim_id=claim_id_factory(["1" * 32]),
+            )
+        with self.assertRaisesRegex(MODULE.ClaimRefusal, "workflow path"):
+            MODULE.claim_delivery(
+                store,
+                repository=REPO,
+                pull_request=PR,
+                head_sha=HEAD,
+                run_id=RUN_ID,
+                workflow_path="workflows/evil.yml",
+                new_claim_id=claim_id_factory(["2" * 32]),
+            )
+
+    def test_parse_accepts_legacy_v1_markers_without_run_binding(self):
+        body = (
+            f"<!-- agent-delivery-claim:v1 repo:{REPO} "
+            f"pr:{PR} head:{HEAD} claim_id:{'a' * 32} -->\n"
+        )
+        parsed = MODULE.parse_claim_marker(body)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertIsNone(parsed.run_id)
+        self.assertIsNone(parsed.workflow_path)
 
 class CommentClaimStoreTest(unittest.TestCase):
     def fake_store(self, *, trusted_authors=None, race_on_create: bool = False):
@@ -391,6 +450,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         created = store.create(claim)
         self.assertEqual(created.claim_id, claim.claim_id)
@@ -408,6 +469,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         store._test_comments.append(  # noqa: SLF001
             {
@@ -424,6 +487,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=1,
             new_claim_id=claim_id_factory(["c" * 32]),
         )
@@ -441,6 +506,8 @@ class CommentClaimStoreTest(unittest.TestCase):
                 pull_request=PR,
                 head_sha=head,
                 status="claimed",
+                run_id=RUN_ID,
+                workflow_path=WORKFLOW,
             )
             store._test_comments.append(  # noqa: SLF001
                 {
@@ -455,6 +522,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=1,
             new_claim_id=claim_id_factory(["d" * 32]),
         )
@@ -468,6 +537,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             pull_request=PR,
             head_sha=HEAD,
             status="claimed",
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
         )
         store._test_comments.append(  # noqa: SLF001
             {
@@ -503,6 +574,8 @@ class CommentClaimStoreTest(unittest.TestCase):
                         repository=REPO,
                         pull_request=PR,
                         head_sha=HEAD,
+                        run_id=RUN_ID,
+                        workflow_path=WORKFLOW,
                         max_concurrent=8,
                         new_claim_id=shared_ids,
                     )
@@ -528,6 +601,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=1,
             new_claim_id=claim_id_factory(["1" * 32]),
         )
@@ -537,6 +612,8 @@ class CommentClaimStoreTest(unittest.TestCase):
             repository=REPO,
             pull_request=PR,
             head_sha=OTHER_HEAD,
+            run_id=RUN_ID,
+            workflow_path=WORKFLOW,
             max_concurrent=1,
             new_claim_id=claim_id_factory(["2" * 32]),
         )

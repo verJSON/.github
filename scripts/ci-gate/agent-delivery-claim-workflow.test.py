@@ -112,6 +112,12 @@ class AgentDeliveryClaimWorkflowTest(unittest.TestCase):
         self.assertNotRegex(claim_step["run"], r"(?m)^\s*python3 -I scripts/ci-gate/agent_delivery_claim\.py")
         self.assertIn("PR_TITLE: ${{ github.event.pull_request.title }}", self.text)
         self.assertIn("PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}", self.text)
+
+        self.assertIn("GITHUB_RUN_ID: ${{ github.run_id }}", self.text)
+        self.assertIn(
+            "CLAIM_WORKFLOW_PATH: .github/workflows/agent-delivery-claim.yml",
+            self.text,
+        )
         self.assertNotIn("--pr-title", claim_step["run"])
         # Worker still must not write NEXT/ from the claim job.
         self.assertNotIn("NEXT/", claim_step["run"])

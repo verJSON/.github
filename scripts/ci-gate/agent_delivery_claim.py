@@ -22,7 +22,14 @@ REPO_RE = re.compile(
 PR_RE = re.compile(r"^[123456789][0123456789]{0,14}$")
 HEAD_RE = re.compile(r"^[0123456789abcdef]{40}$")
 CLAIM_ID_RE = re.compile(r"^[0123456789abcdef]{32}$")
-MARKER_RE = re.compile(
+RUN_ID_RE = re.compile(r"^[123456789][0123456789]{0,31}$")
+WORKFLOW_PATH_RE = re.compile(
+    r"^\.github/workflows/"
+    r"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+"
+    r"\.ya?ml$"
+)
+# Legacy v1 markers remain readable for idempotent find; new claims emit v2.
+MARKER_RE_V1 = re.compile(
     r"<!-- agent-delivery-claim:v1 "
     r"repo:(?P<repository>"
     r"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/"
@@ -31,6 +38,21 @@ MARKER_RE = re.compile(
     r"head:(?P<head_sha>[0123456789abcdef]{40}) "
     r"claim_id:(?P<claim_id>[0123456789abcdef]{32}) -->"
 )
+MARKER_RE_V2 = re.compile(
+    r"<!-- agent-delivery-claim:v2 "
+    r"repo:(?P<repository>"
+    r"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/"
+    r"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+) "
+    r"pr:(?P<pull_request>[123456789][0123456789]{0,14}) "
+    r"head:(?P<head_sha>[0123456789abcdef]{40}) "
+    r"claim_id:(?P<claim_id>[0123456789abcdef]{32}) "
+    r"run:(?P<run_id>[123456789][0123456789]{0,31}) "
+    r"workflow:(?P<workflow_path>"
+    r"\.github/workflows/"
+    r"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+"
+    r"\.ya?ml) -->"
+)
+MARKER_RE = MARKER_RE_V2  # preferred match order handled in parse_claim_marker
 
 DEFAULT_MAX_CONCURRENT = 8
 DEFAULT_TRUSTED_CLAIM_AUTHORS = frozenset({"github-actions[bot]"})
@@ -47,6 +69,8 @@ class Claim:
     pull_request: int
     head_sha: str
     status: str = "claimed"
+    run_id: str | None = None
+    workflow_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,13 +242,25 @@ def new_claim_id() -> str:
     return secrets.token_hex(16)
 
 
+def validate_run_binding(*, run_id: object, workflow_path: object) -> tuple[str, str]:
+    if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+        raise ClaimRefusal("run id is malformed")
+    if not isinstance(workflow_path, str) or not WORKFLOW_PATH_RE.fullmatch(workflow_path):
+        raise ClaimRefusal("workflow path is malformed")
+    return run_id, workflow_path
+
+
 def claim_marker(claim: Claim) -> str:
     if not CLAIM_ID_RE.fullmatch(claim.claim_id):
         raise ClaimRefusal("claim id is malformed")
+    run_id, workflow_path = validate_run_binding(
+        run_id=claim.run_id, workflow_path=claim.workflow_path
+    )
     return (
-        f"<!-- agent-delivery-claim:v1 repo:{claim.repository} "
+        f"<!-- agent-delivery-claim:v2 repo:{claim.repository} "
         f"pr:{claim.pull_request} head:{claim.head_sha} "
-        f"claim_id:{claim.claim_id} -->"
+        f"claim_id:{claim.claim_id} "
+        f"run:{run_id} workflow:{workflow_path} -->"
     )
 
 
@@ -237,6 +273,8 @@ def format_claim_receipt(claim: Claim) -> str:
         f"- repository: `{claim.repository}`\n"
         f"- pull_request: `{claim.pull_request}`\n"
         f"- head_sha: `{claim.head_sha}`\n"
+        f"- run_id: `{claim.run_id}`\n"
+        f"- workflow_path: `{claim.workflow_path}`\n"
         f"- status: `{claim.status}`\n\n"
         f"Idempotent claim per ADR 0243 amendment 2026-11-17 "
         f"(ARB `arb-2139-2026-11-17`). Worker follows the dependency-upgrade "
@@ -247,7 +285,18 @@ def format_claim_receipt(claim: Claim) -> str:
 def parse_claim_marker(body: str) -> Claim | None:
     if not isinstance(body, str):
         return None
-    match = MARKER_RE.search(body)
+    match = MARKER_RE_V2.search(body)
+    if match is not None:
+        return Claim(
+            claim_id=match.group("claim_id"),
+            repository=match.group("repository"),
+            pull_request=int(match.group("pull_request")),
+            head_sha=match.group("head_sha"),
+            status="claimed",
+            run_id=match.group("run_id"),
+            workflow_path=match.group("workflow_path"),
+        )
+    match = MARKER_RE_V1.search(body)
     if match is None:
         return None
     return Claim(
@@ -256,6 +305,8 @@ def parse_claim_marker(body: str) -> Claim | None:
         pull_request=int(match.group("pull_request")),
         head_sha=match.group("head_sha"),
         status="claimed",
+        run_id=None,
+        workflow_path=None,
     )
 
 
@@ -409,6 +460,8 @@ def claim_delivery(
     repository: object,
     pull_request: object,
     head_sha: object,
+    run_id: object,
+    workflow_path: object,
     max_concurrent: int = DEFAULT_MAX_CONCURRENT,
     new_claim_id: Callable[[], str] = new_claim_id,
     worker: Worker | None = None,
@@ -416,6 +469,7 @@ def claim_delivery(
     if not isinstance(max_concurrent, int) or isinstance(max_concurrent, bool) or max_concurrent < 1:
         raise ClaimRefusal("concurrency bound is malformed")
     triple = validate_triple(repository, pull_request, head_sha)
+    bound_run_id, bound_workflow = validate_run_binding(run_id=run_id, workflow_path=workflow_path)
     claim_id = new_claim_id()
     if not isinstance(claim_id, str) or not CLAIM_ID_RE.fullmatch(claim_id):
         raise ClaimRefusal("claim id is malformed")
@@ -425,6 +479,8 @@ def claim_delivery(
         pull_request=triple.pull_request,
         head_sha=triple.head_sha,
         status="claimed",
+        run_id=bound_run_id,
+        workflow_path=bound_workflow,
     )
     # Idempotent find+insert and the concurrency bound live inside store.create.
     stored = store.create(candidate, max_concurrent=max_concurrent)
@@ -475,6 +531,16 @@ def main(argv: list[str] | None = None) -> int:
         dest="pr_labels",
         default=None,
         help="Renovate PR label (repeatable) for major/breaking classification.",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Actions run id bound into the claim receipt (or GITHUB_RUN_ID).",
+    )
+    parser.add_argument(
+        "--workflow-path",
+        default=None,
+        help="Trusted workflow path bound into the claim receipt (or CLAIM_WORKFLOW_PATH).",
     )
     args = parser.parse_args(argv)
 
@@ -569,11 +635,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
+        run_id = args.run_id if args.run_id is not None else os.environ.get("GITHUB_RUN_ID")
+        workflow_path = (
+            args.workflow_path
+            if args.workflow_path is not None
+            else os.environ.get("CLAIM_WORKFLOW_PATH")
+        )
         result = claim_delivery(
             store,
             repository=args.repository,
             pull_request=args.pull_request,
             head_sha=args.head_sha,
+            run_id=run_id,
+            workflow_path=workflow_path,
             max_concurrent=args.max_concurrent,
             worker=worker,
         )
