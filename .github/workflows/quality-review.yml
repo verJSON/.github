@@ -144,9 +144,14 @@ jobs:
           export QR_PROVIDER="$provider"
           export QR_MODEL="$model"
           set +e
+          # -I ignores PYTHONPATH; inject the contract scripts dir explicitly.
           summary="$(python3 -I - <<'PY'
           import os
+          import sys
           from pathlib import Path
+
+          scripts = Path(os.environ["GITHUB_WORKSPACE"]) / ".quality-review-contract" / "scripts"
+          sys.path.insert(0, str(scripts))
           from quality_review.run import run_review
 
           diff = Path(os.environ["DIFF_PATH"]).read_text(encoding="utf-8", errors="replace")
