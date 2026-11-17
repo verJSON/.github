@@ -1,6 +1,6 @@
 ---
 date: 2026-11-17
-issue: 1820
+id: 20261117T010800Z
 impact: patch
 title: Fail closed on unparseable diffs and broaden env path drops
 ---
