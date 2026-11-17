@@ -291,6 +291,7 @@ def generator_invocations(sha):
         ("gen-renovate-compatibility-caller.sh", [sha, "@verjson/example", "1.2.3", "node"]),
         ("gen-privileged-merge-caller.sh", [sha, REQUIRED_CHECKS]),
         ("gen-privileged-merge-caller.sh", [sha, "--retry", '["ci"]', REQUIRED_CHECKS]),
+        ("gen-quality-review-caller.sh", [sha]),
     ]
     invocations += [("gen-type-surface-contract.sh", [kind, sha])
                     for kind in ("pack-helper", "contract-test")]
