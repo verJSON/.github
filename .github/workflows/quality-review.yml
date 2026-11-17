@@ -1,0 +1,178 @@
+# Advisory quality review (#1820 / ADR 0270). Never a required check.
+name: quality-review
+
+on:
+  workflow_call:
+    inputs:
+      contract_ref:
+        description: Immutable Verjson/.github commit containing this workflow and scripts
+        required: true
+        type: string
+      provider:
+        description: Provider id from config/quality-review-providers.json
+        required: false
+        type: string
+        default: ""
+      model:
+        description: Optional pinned model override (never *-latest)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Always GitHub-hosted: advisory review fetches the PR diff over the API and
+    # never executes PR head code (ADR 0235 / #1831 / #1820).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - name: Require an immutable contract pin
+        env:
+          CONTRACT_REF: ${{ inputs.contract_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]; then
+            echo "::error::contract_ref must be a full 40-character lower-case commit SHA"
+            exit 1
+          fi
+
+      - name: Resolve mode
+        id: mode
+        env:
+          MODE: ${{ vars.QUALITY_REVIEW }}
+          # Exact label match only (comma-joined names bounded by commas).
+          HAS_LABEL: ${{ contains(format(',{0},', join(github.event.pull_request.labels.*.name, ',')), ',quality-review,') }}
+        run: |
+          set -euo pipefail
+          mode="${MODE:-off}"
+          case "$mode" in
+            off|label|auto) ;;
+            *)
+              echo "summary=quality evidence not obtained: invalid QUALITY_REVIEW mode '$mode'" >>"$GITHUB_OUTPUT"
+              echo "run=false" >>"$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [ "$mode" = "off" ]; then
+            echo "summary=quality evidence not obtained: QUALITY_REVIEW=off" >>"$GITHUB_OUTPUT"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$mode" = "label" ] && [ "$HAS_LABEL" != "true" ]; then
+            echo "summary=quality evidence not obtained: quality-review label absent" >>"$GITHUB_OUTPUT"
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >>"$GITHUB_OUTPUT"
+
+      - name: Refuse a symlink at the .quality-review-contract checkout path
+        if: steps.mode.outputs.run == 'true'
+        run: |
+          if [ -L .quality-review-contract ]; then echo "::error::.quality-review-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
+
+      - name: Check out contract (no PR head)
+        if: steps.mode.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Verjson/.github
+          ref: ${{ inputs.contract_ref }}
+          path: .quality-review-contract
+          persist-credentials: false
+
+      - name: Fetch PR diff
+        if: steps.mode.outputs.run == 'true'
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/quality-review"
+          out="$RUNNER_TEMP/quality-review/pr.diff"
+          # Read-only REST diff; never checkout PR head. API failure stays green.
+          set +e
+          gh api \
+            -H "Accept: application/vnd.github.diff" \
+            "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            >"$out" 2>"$RUNNER_TEMP/quality-review/diff.err"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            summary="quality evidence not obtained: diff fetch failed (exit $status)"
+            printf '%s\n' "$summary" >>"$GITHUB_STEP_SUMMARY"
+            echo "summary=$summary" >>"$GITHUB_OUTPUT"
+            echo "ok=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "path=$out" >>"$GITHUB_OUTPUT"
+          echo "ok=true" >>"$GITHUB_OUTPUT"
+
+      - name: Evaluate
+        if: steps.mode.outputs.run == 'true' && steps.diff.outputs.ok == 'true'
+        id: evaluate
+        env:
+          DIFF_PATH: ${{ steps.diff.outputs.path }}
+          PROVIDER_INPUT: ${{ inputs.provider }}
+          MODEL_INPUT: ${{ inputs.model }}
+          PROVIDER_VAR: ${{ vars.QUALITY_REVIEW_PROVIDER }}
+          MODEL_VAR: ${{ vars.QUALITY_REVIEW_MODEL }}
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          PYTHONPATH: ${{ github.workspace }}/.quality-review-contract/scripts
+        run: |
+          set -euo pipefail
+          provider="${PROVIDER_INPUT:-}"
+          if [ -z "$provider" ]; then
+            provider="${PROVIDER_VAR:-jev}"
+          fi
+          model="${MODEL_INPUT:-}"
+          if [ -z "$model" ]; then
+            model="${MODEL_VAR:-}"
+          fi
+          # Without a selected secret, stay advisory-green via not-obtained.
+          if [ -z "${JEV_API_KEY:-}" ] && [ "$provider" = "jev" ]; then
+            summary='quality evidence not obtained: JEV_API_KEY absent'
+            printf '%s\n' "$summary" >>"$GITHUB_STEP_SUMMARY"
+            echo "summary=$summary" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # gitleaks binary acquisition lands later; absent scanner fails closed today.
+          export QR_PROVIDER="$provider"
+          export QR_MODEL="$model"
+          set +e
+          summary="$(python3 -I - <<'PY'
+          import os
+          from pathlib import Path
+          from quality_review.run import run_review
+
+          diff = Path(os.environ["DIFF_PATH"]).read_text(encoding="utf-8", errors="replace")
+          model = os.environ.get("QR_MODEL") or None
+          result = run_review(
+              diff,
+              provider_id=os.environ["QR_PROVIDER"],
+              api_key=os.environ.get("JEV_API_KEY"),
+              model_override=model,
+              scanner=None,
+          )
+          print(result.summary)
+          PY
+          )"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] || [ -z "${summary:-}" ]; then
+            summary="quality evidence not obtained: evaluate failed (exit ${status:-?})"
+          fi
+          printf '%s\n' "$summary" >>"$GITHUB_STEP_SUMMARY"
+          echo "summary=$summary" >>"$GITHUB_OUTPUT"
+
+      - name: Record skipped mode
+        if: steps.mode.outputs.run != 'true'
+        env:
+          SUMMARY: ${{ steps.mode.outputs.summary }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${SUMMARY:-quality evidence not obtained: skipped}" >>"$GITHUB_STEP_SUMMARY"

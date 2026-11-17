@@ -118,6 +118,7 @@ RENDERED_WORKFLOWS = {
     "scripts/gen-renovate-compatibility-caller.sh": (
         (CONTRACT_REF, "@verjson/example", "1.2.3", "node"),
     ),
+    "scripts/gen-quality-review-caller.sh": ((CONTRACT_REF,),),
 }
 NON_WORKFLOW_GENERATORS = {
     "scripts/gen-adr-index.sh": "renders the decision index Markdown",

@@ -288,6 +288,7 @@ def generator_invocations(sha):
         ("gen-gate-rearm-caller.sh", [sha]),
         ("gen-merge-admission-caller.sh", [sha, '["Merge admission trigger"]']),
         ("gen-merge-admission-caller.sh", ["--trigger"]),
+        ("gen-quality-review-caller.sh", [sha]),
         ("gen-renovate-compatibility-caller.sh", [sha, "@verjson/example", "1.2.3", "node"]),
         ("gen-privileged-merge-caller.sh", [sha, REQUIRED_CHECKS]),
         ("gen-privileged-merge-caller.sh", [sha, "--retry", '["ci"]', REQUIRED_CHECKS]),

@@ -1,0 +1,28 @@
+# Canary caller for Verjson/.github (#1820). Uses the in-repo reusable workflow
+# at the pull request's merge-base contract by passing github.sha of the default
+# branch tip is wrong on PRs — instead pin is supplied as the workflow file's own
+# repository SHA via github.workflow_sha when available, else skip evaluation.
+name: quality-review canary
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Same-repo reusable call: the called workflow is the version from the
+    # caller's ref for workflow_call within one repository when using local path.
+    uses: ./.github/workflows/quality-review.yml
+    secrets: inherit
+    with:
+      # For same-repo canary, the contract scripts come from the called workflow's
+      # ref; pass the caller's head SHA only as an opaque pin for the reusable
+      # workflow's contract checkout of Verjson/.github@ref. On this canary the
+      # head is this repository, so github.sha is the PR head — but the reusable
+      # workflow checks out Verjson/.github at contract_ref WITHOUT using PR
+      # tree content for execution beyond that pin. Prefer base SHA for stability.
+      contract_ref: ${{ github.event.pull_request.base.sha }}

@@ -71,6 +71,7 @@ expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
   $'container-candidate-publish.yml:public-call-guard:    runs-on: ubuntu-24.04' \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
+  $'quality-review.yml:review:    runs-on: ubuntu-24.04' \
  $'ai-privileged-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-promotion-retry.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-review-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
  $'changelog-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment-review-producer.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
  $'container-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nnotify-umbrella.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrelease-dispatch.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
