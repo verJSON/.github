@@ -1,4 +1,7 @@
 ---
+date: 2026-11-17
+issue: 2184
+impact: minor
 title: Gate R parses ARB run id + slate digest from preceding COMMENT
 ---
 
