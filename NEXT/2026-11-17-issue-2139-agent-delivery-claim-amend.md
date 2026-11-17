@@ -1,6 +1,6 @@
 ---
 date: 2026-11-17
-id: 2139
+issue: 2139
 impact: minor
 title: Record Renovate handoff as agent delivery claim in ADR 0243
 ---
