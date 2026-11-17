@@ -25,6 +25,7 @@ class QualityReviewWorkflowTest(unittest.TestCase):
         self.assertIn("quality evidence not obtained", text)
         self.assertIn(",quality-review,", text)
         self.assertIn("<!-- quality-review:v1 -->", text)
+        self.assertIn("from quality_review.report import render_comment, write_artifact", text)
         self.assertIn("upload-artifact@", text)
         self.assertIn("application/vnd.github.diff", text)
 

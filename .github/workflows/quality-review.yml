@@ -188,27 +188,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SUMMARY: ${{ steps.evaluate.outputs.summary || steps.diff.outputs.summary || steps.mode.outputs.summary }}
+          PYTHONPATH: ${{ github.workspace }}/.quality-review-contract/scripts
         run: |
           set -euo pipefail
           summary="${SUMMARY:-quality evidence not obtained: skipped}"
-          export SUMMARY="$summary"
           mkdir -p "$RUNNER_TEMP/quality-review"
-          python3 -I - <<'PY' >"$RUNNER_TEMP/quality-review/report.json"
-          import json, os
-          print(json.dumps({
-              "obtained": False,
-              "summary": os.environ.get("SUMMARY") or "quality evidence not obtained: skipped",
-              "provider": None,
-              "model": None,
-              "answers": [],
-              "dropped": [],
-          }, indent=2, sort_keys=True))
+          report_path="$RUNNER_TEMP/quality-review/report.json"
+          body_path="$RUNNER_TEMP/quality-review/comment.md"
+          # Summary-only ReviewResult until Evaluate exports the full payload.
+          REPORT_PATH="$report_path" BODY_PATH="$body_path" SUMMARY="$summary" python3 -I - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          scripts = Path(os.environ["GITHUB_WORKSPACE"]) / ".quality-review-contract" / "scripts"
+          sys.path.insert(0, str(scripts))
+          from quality_review.report import render_comment, write_artifact
+          from quality_review.run import NOT_OBTAINED_PREFIX, ReviewResult
+
+          summary = os.environ.get("SUMMARY") or f"{NOT_OBTAINED_PREFIX} skipped"
+          obtained = not summary.startswith(NOT_OBTAINED_PREFIX)
+          result = ReviewResult(obtained=obtained, summary=summary)
+          write_artifact(os.environ["REPORT_PATH"], result)
+          Path(os.environ["BODY_PATH"]).write_text(render_comment(result), encoding="utf-8")
           PY
+          body="$(cat "$body_path")"
           marker='<!-- quality-review:v1 -->'
-          body="$(printf '%s\n## Advisory quality review\n\n%s\n\n_Advisory only — never a required check (ADR 0270)._\n' "$marker" "$summary")"
           set +e
           existing="$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
-          comment_id="$(printf '%s' "$existing" | jq -r --arg m "$marker" '.[] | select(.body | contains($m)) | .id' | head -n1)"
+          comment_id="$(printf '%s' "$existing" | jq -r --arg m "$marker" '.[] | select((.body // "") | contains($m)) | .id' | head -n1)"
           if [ -n "${comment_id:-}" ] && [ "$comment_id" != "null" ]; then
             gh api -X PATCH "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="$body" >/dev/null
           else
