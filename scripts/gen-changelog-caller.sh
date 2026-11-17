@@ -3604,6 +3604,16 @@ for competing in CODEOWNERS docs/CODEOWNERS; do
 done
 echo "ok - .github/CODEOWNERS is the generated artifact at $CONTRACT_REF"
 
+# Fail closed on a retired privileged Renovate writer path after generated-set
+# and CODEOWNERS layout checks, before the expensive workflow-shape and fixture
+# loops. Dual-fault adopters with a retired writer still see that diagnostic
+# before fixture noise; CODEOWNERS symlink refusals keep precedence (ADR 0224
+# amendment 2026-11-17, #1977 A-3).
+# BEGIN early-retired-caller-scan
+scan_retired_callers
+echo "ok - no retired Renovate fragment-writer path remains in workflows"
+# END early-retired-caller-scan
+
 [ -f "$pr_gate_workflow" ] \
   || fail "$pr_gate_workflow is missing. Generate it with: scripts/gen-changelog-caller.sh pr-gate $CONTRACT_REF > .github/workflows/changelog-contract.yml"
 # The gate runs pull-request code, so its whole file is the isolation boundary
@@ -7948,7 +7958,7 @@ diff -q "$work/after" "$fixture_root/case/CHANGELOG.md" >/dev/null \
 if python3 "$contract" render-next --repo-root "$fixture_root/case" >/dev/null 2>&1; then
   fail "render-next succeeded on an emptied NEXT/; the guard above is now dead code"
 fi
-scan_retired_callers
+# Retired-caller scan runs once up front (#1977 A-3); do not repeat it here.
 echo "ok - a real release produces exactly the state asserted above"
 EOF
 }
