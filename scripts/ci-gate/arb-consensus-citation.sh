@@ -174,7 +174,10 @@ if not isinstance(archived_run, str) or not archived_run:
 digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
 sys.stdout.write(f"{digest}\t{archived_run}\n")
 ' <<<"$archive_text" 2>"$slate_verify_err")" || {
-  err="$(tr -d '\r' <"$slate_verify_err" | head -n1)"
+  # Read the whole stderr file, then take the first line — do not pipe into
+  # head (pipefail-sigpipe / #1430).
+  err="$(tr -d '\r' <"$slate_verify_err")"
+  err="${err%%$'\n'*}"
   rm -f "$slate_verify_err"
   [ -n "$err" ] || err="arb-consensus archive slate verification failed"
   echo "::error::$err"
