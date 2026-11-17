@@ -26,6 +26,10 @@ class QualityReviewWorkflowTest(unittest.TestCase):
         self.assertIn(",quality-review,", text)
         self.assertIn("<!-- quality-review:v1 -->", text)
         self.assertIn("quality-review-report", text)
+        self.assertIn("Acquire pinned gitleaks", text)
+        self.assertIn("GITLEAKS_VERSION:", text)
+        self.assertIn("subprocess_scanner", text)
+        self.assertIn("verify_pinned_binary", text)
         # always() sticky/artifact must not import from the fixed checkout path
         # (scripts/ci-gate/fixed-path-checkout-refusal.test.py).
         write_step = text.split("- name: Write artifact and sticky comment", 1)[1]
