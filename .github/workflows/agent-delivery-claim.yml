@@ -97,6 +97,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          CLAIM_WORKFLOW_PATH: .github/workflows/agent-delivery-claim.yml
           MAX_CONCURRENT: "8"
         run: |
           set -euo pipefail
