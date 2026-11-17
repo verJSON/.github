@@ -25,7 +25,14 @@ class QualityReviewWorkflowTest(unittest.TestCase):
         self.assertIn("quality evidence not obtained", text)
         self.assertIn(",quality-review,", text)
         self.assertIn("<!-- quality-review:v1 -->", text)
-        self.assertIn("from quality_review.report import render_comment, write_artifact", text)
+        self.assertIn("quality-review-report", text)
+        # always() sticky/artifact must not import from the fixed checkout path
+        # (scripts/ci-gate/fixed-path-checkout-refusal.test.py).
+        write_step = text.split("- name: Write artifact and sticky comment", 1)[1]
+        write_step = write_step.split("- name: Upload quality-review artifact", 1)[0]
+        run_block = write_step.split("run: |", 1)[1]
+        self.assertNotIn(".quality-review-contract", run_block)
+        self.assertNotIn("quality_review.report", run_block)
         self.assertIn("upload-artifact@", text)
         self.assertIn("application/vnd.github.diff", text)
 
