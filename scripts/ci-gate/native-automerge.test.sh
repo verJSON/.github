@@ -170,7 +170,7 @@ write_base() {
   export ARCHIVE_B64
   jq -nc --arg head "$EXPECTED_HEAD_SHA" --arg login "${EXPECTED_APP_SLUG}[bot]" --arg check "$AUTHORIZATION_CHECK_ID" \
     --arg marker "<!-- independent-review:v1 pr:${PR_NUMBER} head:${EXPECTED_HEAD_SHA} verdict:approved -->" \
-    --arg citation "<!-- arb-consensus:v1 run:arb-test-2026-11-17 slate:e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d archive:verJSON/.github@ee9899ba3803ed95f5883bd65a30952777f4ce7b:docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md -->" \
+    --arg citation "<!-- arb-consensus:v1 run:${ARB_RUN} slate:${ARB_SLATE} archive:${ARB_ARCHIVE_REPO}@${ARB_ARCHIVE_SHA}:${ARB_ARCHIVE_PATH} -->" \
     '[
       {id:80,state:"APPROVED",commit_id:$head,user:{login:$login,type:"Bot"},body:("<!-- ai-review-authorization:"+$check+" -->")},
       {id:81,state:"COMMENTED",commit_id:$head,user:{login:"independent-reviewer",type:"User"},author_association:"MEMBER",body:$citation},
