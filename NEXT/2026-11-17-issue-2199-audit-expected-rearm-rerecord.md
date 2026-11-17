@@ -1,4 +1,6 @@
 ---
+date: 2026-11-17
+issue: 2199
 impact: patch
 title: Re-record arm audit expectations after lifecycle-rearm shrink
 ---
