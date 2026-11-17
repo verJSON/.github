@@ -1,6 +1,6 @@
 ---
 date: 2026-11-17
-issue: 1945
+id: 20261117T235900Z
 impact: patch
 title: Enroll managed repos under merge-admission property ruleset scope
 ---
