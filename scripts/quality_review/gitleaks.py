@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -51,7 +52,9 @@ def _parse_findings(stdout: str) -> list[str] | None:
         labels: list[str] = []
         for item in parsed:
             if isinstance(item, dict):
-                labels.append(str(item.get("RuleID") or item.get("Description") or item.get("Match") or "finding"))
+                labels.append(
+                    str(item.get("RuleID") or item.get("Description") or item.get("Match") or "finding")
+                )
             else:
                 labels.append(str(item))
         return labels
@@ -59,52 +62,59 @@ def _parse_findings(stdout: str) -> list[str] | None:
 
 
 def subprocess_scanner(binary: Path) -> Scanner:
-    """Return a scanner that invokes a verified gitleaks binary on stdin.
+    """Return a scanner that invokes a verified gitleaks binary on a temp file.
+
+    The chunk is written to an isolated temporary directory and scanned with
+    ``--no-git --source <dir>`` so gitleaks cannot fall through to the process
+    cwd. ``--pipe`` is intentionally unused: with ``--no-git`` some gitleaks
+    builds ignore stdin and scan the working tree instead.
 
     Fail-closed rules:
-    - exit 0 → clean (no findings)
-    - exit 1 with a JSON findings array → those findings
-    - exit 1 without a parseable findings report → scanner failure
+    - exit 0 → clean
+    - exit 1 with a non-empty JSON findings array → those findings
+    - exit 1 without a non-empty findings report → scanner failure
     - any other exit → scanner failure
-
-    gitleaks also uses exit 1 for some scan errors; requiring a findings report
-    prevents those errors from being treated as per-chunk leaks.
     """
 
     def scan(chunk: str) -> list[str]:
-        completed = subprocess.run(
-            [
-                str(binary),
-                "detect",
-                "--no-git",
-                "--pipe",
-                "--no-banner",
-                "--report-format",
-                "json",
-                "--report-path",
-                "/dev/stdout",
-            ],
-            input=chunk,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode == 0:
-            return []
-        if completed.returncode == 1:
-            findings = _parse_findings(completed.stdout)
-            # Exit 1 with no parseable non-empty findings report is treated as a
-            # scanner failure (gitleaks also uses 1 for fatal/partial errors).
-            if findings is None or len(findings) == 0:
-                raise RuntimeError(
-                    "gitleaks exit 1 without non-empty JSON findings: "
-                    f"{(completed.stderr or completed.stdout or '').strip()}"
-                )
-            return findings
-        raise RuntimeError(
-            f"gitleaks failed (exit {completed.returncode}): "
-            f"{(completed.stderr or completed.stdout or '').strip()}"
-        )
+        with tempfile.TemporaryDirectory(prefix="quality-review-gitleaks-") as tmp:
+            source = Path(tmp)
+            target = source / "chunk.diff"
+            target.write_text(chunk, encoding="utf-8")
+            report = source / "report.json"
+            completed = subprocess.run(
+                [
+                    str(binary),
+                    "detect",
+                    "--no-git",
+                    "--source",
+                    str(source),
+                    "--no-banner",
+                    "--report-format",
+                    "json",
+                    "--report-path",
+                    str(report),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                cwd=tmp,
+            )
+            report_text = report.read_text(encoding="utf-8") if report.is_file() else completed.stdout
+            if completed.returncode == 0:
+                return []
+            if completed.returncode == 1:
+                findings = _parse_findings(report_text)
+                if findings is None or len(findings) == 0:
+                    raise RuntimeError(
+                        "gitleaks exit 1 without non-empty JSON findings: "
+                        f"{(completed.stderr or completed.stdout or '').strip()}"
+                    )
+                return findings
+            raise RuntimeError(
+                f"gitleaks failed (exit {completed.returncode}): "
+                f"{(completed.stderr or completed.stdout or '').strip()}"
+            )
 
     return scan
 
