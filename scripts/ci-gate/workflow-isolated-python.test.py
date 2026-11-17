@@ -112,6 +112,7 @@ RENDERED_WORKFLOWS = {
         (CONTRACT_REF, '["Merge admission trigger"]'),
         ("--trigger",),
     ),
+    "scripts/gen-quality-review-caller.sh": ((CONTRACT_REF,),),
     "scripts/gen-ai-review-caller.sh": ((CONTRACT_REF,),),
     "scripts/gen-ai-review-label-rearm-caller.sh": ((CONTRACT_REF,), ("--local",)),
     "scripts/gen-ai-review-lifecycle-rearm-caller.sh": ((CONTRACT_REF,), ("--local",)),
