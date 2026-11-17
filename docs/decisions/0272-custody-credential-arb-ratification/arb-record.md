@@ -29,9 +29,9 @@
   `0566372c5e9a0ce9d0403ec1068e0a0bdf903f37990fd7b56c1ae4606a7f0e8e`
   over:
 
-  ```json
-  {"issues":["verJSON/verjson-agent-identity#72","verJSON/verjson-agent-identity#73","verJSON/.github#2185"],"items":["S-1","S-2","S-3"],"run_id":"arb-custody-cred-2185-2026-11-17","status":"APPROVED_WITH_CONSTRAINTS"}
-  ```
+```canonical-slate-json
+{"issues":["verJSON/verjson-agent-identity#72","verJSON/verjson-agent-identity#73","verJSON/.github#2185"],"items":["S-1","S-2","S-3"],"run_id":"arb-custody-cred-2185-2026-11-17","status":"APPROVED_WITH_CONSTRAINTS"}
+```
 
 - **Ratification:** Owner ARB-delegation 2026-11-16/17 (ARB, not personal
   CODEOWNERS, is approval authority per ADR 0271 / ADR 0202).

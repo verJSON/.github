@@ -19,8 +19,11 @@ session; this record binds to pinned repository SHAs and issue references only.
 - **Status:** `APPROVED_WITH_CONSTRAINTS`
 - **Slate digest (SHA-256):**
   `e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d`
-  over
-  `{"issue":"VerJSON/.github#2182","items":["S-1","S-2","S-3-rev","S-4","S-5-rev"],"run_id":"arb-0271-2026-11-17","status":"APPROVED_WITH_CONSTRAINTS"}`
+  over:
+
+```canonical-slate-json
+{"issue":"VerJSON/.github#2182","items":["S-1","S-2","S-3-rev","S-4","S-5-rev"],"run_id":"arb-0271-2026-11-17","status":"APPROVED_WITH_CONSTRAINTS"}
+```
 - **Ratification:** Owner has directed that ARB—not personal CODEOWNERS—is the
   approval authority for this class of decision. Chair records ADR 0271 as
   **Accepted** under that delegation.

@@ -26,9 +26,9 @@
   `fa111ceb1f12c109ca4ca4e5e0ffd8432b44c6a0eed01ca409d63271a575c125`
   over:
 
-  ```json
-  {"issues":["verJSON/.github#1977"],"items":["S-1"],"run_id":"arb-1977-2026-11-17","status":"APPROVED"}
-  ```
+```canonical-slate-json
+{"issues":["verJSON/.github#1977"],"items":["S-1"],"run_id":"arb-1977-2026-11-17","status":"APPROVED"}
+```
 
 - **Ratification:** Owner ARB-delegation; approval path ADR 0271 + ADR 0202,
   not personal CODEOWNERS.

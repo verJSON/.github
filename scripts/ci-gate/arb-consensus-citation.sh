@@ -112,7 +112,8 @@ archive_repo_cf="$(printf '%s' "$archive_repo" | tr '[:upper:]' '[:lower:]')"
 [[ "$archive_path" == docs/decisions/*/arb-record.md ]] \
   || { echo "::error::arb-consensus archive path must be docs/decisions/<adr>/arb-record.md"; exit 1; }
 
-# Fail closed: the immutable archive must contain both the run id and the slate digest.
+# Fail closed: recompute SHA-256 over the archive's canonical-slate-json fence
+# (ADR 0271 / #2189). Substring presence of the digest string is not enough.
 # Parse .content locally so test stubs that return the Contents JSON object work
 # without implementing gh's --jq filter.
 # Re-assert 40-hex in this block: citation_re already matched, but gh api ?ref=
@@ -131,10 +132,62 @@ archive_text="$(printf '%s' "$archive_b64" | tr -d '\n\r ' | base64 -d 2>/dev/nu
   echo "::error::arb-consensus archive $archive_repo@$archive_sha:$archive_path is not decodable"
   exit 1
 }
-grep -Fq -- "$run_id" <<<"$archive_text" \
-  || { echo "::error::arb-consensus archive does not cite run id $run_id"; exit 1; }
-grep -Fq -- "$slate_digest" <<<"$archive_text" \
-  || { echo "::error::arb-consensus archive does not cite slate digest $slate_digest"; exit 1; }
+
+# Encoding (ADR 0271): UTF-8 bytes of the single-line JSON object inside the first
+# ```canonical-slate-json fence, with one trailing newline removed if present.
+# Schema: JSON object whose string run_id equals the citation run id.
+slate_verify_err="$(mktemp)"
+slate_verify_out="$(python3 -c '
+import hashlib, json, re, sys
+text = sys.stdin.read()
+match = re.search(
+    r"^[ \t]*```canonical-slate-json\r?\n(.*?)^[ \t]*```",
+    text,
+    re.M | re.S,
+)
+if match is None:
+    sys.stderr.write("arb-consensus archive has no canonical-slate-json fence\n")
+    sys.exit(1)
+body = match.group(1)
+if body.endswith("\n"):
+    body = body[:-1]
+if body.endswith("\r"):
+    body = body[:-1]
+if "\n" in body or "\r" in body:
+    sys.stderr.write("canonical-slate-json fence must contain a single JSON line\n")
+    sys.exit(1)
+if not body:
+    sys.stderr.write("canonical-slate-json fence is empty\n")
+    sys.exit(1)
+try:
+    obj = json.loads(body)
+except json.JSONDecodeError as exc:
+    sys.stderr.write(f"canonical-slate-json fence is not valid JSON: {exc}\n")
+    sys.exit(1)
+if not isinstance(obj, dict):
+    sys.stderr.write("canonical-slate-json fence must be a JSON object\n")
+    sys.exit(1)
+archived_run = obj.get("run_id")
+if not isinstance(archived_run, str) or not archived_run:
+    sys.stderr.write("canonical-slate-json fence is missing string run_id\n")
+    sys.exit(1)
+digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+sys.stdout.write(f"{digest}\t{archived_run}\n")
+' <<<"$archive_text" 2>"$slate_verify_err")" || {
+  err="$(tr -d '\r' <"$slate_verify_err" | head -n1)"
+  rm -f "$slate_verify_err"
+  [ -n "$err" ] || err="arb-consensus archive slate verification failed"
+  echo "::error::$err"
+  exit 1
+}
+rm -f "$slate_verify_err"
+IFS=$'\t' read -r computed_digest archived_run_id <<<"$slate_verify_out"
+[[ "$computed_digest" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "::error::arb-consensus archive slate digest computation failed"; exit 1; }
+[ "$archived_run_id" = "$run_id" ] \
+  || { echo "::error::arb-consensus archive run_id $archived_run_id does not match citation run id $run_id"; exit 1; }
+[ "$computed_digest" = "$slate_digest" ] \
+  || { echo "::error::arb-consensus archive slate digest $computed_digest does not match citation digest $slate_digest"; exit 1; }
 
 # Re-fetch the citation review to prove it was not edited after listing.
 live="$(gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews/$citation_id")" || {
