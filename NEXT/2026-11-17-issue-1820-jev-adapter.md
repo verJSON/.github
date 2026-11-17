@@ -6,6 +6,6 @@ title: Add the Jev quality-review adapter and provider manifest
 ---
 
 Add `scripts/quality_review/providers/jev.py` (pinned `jev-1.14.0`, Bearer
-transport, noul/score mapping through the evaluator port) plus
-`config/quality-review-providers.json` and contract tests. Part of #1820;
-workflow, rubric, and live canary remain later slices.
+transport, System One object-keyed noul/score wire shape through the evaluator
+port) plus `config/quality-review-providers.json` and offline contract tests.
+Part of #1820; workflow, rubric, and live canary remain later slices.
