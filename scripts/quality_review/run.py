@@ -118,8 +118,11 @@ def run_review(
             model=model,
         )
     except JevError as exc:
+        # Keep advisory green; surface the transport/schema detail in logs (#2174).
+        print(f"::warning::quality-review JevError: {exc}", flush=True)
         return _not_obtained(str(exc))
     except Exception as exc:  # noqa: BLE001 — advisory path stays green
+        print(f"::warning::quality-review unexpected failure: {exc}", flush=True)
         return _not_obtained(f"unexpected failure: {exc}")
 
 
