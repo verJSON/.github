@@ -1,6 +1,6 @@
 ---
 date: 2026-11-17
-issue: 1820
+id: 20261117T155500Z
 impact: patch
 title: Document advisory quality-review adopter opt-in
 ---
