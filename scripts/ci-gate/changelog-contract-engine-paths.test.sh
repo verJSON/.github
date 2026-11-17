@@ -5,8 +5,8 @@
 # those rejections, and the executable-YAML cases must stay inside the
 # is_release_relevant_change re-pin guard.
 #
-# #1977 A-3: scan_retired_callers must run once up front (after validate, before
-# generated-set / engine-path fixtures), not at the end of the suite.
+# #1977 A-3: scan_retired_callers must run once after CODEOWNERS layout checks
+# and before engine-path fixtures, not at the end of the suite.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -203,20 +203,20 @@ call_sites = [
 if len(call_sites) != 1 or not (early_begin < call_sites[0] < early_end):
     die("scan_retired_callers must be called only inside early-retired-caller-scan")
 
-VALIDATE_OK = 'echo "ok - canonical validation accepts this repository"'
-validate_oks = [index for index, line in enumerate(lines) if line == VALIDATE_OK]
-if len(validate_oks) != 1:
-    die("expected one canonical-validation ok line before the early scan")
-validate_ok = validate_oks[0]
-if not (validate_ok < early_begin):
-    die("early retired-caller scan must follow canonical validation")
-between_validate = [
+CODEOWNERS_OK = 'echo "ok - .github/CODEOWNERS is the generated artifact at $CONTRACT_REF"'
+codeowners_oks = [index for index, line in enumerate(lines) if line == CODEOWNERS_OK]
+if len(codeowners_oks) != 1:
+    die("expected one CODEOWNERS ok line before the early scan")
+codeowners_ok = codeowners_oks[0]
+if not (codeowners_ok < early_begin):
+    die("early retired-caller scan must follow the CODEOWNERS layout check")
+between_codeowners = [
     line
-    for line in lines[validate_ok + 1 : early_begin]
+    for line in lines[codeowners_ok + 1 : early_begin]
     if line.strip() and not line.lstrip().startswith("#")
 ]
-if between_validate:
-    die("early retired-caller scan must be immediately after canonical validation")
+if between_codeowners:
+    die("early retired-caller scan must be immediately after the CODEOWNERS ok line")
 
 GENERATED_SET_PIN = "generated_set_header_pin="
 generated_set_pins = [
@@ -225,8 +225,8 @@ generated_set_pins = [
 if len(generated_set_pins) != 1:
     die("expected one generated_set_header_pin assignment")
 generated_set_pin = generated_set_pins[0]
-if not (early_end < generated_set_pin):
-    die("early retired-caller scan must precede the generated-set body")
+if not (generated_set_pin < codeowners_ok):
+    die("generated-set pin check must precede CODEOWNERS and the early scan")
 
 dependency_begin, dependency_end, dependency = marker_span(
     "engine-path-dependency-fixtures"
@@ -234,8 +234,8 @@ dependency_begin, dependency_end, dependency = marker_span(
 executable_begin, executable_end, executable = marker_span(
     "engine-path-executable-fixtures"
 )
-if not (generated_set_pin < dependency_begin < executable_begin):
-    die("generated-set must precede engine-path fixtures")
+if not (early_end < dependency_begin < executable_begin):
+    die("early retired-caller scan must precede engine-path fixtures")
 require_shared_base(
     dependency,
     "dependency_path",

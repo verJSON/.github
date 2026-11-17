@@ -27,12 +27,14 @@ One caller-contract case runs in exactly one cell and still executes every gener
 
 The emitted suite still has no section switch and every caller-contract mutation
 still executes the whole generated contract (Decisions 2–3). Within that suite,
-`scan_retired_callers` now runs immediately after canonical validation and before
-the generated-set and fixture loops.
+`scan_retired_callers` now runs immediately after the generated-set pin check and
+the `.github/CODEOWNERS` layout check, and before the expensive workflow-shape
+and fixture loops.
 
 **Why:** about two dozen retired-caller mutation cases each paid for ~85% of an
-emitted run before reaching the scan. Moving the scan forward fails those cases
-as soon as the retired path is detectable.
+emitted run before reaching the scan. Moving the scan forward fails those cases as soon as the retired path is
+detectable, without displacing CODEOWNERS symlink diagnostics that must keep
+precedence.
 
 **Adopter-visible diagnostic change:** a dual-fault adopter that both retains a
 retired Renovate fragment-writer path and has a later suite failure now sees the

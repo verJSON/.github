@@ -17,8 +17,9 @@ diagnostic mismatches. The shared-base generator change also rebinds the
 #1831 relay backlog digests for `capability-floor-observe` and `release.yml`
 `verify`, which sparse-check out `scripts/gen-changelog-caller.sh`.
 
-`scan_retired_callers` now runs immediately after canonical validation, before
-the generated-set and fixture loops, so retired Renovate fragment-writer
-mutations fail without paying for ~85% of an emitted run. A dual-fault adopter
+`scan_retired_callers` now runs immediately after the generated-set pin and
+CODEOWNERS layout checks, before the expensive workflow-shape and fixture
+loops, so retired Renovate fragment-writer mutations fail without paying for
+most of an emitted run while CODEOWNERS symlink diagnostics keep precedence. A dual-fault adopter
 sees the retired-path diagnostic first; ADR 0224 amendment 2026-11-17 records
 that ordering. Fixes #1977.

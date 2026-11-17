@@ -3373,14 +3373,6 @@ trap 'rm -rf "$work" "$fixture_root"' EXIT
 python3 "$contract" validate --repo-root "$root"
 echo "ok - canonical validation accepts this repository"
 
-# Fail closed on a retired privileged Renovate writer path before the expensive
-# generated-set and fixture loops. A dual-fault adopter therefore sees the
-# retired-path diagnostic first; ADR 0224 amendment 2026-11-17 (#1977 A-3).
-# BEGIN early-retired-caller-scan
-scan_retired_callers
-echo "ok - no retired Renovate fragment-writer path remains in workflows"
-# END early-retired-caller-scan
-
 # --- the generated set moves as one commit (verJSON/.github #1369) ---------
 #
 # This suite, the renderer, the changelog caller, the PR gate and the release
@@ -3611,6 +3603,16 @@ for competing in CODEOWNERS docs/CODEOWNERS; do
     || fail "$competing competes with .github/CODEOWNERS; GitHub reads only the first location it finds, so remove it after preserving its ownership intent in the canonical file"
 done
 echo "ok - .github/CODEOWNERS is the generated artifact at $CONTRACT_REF"
+
+# Fail closed on a retired privileged Renovate writer path after generated-set
+# and CODEOWNERS layout checks, before the expensive workflow-shape and fixture
+# loops. Dual-fault adopters with a retired writer still see that diagnostic
+# before fixture noise; CODEOWNERS symlink refusals keep precedence (ADR 0224
+# amendment 2026-11-17, #1977 A-3).
+# BEGIN early-retired-caller-scan
+scan_retired_callers
+echo "ok - no retired Renovate fragment-writer path remains in workflows"
+# END early-retired-caller-scan
 
 [ -f "$pr_gate_workflow" ] \
   || fail "$pr_gate_workflow is missing. Generate it with: scripts/gen-changelog-caller.sh pr-gate $CONTRACT_REF > .github/workflows/changelog-contract.yml"
