@@ -70,6 +70,12 @@ jobs:
           fi
           echo "run=true" >>"$GITHUB_OUTPUT"
 
+      - name: Refuse a symlink at the .quality-review-contract checkout path
+        if: steps.mode.outputs.run == 'true'
+        run: |
+          # actions/checkout follows a symlink at its path and empties the target (ADR 0236).
+          if [ -L .quality-review-contract ]; then echo "::error::.quality-review-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
+
       - name: Check out contract (no PR head)
         if: steps.mode.outputs.run == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
