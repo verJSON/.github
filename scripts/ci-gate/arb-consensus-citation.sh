@@ -42,11 +42,15 @@ citation_re='^<!-- arb-consensus:v1 run:(arb-[A-Za-z0-9][A-Za-z0-9._-]{1,62}) sl
 
 MAX_CANDIDATE_LOOKUPS=20
 select_preceding_citation() {
+  # Walk privileged COMMENTED reviews from highest id down; skip junk comments
+  # whose body is not the canonical citation marker so an intervening note cannot
+  # hide a lower-id valid citation (#2184 / Bugbot).
   local reviews_json="$1" rid rlogin role attempts=0 body
   while IFS=$'\t' read -r rid rlogin body; do
     [ -n "$rid" ] || continue
     attempts=$((attempts + 1))
     [ "$attempts" -le "$MAX_CANDIDATE_LOOKUPS" ] || return 1
+    [[ "$body" =~ $citation_re ]] || continue
     role="$(gh api "repos/$TARGET_REPO/collaborators/$rlogin/permission" \
       --jq '.role_name // ""')" || {
       echo "::error::could not read the repository permission of $rlogin on $TARGET_REPO" >&2
@@ -89,10 +93,8 @@ citation_id="$(cut -f1 <<<"$selected")"
 citation_login="$(cut -f2 <<<"$selected")"
 citation_body="$(cut -f3- <<<"$selected")"
 
-if [[ ! "$citation_body" =~ $citation_re ]]; then
-  echo "::error::preceding arb-consensus citation COMMENT on review $citation_id is not the canonical marker"
-  exit 1
-fi
+[[ "$citation_body" =~ $citation_re ]] \
+  || { echo "::error::preceding arb-consensus citation COMMENT on review $citation_id is not the canonical marker"; exit 1; }
 run_id="${BASH_REMATCH[1]}"
 slate_digest="${BASH_REMATCH[2]}"
 archive_repo="${BASH_REMATCH[3]}"
@@ -101,6 +103,14 @@ archive_path="${BASH_REMATCH[5]}"
 
 [[ "$archive_path" != *..* && "$archive_path" != /* && "$archive_path" == *[!/] ]] \
   || { echo "::error::arb-consensus archive locator path is unsafe"; exit 1; }
+
+# Fail closed: only the org policy repository's chair records are trusted archives.
+# A self-authored file in the PR repo (or any other locator) cannot satisfy Gate R.
+archive_repo_cf="$(printf '%s' "$archive_repo" | tr '[:upper:]' '[:lower:]')"
+[ "$archive_repo_cf" = "verjson/.github" ] \
+  || { echo "::error::arb-consensus archive locator must name verJSON/.github, not $archive_repo"; exit 1; }
+[[ "$archive_path" == docs/decisions/*/arb-record.md ]] \
+  || { echo "::error::arb-consensus archive path must be docs/decisions/<adr>/arb-record.md"; exit 1; }
 
 # Fail closed: the immutable archive must contain both the run id and the slate digest.
 # Parse .content locally so test stubs that return the Contents JSON object work

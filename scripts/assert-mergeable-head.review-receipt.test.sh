@@ -202,6 +202,37 @@ else
   fail "the ADR 0202 marker stays digest-free while the citation carries the slate digest (rc=$RC)"
 fi
 
+# An intervening privileged junk COMMENT (id between citation and receipt) must not
+# hide the lower-id valid citation when walking candidates.
+reset_env
+early_citation="$(review 70 COMMENTED "$HEAD_SHA" independent-reviewer User "$CITATION")"
+junk="$(review 75 COMMENTED "$HEAD_SHA" independent-reviewer User 'looks good')"
+REVIEWS_FIXTURE="[$early_citation,$junk,$receipt]"
+run
+if [ "$RC" -eq 0 ] && [ "$OUT" = true ]; then
+  pass "an intervening privileged junk COMMENT does not hide a lower-id arb-consensus citation"
+else
+  fail "an intervening privileged junk COMMENT does not hide a lower-id arb-consensus citation (rc=$RC, output: $OUT)"
+fi
+
+# Archive Contents outage is unanswered (exit 3 → Gate R unevaluated), not a soft pass.
+reset_env
+FAIL_ARCHIVE=1
+export FAIL_ARCHIVE
+run
+expect "an unreadable arb-consensus archive leaves Gate R unevaluated" 1 \
+  "could not fetch arb-consensus archive"
+unset FAIL_ARCHIVE
+
+# Foreign archive repos are refused even when they contain the digest strings.
+reset_env
+bad_citation_body="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$REPO@$ARB_ARCHIVE_SHA:docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md -->"
+bad_citation="$(review 81 COMMENTED "$HEAD_SHA" independent-reviewer User "$bad_citation_body")"
+REVIEWS_FIXTURE="[$bad_citation,$receipt]"
+run
+expect "a citation whose archive locator is not verJSON/.github fails Gate R" 6 \
+  "arb-consensus archive locator must name verJSON/.github"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
