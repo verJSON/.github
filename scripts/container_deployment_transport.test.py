@@ -1014,6 +1014,94 @@ class DeploymentReceiptTests(unittest.TestCase):
         self.assertEqual(api.archive, raw)
         self.assertIsNone(http.opener.open.call_args_list[1].args[0].get_header('Authorization'))
 
+    def test_digest_only_scan_skips_digest_miss_but_surfaces_operational_errors(self):
+        value = receipt_request(
+            receiptDigest=self.receipt_digest,
+            sourceAttemptId=None,
+            retainedReceiptAuthority=None,
+        )
+        miss_chain, _ = failed_receipt_chain()
+        # Mutate so the digest cannot match the requested receipt.
+        miss_chain[-1] = {**miss_chain[-1], 'failure': 'different failure text'}
+        miss_archive = receipt_archive(miss_chain)
+        miss = {
+            'id': 400,
+            'name': 'runner-deployment-8000-1-admitted',
+            'expired': False,
+            'digest': t.digest(miss_archive),
+        }
+        api = ReceiptAPI(value, self.chain, extra_artifacts=[miss])
+        # Put the miss first so the scan must continue past it.
+        api.artifacts = [miss, api.artifact]
+        archives = {400: miss_archive, 501: api.archive}
+
+        def call(method, path, token, body=None, binary=False):
+            api.calls.append((method, path, token, body, binary))
+            if path.startswith('/repositories/'):
+                return api.repository
+            if path.endswith('/zip'):
+                artifact_id = int(path.removesuffix('/zip').rsplit('/', 1)[-1])
+                return archives[artifact_id]
+            if '/artifacts' in path:
+                return {'total_count': len(api.artifacts), 'artifacts': api.artifacts}
+            raise AssertionError((method, path))
+
+        api.call = call
+        result = t.fetch_deployment_receipt(api, value, 'job-token', clock=lambda: NOW)
+        self.assertEqual(501, result['artifactId'])
+
+        broken = ReceiptAPI(value, self.chain)
+        broken.artifacts = [broken.artifact]
+        broken.archive = b'not-a-zip'
+        broken.artifact['digest'] = t.digest(broken.archive)
+        with self.assertRaisesRegex(t.TransportError, 'archive is invalid'):
+            t.fetch_deployment_receipt(broken, value, 'job-token', clock=lambda: NOW)
+
+    def test_digest_only_scan_honors_download_budget_boundary(self):
+        value = receipt_request(
+            receiptDigest=self.receipt_digest,
+            sourceAttemptId=None,
+            retainedReceiptAuthority=None,
+        )
+        miss_chain, _ = failed_receipt_chain()
+        miss_chain[-1] = {**miss_chain[-1], 'failure': 'budget filler'}
+        miss_archive = receipt_archive(miss_chain)
+        fillers = [
+            {
+                'id': 1000 + index,
+                'name': f'runner-deployment-{8000 + index}-1-admitted',
+                'expired': False,
+                'digest': t.digest(miss_archive),
+            }
+            for index in range(t.MAX_ARTIFACT_DOWNLOADS)
+        ]
+        over = {
+            'id': 2000,
+            'name': 'runner-deployment-9999-1-admitted',
+            'expired': False,
+            'digest': t.digest(miss_archive),
+        }
+        api = ReceiptAPI(value, self.chain)
+        api.artifacts = fillers + [over]
+        archives = {item['id']: miss_archive for item in api.artifacts}
+
+        def call(method, path, token, body=None, binary=False):
+            api.calls.append((method, path, token, body, binary))
+            if path.startswith('/repositories/'):
+                return api.repository
+            if path.endswith('/zip'):
+                artifact_id = int(path.removesuffix('/zip').rsplit('/', 1)[-1])
+                return archives[artifact_id]
+            if '/artifacts' in path:
+                return {'total_count': len(api.artifacts), 'artifacts': api.artifacts}
+            raise AssertionError((method, path))
+
+        api.call = call
+        with self.assertRaisesRegex(t.TransportError, 'download budget'):
+            t.fetch_deployment_receipt(api, value, 'job-token', clock=lambda: NOW)
+        zip_calls = [c for c in api.calls if isinstance(c[1], str) and c[1].endswith('/zip')]
+        self.assertEqual(t.MAX_ARTIFACT_DOWNLOADS, len(zip_calls))
+
     def test_operation_is_omitted_from_app_permissions_table(self):
         self.assertNotIn('deployment-receipt', t.PERMISSIONS)
 

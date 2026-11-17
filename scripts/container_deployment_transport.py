@@ -61,6 +61,10 @@ class TransportError(ValueError):
     pass
 
 
+class ReceiptAbsentFromArtifact(TransportError):
+    """The requested receipt digest is not present in this artifact."""
+
+
 def require(condition, message):
     if not condition:
         raise TransportError(message)
@@ -901,7 +905,8 @@ def _select_receipt(chain, receipt_digest_fn, requested, purpose):
         receipt for receipt in chain
         if receipt_digest_fn(receipt) == requested
     ]
-    require(matches, 'requested deployment receipt was not found')
+    if not matches:
+        raise ReceiptAbsentFromArtifact('requested deployment receipt was not found')
     require(len(matches) == 1, 'requested deployment receipt digest is ambiguous')
     selected = matches[0]
     if purpose == 'rollback':
@@ -1018,7 +1023,8 @@ def fetch_deployment_receipt(api, value, token, *, clock=time.time):
                 api, token, parsed, receipt_digest_fn, validate_chain, PreflightError,
                 requested, purpose,
             )
-        except TransportError:
+        except ReceiptAbsentFromArtifact:
+            # Digest miss in this artifact — try the next candidate.
             continue
         matches.append(result)
         require(len(matches) == 1, 'requested deployment receipt digest is ambiguous')
