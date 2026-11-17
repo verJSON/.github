@@ -72,7 +72,12 @@ class AgentDeliveryClaimWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/ci-gate/agent_delivery_claim.py", self.text)
         self.assertIn("--store comment", self.text)
         self.assertIn("needs-changelog-context", self.text)
-        self.assertIn("agent-delivery-claim-", job["concurrency"]["group"])
+        group = job["concurrency"]["group"]
+        self.assertEqual(
+            group,
+            "agent-delivery-claim-${{ github.repository }}-${{ github.event.pull_request.number }}",
+        )
+        self.assertNotIn("head.sha", group)
         self.assertFalse(job["concurrency"]["cancel-in-progress"])
 
     def test_public_pull_requests_stay_on_ephemeral_hosted_runners(self):

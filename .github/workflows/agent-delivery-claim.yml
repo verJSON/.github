@@ -20,7 +20,9 @@ jobs:
       contents: read
       pull-requests: write
     concurrency:
-      group: agent-delivery-claim-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+      # Serialize all heads for this PR so two SHAs cannot both observe an
+      # under-cap ledger and double-post (review-b). Do not include head.sha.
+      group: agent-delivery-claim-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     steps:
       - name: Check out pull request head for signal evaluation
