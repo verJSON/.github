@@ -78,7 +78,7 @@ class _StubJevHandler(BaseHTTPRequestHandler):
             "correctness": {"type": "noul", "noul": 0.7},
             "security": {
                 "type": "score",
-                "score": 4.5,
+                "score": 1.0,
                 "legend": {},
                 "probabilities": {},
                 "confidence": 0.9,
@@ -155,7 +155,7 @@ class JevStubContractTest(unittest.TestCase):
         answers = evaluator.evaluate({"diff": "demo"}, QUESTIONS)
         self.assertEqual(answers[0]["probability"], 0.7)
         self.assertEqual(answers[1]["kind"], "level")
-        self.assertIn(answers[1]["level"], QUESTIONS[1]["levels"])
+        self.assertEqual(answers[1]["level"], "medium")
         self.assertEqual(answers[1]["confidence"], 0.9)
         req = _StubJevHandler.last_request
         assert req is not None
@@ -167,6 +167,18 @@ class JevStubContractTest(unittest.TestCase):
     def test_jev_refuses_latest_model(self) -> None:
         with self.assertRaises(Exception):
             JevEvaluator(api_key="k", endpoint=self.endpoint, model="jev-latest")
+
+
+    def test_score_maps_across_level_span(self) -> None:
+        from quality_review.providers.jev import _score_to_level
+
+        levels = ["low", "medium", "high"]
+        self.assertEqual(_score_to_level(0, levels), "low")
+        self.assertEqual(_score_to_level(1, levels), "medium")
+        self.assertEqual(_score_to_level(2, levels), "high")
+        self.assertEqual(_score_to_level(1.4, levels), "medium")
+        with self.assertRaises(ValueError):
+            _score_to_level(None, levels)
 
     def test_jev_rejects_out_of_range_noul_from_stub(self) -> None:
         _StubJevHandler.responses = {"mode": "bad_schema"}

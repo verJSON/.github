@@ -28,13 +28,20 @@ class JevError(RuntimeError):
         self.status = status
 
 
-def _score_to_level(score: float, levels: Sequence[str]) -> str:
-    """Map Jev's 0..9 score onto the rubric's ordinal levels."""
+def _score_to_level(score: object, levels: Sequence[str]) -> str:
+    """Map a TypeSafe score onto the rubric's ordinal levels.
+
+    TypeSafe Score answers use 0 through len(criteria)-1 (not a fixed 0..9
+    scale). The adapter sends one criterion per rubric level, so the score
+    index aligns with the level list.
+    """
     if not levels:
         raise ValueError("levels required")
-    # Jev score answers use 0..9 with confidence; map uniformly across levels.
-    bounded = max(0.0, min(9.0, float(score)))
-    idx = int(round(bounded / 9.0 * (len(levels) - 1)))
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        raise ValueError("score must be a number")
+    high = float(len(levels) - 1)
+    bounded = max(0.0, min(high, float(score)))
+    idx = int(round(bounded))
     return levels[idx]
 
 
@@ -162,6 +169,6 @@ class JevEvaluator:
                     time.sleep(0.5 * (attempt + 1))
                     continue
                 raise last_error from exc
-            except (ValueError, json.JSONDecodeError) as exc:
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise JevError(f"Jev schema error: {exc}") from exc
         raise JevError(f"Jev failed after retries: {last_error}")
