@@ -29,6 +29,15 @@ WF_REQUIRED=332379840
 GATE_PATH=.github/workflows/gate-rearm.yml
 PINNED_SHA=24db445fe410df7bfbd740d8766b2d9ad8e73915
 MARKER="<!-- independent-review:v1 pr:$PR head:$HEAD_SHA verdict:approved -->"
+ARB_RUN=arb-test-2026-11-17
+ARB_SLATE=e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d
+ARB_ARCHIVE_REPO=verJSON/.github
+ARB_ARCHIVE_SHA=ee9899ba3803ed95f5883bd65a30952777f4ce7b
+ARB_ARCHIVE_PATH=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
+CITATION="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH -->"
+# Sanitized archive body must contain both run id and slate digest (#2184).
+ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
 
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/gh" <<'GH'
@@ -37,6 +46,9 @@ set -uo pipefail
 args="$*"
 printf '%s\n' "$args" >>"$CALLS"
 if [ -n "${FAIL_PERMISSION_FOR:-}" ] && [[ "$args" == *"/collaborators/$FAIL_PERMISSION_FOR/permission"* ]]; then
+  echo "gh: Server Error (HTTP 502)" >&2; exit 1
+fi
+if [ "${FAIL_ARCHIVE:-0}" -ne 0 ] && [[ "$args" == *"/contents/"* ]]; then
   echo "gh: Server Error (HTTP 502)" >&2; exit 1
 fi
 case "$args" in
@@ -51,6 +63,8 @@ case "$args" in
   *"/commits/"*"/status"*) printf '{"total_count":0,"statuses":[]}\n' ;;
   *"/actions/runs?head_sha="*) printf '%s\n' "$RUNS_FIXTURE" ;;
   *"/annotations?per_page"*) printf '[]\n' ;;
+  *"/contents/"*)
+    jq -nc --arg c "$ARCHIVE_B64" '{content: $c, encoding: "base64"}' ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
   # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
@@ -60,9 +74,15 @@ case "$args" in
     [ "${FAIL_REVIEW_LIST_AT:-0}" -ne "$count" ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
     if [ "$count" -le 1 ]; then printf '%s\n' "$REVIEWS_FIXTURE"
     else printf '%s\n' "${LATEST_REVIEWS_FIXTURE:-$REVIEWS_FIXTURE}"; fi ;;
-  *"/pulls/$PR/reviews/"*)
-    id="${args#*/reviews/}"; id="${id%% *}"
-    jq -ce --argjson id "$id" '.[] | select(.id == $id)' <<<"$REVIEWS_FIXTURE" \
+  *"/pulls/$PR/reviews/"[0-9]*)
+    id="$(sed -n 's|.*/reviews/\([0-9][0-9]*\).*|\1|p' <<<"$args")"
+    [ -n "$id" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    # Prefer the active reviews fixture (may include citation + receipt).
+    jq -ce --argjson id "$id" '
+      (if type == "array" then . else [] end) as $rows
+      | ($rows[] | select(.id == $id))
+    ' <<<"${LATEST_REVIEWS_FIXTURE:-$REVIEWS_FIXTURE}" \
+      || jq -ce --argjson id "$id" '.[] | select(.id == $id)' <<<"$REVIEWS_FIXTURE" \
       || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;;
   # The caller passes --jq '.role_name // ""', so the stub answers with the role itself.
   *"/collaborators/independent-reviewer/permission"*) printf '%s\n' "$REVIEWER_ROLE" ;;
@@ -71,7 +91,7 @@ case "$args" in
 esac
 GH
 chmod +x "$tmp/bin/gh"
-export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" REVIEW_LIST_CALLS="$tmp/review-list-calls" PR
+export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" REVIEW_LIST_CALLS="$tmp/review-list-calls" PR ARCHIVE_B64
 
 check_run() { # id name suite
   printf '{"id":%s,"name":"%s","status":"completed","conclusion":"success","app":{"id":%s},"check_suite":{"id":%s}}' \
@@ -96,6 +116,7 @@ review() {
   jq -nc --argjson id "$1" --arg state "$2" --arg commit "$3" --arg login "$4" --arg type "$5" --arg body "$6" \
     '{id: $id, state: $state, commit_id: $commit, user: {login: $login, type: $type}, body: $body}'
 }
+citation="$(review 81 COMMENTED "$HEAD_SHA" independent-reviewer User "$CITATION")"
 receipt="$(review 82 COMMENTED "$HEAD_SHA" independent-reviewer User "$MARKER")"
 default_check_runs="$(printf '{"total_count":3,"check_runs":[%s,%s,%s]}' \
   "$(check_run 1 'CI / test' 500)" "$(check_run 31 'event-policy' 703)" "$(check_run 32 'arm' 703)")"
@@ -103,14 +124,14 @@ default_check_runs="$(printf '{"total_count":3,"check_runs":[%s,%s,%s]}' \
 reset_env() {
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
   export RULESET_FIXTURE="$arm_ruleset"
   export CHECK_RUNS_FIXTURE="$default_check_runs"
   export RUNS_FIXTURE="{\"total_count\":1,\"workflow_runs\":[$required_run]}"
-  export REVIEWS_FIXTURE="[$receipt]"
+  export REVIEWS_FIXTURE="[$citation,$receipt]"
 }
 
 run() {
@@ -150,6 +171,35 @@ if [ "$RC" -eq 0 ] && [ "$(tail -n 1 <<<"$OUT")" = true ] \
   pass "a receipt from the pull request's author passes Gate R and is named shared-identity-review"
 else
   fail "a receipt from the pull request's author passes Gate R and is named shared-identity-review (rc=$RC, output: $OUT)"
+fi
+
+# --- arb-consensus citation (#2184) ------------------------------------------------
+# Marker receipt alone is insufficient once Gate R parses the preceding COMMENT.
+reset_env
+REVIEWS_FIXTURE="[$receipt]"
+run
+expect "a valid ADR 0202 marker without a preceding arb-consensus citation fails Gate R" 6 \
+  "an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge"
+
+# Archive must actually cite the slate digest (fail closed).
+reset_env
+ARCHIVE_B64="$(printf '%s' "run \`$ARB_RUN\` only" | base64 -w0 2>/dev/null || printf '%s' "run \`$ARB_RUN\` only" | base64)"
+export ARCHIVE_B64
+run
+expect "a citation whose archive omits the slate digest fails Gate R" 6 \
+  "arb-consensus archive does not cite slate digest $ARB_SLATE"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
+# Digest must stay out of the ADR 0202 marker body.
+reset_env
+run
+if [ "$RC" -eq 0 ] && [ "$OUT" = true ] \
+  && ! grep -qF -- "$ARB_SLATE" <<<"$MARKER" \
+  && grep -qF -- "$ARB_SLATE" <<<"$CITATION"; then
+  pass "the ADR 0202 marker stays digest-free while the citation carries the slate digest"
+else
+  fail "the ADR 0202 marker stays digest-free while the citation carries the slate digest (rc=$RC)"
 fi
 
 # --- scope -----------------------------------------------------------------------
