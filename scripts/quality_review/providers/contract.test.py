@@ -161,6 +161,8 @@ class JevStubContractTest(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["auth"], "Bearer test-key")
         self.assertEqual(req["payload"]["model"], "jev-1.14.0")
+        self.assertEqual(req["payload"]["state"], "demo")
+        self.assertIsInstance(req["payload"]["state"], str)
         self.assertEqual(req["payload"]["questions"]["correctness"]["type"], "noul")
         self.assertEqual(req["payload"]["questions"]["security"]["type"], "score")
 

@@ -114,8 +114,14 @@ class JevEvaluator:
     def evaluate(
         self, state: Mapping[str, Any], questions: Sequence[Mapping[str, Any]]
     ) -> list[Mapping[str, Any]]:
+        # System One requires state as a string (docs.typesafe.ai/api/system-one).
+        diff = state.get("diff")
+        if isinstance(diff, str) and diff:
+            state_text = diff
+        else:
+            state_text = json.dumps(dict(state), sort_keys=True, separators=(",", ":"))
         jev_questions = {str(q.get("id") or i): _question_to_jev(q) for i, q in enumerate(questions)}
-        payload = {"state": dict(state), "model": self.model, "questions": jev_questions}
+        payload = {"state": state_text, "model": self.model, "questions": jev_questions}
         body = json.dumps(payload).encode("utf-8")
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -165,6 +171,12 @@ class JevEvaluator:
                 raise last_error from exc
             except urllib.error.URLError as exc:
                 last_error = JevError(f"Jev unreachable: {exc.reason}")
+                if attempt < self.max_retries:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise last_error from exc
+            except TimeoutError as exc:
+                last_error = JevError("Jev transport timeout")
                 if attempt < self.max_retries:
                     time.sleep(0.5 * (attempt + 1))
                     continue
