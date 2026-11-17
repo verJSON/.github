@@ -544,6 +544,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Classify before opening a comment-backed claim store so major/breaking
+    # bumps fail closed without posting a claim receipt or handoff (#2214).
+    pr_title = args.pr_title if args.pr_title is not None else os.environ.get("PR_TITLE")
+    pr_labels = list(args.pr_labels or [])
+    if not pr_labels:
+        raw_labels = os.environ.get("PR_LABELS", "")
+        pr_labels = [part for part in raw_labels.split(",") if part]
+    bump_kind = classify_renovate_bump(title=pr_title, labels=pr_labels)
+    if bump_kind in {"major", "breaking"}:
+        print(
+            f"::error::worker failed closed: {bump_kind} bump for "
+            f"{args.repository}#{args.pull_request}@{args.head_sha} "
+            f"— no claim or fragment invented (Part of #2209)",
+            file=sys.stderr,
+        )
+        return 1
+
     create_comment_fn: Callable[[str], object] | None = None
 
     if args.dry_run or args.store == "memory":
@@ -622,12 +639,6 @@ def main(argv: list[str] | None = None) -> int:
             trusted_authors=trusted,
         )
 
-    pr_title = args.pr_title if args.pr_title is not None else os.environ.get("PR_TITLE")
-    pr_labels = list(args.pr_labels or [])
-    if not pr_labels:
-        raw_labels = os.environ.get("PR_LABELS", "")
-        pr_labels = [part for part in raw_labels.split(",") if part]
-    bump_kind = classify_renovate_bump(title=pr_title, labels=pr_labels)
     worker = DependencyUpgradeWorker(
         bump_kind=bump_kind,
         skill_runner=AgentHandoffRunner(post_comment=create_comment_fn),
