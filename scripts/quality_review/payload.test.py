@@ -116,6 +116,25 @@ class GitleaksFailClosedTest(unittest.TestCase):
         self.assertEqual(result.dropped, ["chunk[1]:1 finding(s)"])
         self.assertIsNone(result.reason)
 
+
+    def test_exit1_without_findings_report_fails_closed(self) -> None:
+        from quality_review.gitleaks import _parse_findings
+
+        self.assertIsNone(_parse_findings("not json"))
+        self.assertEqual(_parse_findings("[]"), [])
+        self.assertEqual(_parse_findings('[{"RuleID":"aws-key"}]'), ["aws-key"])
+
+        def ambiguous(_chunk: str) -> list[str]:
+            # Mimic subprocess_scanner's fail-closed path for exit 1 without JSON.
+            findings = _parse_findings("fatal: repository not found")
+            if findings is None:
+                raise RuntimeError("gitleaks exit 1 without a JSON findings report")
+            return findings
+
+        result = scan_chunks(["clean", "also"], scanner=ambiguous)
+        self.assertEqual(result.sent, [])
+        self.assertIn("failed", result.reason or "")
+
     def test_pin_digest_mismatch_refuses(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "gitleaks"

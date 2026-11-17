@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,29 +36,73 @@ def verify_pinned_binary(path: Path, expected_sha256: str) -> None:
         raise ValueError(f"gitleaks digest mismatch: expected {expected_sha256}, got {actual}")
 
 
+def _parse_findings(stdout: str) -> list[str] | None:
+    """Return finding labels, or None when stdout is not a findings report."""
+    text = (stdout or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if parsed is None:
+        return []
+    if isinstance(parsed, list):
+        labels: list[str] = []
+        for item in parsed:
+            if isinstance(item, dict):
+                labels.append(str(item.get("RuleID") or item.get("Description") or item.get("Match") or "finding"))
+            else:
+                labels.append(str(item))
+        return labels
+    return None
+
+
 def subprocess_scanner(binary: Path) -> Scanner:
     """Return a scanner that invokes a verified gitleaks binary on stdin.
 
-    gitleaks exit 0 = clean, 1 = findings; any other status fails closed.
+    Fail-closed rules:
+    - exit 0 → clean (no findings)
+    - exit 1 with a JSON findings array → those findings
+    - exit 1 without a parseable findings report → scanner failure
+    - any other exit → scanner failure
+
+    gitleaks also uses exit 1 for some scan errors; requiring a findings report
+    prevents those errors from being treated as per-chunk leaks.
     """
 
     def scan(chunk: str) -> list[str]:
         completed = subprocess.run(
-            [str(binary), "stdin", "--no-banner"],
+            [
+                str(binary),
+                "detect",
+                "--no-git",
+                "--pipe",
+                "--no-banner",
+                "--report-format",
+                "json",
+                "--report-path",
+                "/dev/stdout",
+            ],
             input=chunk,
             text=True,
             capture_output=True,
             check=False,
         )
-        if completed.returncode not in (0, 1):
-            raise RuntimeError(
-                f"gitleaks failed (exit {completed.returncode}): "
-                f"{completed.stderr.strip() or completed.stdout.strip()}"
-            )
         if completed.returncode == 0:
             return []
-        findings = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
-        return findings or ["gitleaks reported findings"]
+        if completed.returncode == 1:
+            findings = _parse_findings(completed.stdout)
+            if findings is None:
+                raise RuntimeError(
+                    "gitleaks exit 1 without a JSON findings report: "
+                    f"{(completed.stderr or completed.stdout or '').strip()}"
+                )
+            return findings or ["gitleaks reported findings"]
+        raise RuntimeError(
+            f"gitleaks failed (exit {completed.returncode}): "
+            f"{(completed.stderr or completed.stdout or '').strip()}"
+        )
 
     return scan
 
