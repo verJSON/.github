@@ -77,9 +77,7 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
-- [#2120](https://github.com/verJSON/.github/issues/2120) — Org handoff annotation + Renovate preset landed ([#2123](https://github.com/verJSON/.github/pull/2123), renovate-config#62). Remains open until a canary adopter (e.g. verjson-cli) bumps its changelog caller pin so `needs-changelog-context` appears on a Renovate PR. Verified open 2026-11-15 via `gh issue view`.
-
-- [#1869](https://github.com/VerJSON/.github/issues/1869) — Canonical node-ci cost levers for trunk-based three-tier flow (build-once ArtifactSet, remaining sandbox profiles). Compatibility-lane helper extraction landed in [#2103](https://github.com/verJSON/.github/pull/2103) / [#2106](https://github.com/verJSON/.github/pull/2106); owner-gated build-once ArtifactSet still open. Verified 2026-11-15 via `gh issue view` and merged PR state.
+- [#1869](https://github.com/VerJSON/.github/issues/1869) — Canonical node-ci cost levers for trunk-based three-tier flow (build-once ArtifactSet, remaining sandbox profiles). Compatibility-lane helper extraction landed in [#2103](https://github.com/verJSON/.github/pull/2103) / [#2106](https://github.com/verJSON/.github/pull/2106); owner-gated build-once ArtifactSet still open. Verified 2026-11-17 via `gh issue view` and merged PR state.
 
 - [#1905](https://github.com/VerJSON/.github/issues/1905) — F-1R + #2059 are on main; no further `.github` race fix. Remains open for F-1R fleet regeneration; natively blocked by #1933 (Gate A). Actions-disabled adopter enablement continues under #1985 (this issue blocks that one in the native graph). Verified 2026-11-15 via issue comments and native dependency API.
 
