@@ -181,3 +181,44 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "${SUMMARY:-quality evidence not obtained: skipped}" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Write artifact and sticky comment
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SUMMARY: ${{ steps.evaluate.outputs.summary || steps.diff.outputs.summary || steps.mode.outputs.summary }}
+        run: |
+          set -euo pipefail
+          summary="${SUMMARY:-quality evidence not obtained: skipped}"
+          mkdir -p "$RUNNER_TEMP/quality-review"
+          python3 -I - <<'PY' >"$RUNNER_TEMP/quality-review/report.json"
+          import json, os
+          print(json.dumps({
+              "obtained": False,
+              "summary": os.environ.get("SUMMARY", ""),
+              "provider": None,
+              "model": None,
+              "answers": [],
+              "dropped": [],
+          }, indent=2, sort_keys=True))
+          PY
+          marker='<!-- quality-review:v1 -->'
+          body="$(printf '%s\n## Advisory quality review\n\n%s\n\n_Advisory only — never a required check (ADR 0270)._\n' "$marker" "$summary")"
+          set +e
+          existing="$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
+          comment_id="$(printf '%s' "$existing" | jq -r --arg m "$marker" '.[] | select(.body | contains($m)) | .id' | head -n1)"
+          if [ -n "${comment_id:-}" ] && [ "$comment_id" != "null" ]; then
+            gh api -X PATCH "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="$body" >/dev/null
+          else
+            gh api -X POST "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$body" >/dev/null
+          fi
+          set -e
+
+      - name: Upload quality-review artifact
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quality-review-report
+          path: ${{ runner.temp }}/quality-review/report.json
+          if-no-files-found: ignore

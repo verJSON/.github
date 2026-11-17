@@ -323,3 +323,4 @@ platform	python3 scripts/quality_review/providers/contract.test.py
 platform	python3 scripts/quality_review/payload.test.py
 platform	python3 scripts/quality_review/run.test.py
 platform	python3 scripts/quality_review/workflow.test.py
+platform	python3 scripts/quality_review/report.test.py

@@ -24,6 +24,8 @@ class QualityReviewWorkflowTest(unittest.TestCase):
         self.assertIn("ubuntu-24.04", text)
         self.assertIn("quality evidence not obtained", text)
         self.assertIn(",quality-review,", text)
+        self.assertIn("<!-- quality-review:v1 -->", text)
+        self.assertIn("upload-artifact@", text)
         self.assertIn("application/vnd.github.diff", text)
 
     def test_canary_uses_local_reusable_path(self) -> None:
