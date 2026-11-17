@@ -129,10 +129,10 @@ def should_drop_path(path: str) -> str | None:
 
 
 def estimate_tokens(text: str) -> int:
-    """Cheap token estimate: ~4 characters per token."""
+    """Conservative token estimate (~3 characters per token; #2169)."""
     if not text:
         return 0
-    return max(1, (len(text) + 3) // 4)
+    return max(1, (len(text) + 2) // 3)
 
 
 def build_payload(

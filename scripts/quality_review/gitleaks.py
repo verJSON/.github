@@ -79,6 +79,8 @@ def subprocess_scanner(binary: Path) -> Scanner:
     def scan(chunk: str) -> list[str]:
         with tempfile.TemporaryDirectory(prefix="quality-review-gitleaks-") as tmp:
             source = Path(tmp)
+            # Fixed basename only — never derive the filename from chunk content
+            # (path-traversal footgun if a future edit switches to content-based names).
             target = source / "chunk.diff"
             target.write_text(chunk, encoding="utf-8")
             report = source / "report.json"

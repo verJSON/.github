@@ -119,10 +119,16 @@ class JevEvaluator:
         if isinstance(diff, str) and diff:
             state_text = diff
         else:
-            state_text = json.dumps(dict(state), sort_keys=True, separators=(",", ":"))
+            try:
+                state_text = json.dumps(dict(state), sort_keys=True, separators=(",", ":"))
+            except (TypeError, ValueError) as exc:
+                raise JevError(f"Jev state is not JSON-serializable: {exc}") from exc
         jev_questions = {str(q.get("id") or i): _question_to_jev(q) for i, q in enumerate(questions)}
         payload = {"state": state_text, "model": self.model, "questions": jev_questions}
-        body = json.dumps(payload).encode("utf-8")
+        try:
+            body = json.dumps(payload).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise JevError(f"Jev request is not JSON-serializable: {exc}") from exc
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             request = urllib.request.Request(
