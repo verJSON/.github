@@ -21,6 +21,9 @@ _LOCKFILE_NAMES = frozenset(
         "Gemfile.lock",
         "go.sum",
         "bun.lockb",
+        "gradle.lockfile",
+        "Podfile.lock",
+        "Package.resolved",
     }
 )
 _ENV_NAMES = frozenset({".env", ".env.local", ".env.production", ".env.development"})
@@ -98,7 +101,7 @@ def should_drop_path(path: str) -> str | None:
     posix = path.replace("\\", "/")
     name = PurePosixPath(posix).name
     lower = posix.lower()
-    if name in _LOCKFILE_NAMES or name.endswith(".lock"):
+    if name in _LOCKFILE_NAMES or name.endswith(".lock") or name.endswith(".lockfile"):
         return "lockfile"
     if name in _ENV_NAMES or name.startswith(".env."):
         return "env"

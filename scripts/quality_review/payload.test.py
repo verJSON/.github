@@ -61,6 +61,7 @@ index 111..222 100644
 class PayloadFilterTest(unittest.TestCase):
     def test_drops_lockfile_env_vendored_binary(self) -> None:
         self.assertEqual(should_drop_path("package-lock.json"), "lockfile")
+        self.assertEqual(should_drop_path("gradle.lockfile"), "lockfile")
         self.assertEqual(should_drop_path(".env"), "env")
         self.assertEqual(should_drop_path("vendor/x.go"), "vendored")
         self.assertEqual(should_drop_path("assets/logo.png"), "binary")
