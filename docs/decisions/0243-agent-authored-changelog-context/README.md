@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-27
 - **Status:** Accepted
-- **Issue:** [verJSON/.github#1869](https://github.com/verJSON/.github/issues/1869)
+- **Issue:** [verJSON/.github#1869](https://github.com/verJSON/.github/issues/1869); amend [verJSON/.github#2139](https://github.com/verJSON/.github/issues/2139)
 - **Category:** release integrity and privileged automation — **sensitive class**
 - **Related:** [ADR 0038](../0038-canonical-changelog-contract/README.md),
   [ADR 0104](../0104-trusted-renovate-changelog-attribution/README.md),
@@ -106,3 +106,54 @@ that workflow, a pin bump to the earlier commit could not surface
 duplicated on `generated-artifacts.yml` with the same body, author env contract,
 and `continue-on-error` placement ahead of validation. Evidence:
 verJSON/.github#2120 after verjson-cli#371.
+
+## Amendment 2026-11-17 — Renovate handoff dispatches an agent delivery claim
+
+**ARB:** run `arb-2139-2026-11-17`; status `APPROVED`; slate digest
+`9fee6d34a4ef9c4140a899064fd9bfdc82ccddd611eac6c785dbf52b84b7aff9`
+([verJSON/.github#2139](https://github.com/verJSON/.github/issues/2139)).
+Approval authority is ADR 0271 ARB consensus + ADR 0202 receipt — not personal
+CODEOWNERS.
+
+The 2026-11-15 amendments made the handoff a scannable **signal**
+(`needs-changelog-context`) without restoring a writer. Adopters still had no
+durable **dispatch** path from that signal to an agent that performs install →
+exercise → adapt → author fragment under autonomous merge gates. The durable
+fix is an **agent delivery claim**, not a restored privileged `NEXT/` writer.
+
+1. **Signal (unchanged).** `needs-changelog-context` remains the informational
+   annotation on Renovate PRs that change manifests/lockfiles without a valid
+   new fragment. `check-pr` / `changelog / validate` remains the only changelog
+   merge gate. There is no Renovate exemption and no workflow writes a
+   fragment. [#2120](https://github.com/verJSON/.github/issues/2120) remains
+   the annotation owner.
+2. **Claim.** On that signal (or equivalent Renovate opened/synchronize
+   predicates), exactly one agent delivery job may be claimed per
+   `(repository, pull_request, head_sha)`. Claims are idempotent: a second
+   claim for the same triple is a no-op. Concurrency is bounded; the claim
+   store and dispatcher host are implementation details owned by the follow-on
+   issue, not this decision record.
+3. **Worker.** The claimed agent runs the dependency-upgrade skill on the
+   Renovate branch: install the bumped dependency, exercise the consumer suite,
+   adapt as needed, author an accurate `NEXT/` fragment describing exercised
+   behavior, control-test `check-pr` / `validate`, then push under the
+   reviewer gate. The agent — not a metadata parser or templated hook —
+   authors the fragment.
+4. **Merge.** Promotion and merge remain under existing autonomous delivery
+   gates (`reviewDecision`, `assert-mergeable-head.sh --match-head-commit`,
+   ADR 0202 exact-head receipt with `arb-consensus` where required). A green
+   check rollup alone is never enough. Auto-merge must not supply a missing
+   platform-required human, code-owner, or last-push approval.
+5. **Fail-closed.** Major or breaking bumps, and failed exercise, leave a
+   visible claim failure for PM/human triage. Do not invent a fragment when
+   exercise fails.
+
+### Explicitly rejected
+
+- Reinstating ADR 0104 / `renovate-changelog.yml` privileged fragment writers
+- Actor exemptions or weakened `check-pr`
+- Templated hook-authored fragments that claim exercised behavior without
+  running the consumer suite
+- Treating this amendment as authorization to ship dispatcher code without the
+  follow-on implementation track
+  ([verJSON/.github#2191](https://github.com/verJSON/.github/issues/2191))
