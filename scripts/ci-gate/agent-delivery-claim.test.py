@@ -20,6 +20,7 @@ REPO = "Verjson/demo"
 PR = 42
 HEAD = "a" * 40
 OTHER_HEAD = "b" * 40
+TRUSTED = "github-actions[bot]"
 
 
 def claim_id_factory(seq: list[str] | None = None):
@@ -60,7 +61,7 @@ class AgentDeliveryClaimTest(unittest.TestCase):
         second = self.claim(store, ids=["2" * 32])
         self.assertFalse(second.created)
         self.assertEqual(second.claim.claim_id, first.claim.claim_id)
-        self.assertEqual(store.active_count(), 1)
+        self.assertEqual(store.active_count(head_sha=HEAD), 1)
 
     def test_double_claim_race_returns_the_same_claim_id(self):
         store = self.store(race_on_create=True)
@@ -92,7 +93,7 @@ class AgentDeliveryClaimTest(unittest.TestCase):
         self.assertEqual(len(results), 2)
         ids = {result.claim.claim_id for result in results}
         self.assertEqual(len(ids), 1)
-        self.assertEqual(store.active_count(), 1)
+        self.assertEqual(store.active_count(head_sha=HEAD), 1)
         created = sum(1 for result in results if result.created)
         self.assertEqual(created, 1)
 
@@ -115,17 +116,31 @@ class AgentDeliveryClaimTest(unittest.TestCase):
                     self.claim(store, repo=repo, pr=pr, head=head)
         self.assertEqual(store.active_count(), 0)
 
-    def test_concurrency_bound_refuses_a_new_triple(self):
+    def test_concurrency_bound_scopes_to_current_head_sha(self):
         store = self.store()
         first = self.claim(store, head=HEAD, max_concurrent=1, ids=["1" * 32])
         self.assertTrue(first.created)
+        # synchronize to a new head must not be blocked by the stale receipt.
+        second = self.claim(store, head=OTHER_HEAD, max_concurrent=1, ids=["2" * 32])
+        self.assertTrue(second.created)
+        self.assertEqual(store.active_count(head_sha=HEAD), 1)
+        self.assertEqual(store.active_count(head_sha=OTHER_HEAD), 1)
+
+    def test_concurrency_bound_refuses_another_claim_for_same_head(self):
+        store = self.store()
+        first = self.claim(
+            store, repo="Verjson/a", pr=1, head=HEAD, max_concurrent=1, ids=["1" * 32]
+        )
+        self.assertTrue(first.created)
         with self.assertRaisesRegex(MODULE.ClaimRefusal, "concurrency"):
-            self.claim(store, head=OTHER_HEAD, max_concurrent=1, ids=["2" * 32])
-        # Idempotent re-claim of the held triple still succeeds under the bound.
-        again = self.claim(store, head=HEAD, max_concurrent=1, ids=["3" * 32])
+            self.claim(
+                store, repo="Verjson/b", pr=2, head=HEAD, max_concurrent=1, ids=["2" * 32]
+            )
+        again = self.claim(
+            store, repo="Verjson/a", pr=1, head=HEAD, max_concurrent=1, ids=["3" * 32]
+        )
         self.assertFalse(again.created)
         self.assertEqual(again.claim.claim_id, first.claim.claim_id)
-        self.assertEqual(store.active_count(), 1)
 
     def test_receipt_carries_claim_id_and_triple_without_secrets(self):
         store = self.store()
@@ -193,20 +208,38 @@ class AgentDeliveryClaimTest(unittest.TestCase):
 
 
 class CommentClaimStoreTest(unittest.TestCase):
-    def test_parses_and_posts_durable_comment_markers(self):
+    def fake_store(self, *, trusted_authors=None, race_on_create: bool = False):
         comments: list[dict] = []
+        lock = threading.Lock()
 
         def list_comments():
-            return list(comments)
+            with lock:
+                return list(comments)
 
         def create_comment(body: str):
-            comments.append({"id": len(comments) + 1, "body": body})
-            return comments[-1]
+            with lock:
+                comments.append(
+                    {
+                        "id": len(comments) + 1,
+                        "body": body,
+                        "user": {"login": TRUSTED},
+                    }
+                )
+                return comments[-1]
 
-        store = MODULE.CommentClaimStore(
-            list_comments=list_comments,
-            create_comment=create_comment,
-        )
+        kwargs = {
+            "list_comments": list_comments,
+            "create_comment": create_comment,
+            "race_on_create": race_on_create,
+        }
+        if trusted_authors is not None:
+            kwargs["trusted_authors"] = trusted_authors
+        store = MODULE.CommentClaimStore(**kwargs)
+        store._test_comments = comments  # noqa: SLF001 — test fixture handle
+        return store
+
+    def test_parses_and_posts_durable_comment_markers(self):
+        store = self.fake_store()
         claim = MODULE.Claim(
             claim_id="a" * 32,
             repository=REPO,
@@ -220,7 +253,149 @@ class CommentClaimStoreTest(unittest.TestCase):
         self.assertIsNotNone(found)
         assert found is not None
         self.assertEqual(found.claim_id, claim.claim_id)
-        self.assertEqual(store.active_count(), 1)
+        self.assertEqual(store.active_count(head_sha=HEAD), 1)
+
+    def test_ignores_forged_markers_from_untrusted_authors(self):
+        store = self.fake_store()
+        forged = MODULE.Claim(
+            claim_id="b" * 32,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            status="claimed",
+        )
+        store._test_comments.append(  # noqa: SLF001
+            {
+                "id": 99,
+                "body": MODULE.format_claim_receipt(forged),
+                "user": {"login": "hostile-user"},
+            }
+        )
+        self.assertIsNone(store.find(REPO, PR, HEAD))
+        self.assertEqual(store.active_count(head_sha=HEAD), 0)
+        # Forged markers must not squat the triple or exhaust concurrency.
+        real = MODULE.claim_delivery(
+            store,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            max_concurrent=1,
+            new_claim_id=claim_id_factory(["c" * 32]),
+        )
+        self.assertTrue(real.created)
+        self.assertEqual(real.claim.claim_id, "c" * 32)
+        self.assertEqual(store.active_count(head_sha=HEAD), 1)
+
+    def test_forged_markers_do_not_count_toward_concurrency_bound(self):
+        store = self.fake_store()
+        for index in range(8):
+            head = f"{index:040x}"
+            forged = MODULE.Claim(
+                claim_id=f"{index:032x}",
+                repository=REPO,
+                pull_request=PR,
+                head_sha=head,
+                status="claimed",
+            )
+            store._test_comments.append(  # noqa: SLF001
+                {
+                    "id": index + 1,
+                    "body": MODULE.format_claim_receipt(forged),
+                    "user": {"login": "attacker"},
+                }
+            )
+        self.assertEqual(store.active_count(head_sha=HEAD), 0)
+        result = MODULE.claim_delivery(
+            store,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            max_concurrent=1,
+            new_claim_id=claim_id_factory(["d" * 32]),
+        )
+        self.assertTrue(result.created)
+
+    def test_trusted_author_allowlist_is_configurable(self):
+        store = self.fake_store(trusted_authors=frozenset({"delivery-bot[bot]"}))
+        claim = MODULE.Claim(
+            claim_id="e" * 32,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            status="claimed",
+        )
+        store._test_comments.append(  # noqa: SLF001
+            {
+                "id": 1,
+                "body": MODULE.format_claim_receipt(claim),
+                "user": {"login": TRUSTED},
+            }
+        )
+        self.assertIsNone(store.find(REPO, PR, HEAD))
+        store._test_comments.append(  # noqa: SLF001
+            {
+                "id": 2,
+                "body": MODULE.format_claim_receipt(claim),
+                "user": {"login": "delivery-bot[bot]"},
+            }
+        )
+        found = store.find(REPO, PR, HEAD)
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(found.claim_id, "e" * 32)
+
+    def test_comment_store_double_claim_race_returns_one_claim_id(self):
+        store = self.fake_store(race_on_create=True)
+        results: list[MODULE.ClaimResult] = []
+        errors: list[BaseException] = []
+        shared_ids = claim_id_factory(["1" * 32, "2" * 32])
+
+        def run():
+            try:
+                results.append(
+                    MODULE.claim_delivery(
+                        store,
+                        repository=REPO,
+                        pull_request=PR,
+                        head_sha=HEAD,
+                        max_concurrent=8,
+                        new_claim_id=shared_ids,
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result.claim.claim_id for result in results}, {"1" * 32})
+        self.assertEqual(sum(1 for result in results if result.created), 1)
+        self.assertEqual(len(store._test_comments), 1)  # noqa: SLF001
+
+    def test_stale_head_markers_do_not_block_synchronize(self):
+        store = self.fake_store()
+        first = MODULE.claim_delivery(
+            store,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            max_concurrent=1,
+            new_claim_id=claim_id_factory(["1" * 32]),
+        )
+        self.assertTrue(first.created)
+        second = MODULE.claim_delivery(
+            store,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=OTHER_HEAD,
+            max_concurrent=1,
+            new_claim_id=claim_id_factory(["2" * 32]),
+        )
+        self.assertTrue(second.created)
 
 
 if __name__ == "__main__":

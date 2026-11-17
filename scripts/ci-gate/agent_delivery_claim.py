@@ -2,8 +2,9 @@
 """Idempotent agent delivery claim for Renovate handoff (ADR 0243 / #2191).
 
 Durable identity is the triple (repository, pull_request, head_sha). A second
-claim for the same triple is a no-op. Active claims are concurrency-bounded.
-Receipts are GitHub-native PR comment markers and never carry secrets.
+claim for the same triple is a no-op. Active claims are concurrency-bounded per
+head_sha so synchronize is not blocked by stale receipts. Comment receipts are
+accepted only from a trusted workflow author allowlist.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import re
 import secrets
 import threading
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Collection, Protocol
 
 
 REPO_RE = re.compile(
@@ -32,6 +33,7 @@ MARKER_RE = re.compile(
 )
 
 DEFAULT_MAX_CONCURRENT = 8
+DEFAULT_TRUSTED_CLAIM_AUTHORS = frozenset({"github-actions[bot]"})
 
 
 class ClaimRefusal(ValueError):
@@ -141,6 +143,16 @@ def parse_claim_marker(body: str) -> Claim | None:
     )
 
 
+def _comment_author(comment: object) -> str | None:
+    if not isinstance(comment, dict):
+        return None
+    user = comment.get("user")
+    if not isinstance(user, dict):
+        return None
+    login = user.get("login")
+    return login if isinstance(login, str) else None
+
+
 class MemoryClaimStore:
     """In-process store used by unit tests and local dry-runs."""
 
@@ -156,9 +168,14 @@ class MemoryClaimStore:
         with self._lock:
             return self._claims.get((repository, pull_request, head_sha))
 
-    def active_count(self) -> int:
+    def active_count(self, head_sha: str | None = None) -> int:
         with self._lock:
-            return sum(1 for claim in self._claims.values() if claim.status == "claimed")
+            return sum(
+                1
+                for claim in self._claims.values()
+                if claim.status == "claimed"
+                and (head_sha is None or claim.head_sha == head_sha)
+            )
 
     def create(self, claim: Claim, *, max_concurrent: int | None = None) -> Claim:
         key = (claim.repository, claim.pull_request, claim.head_sha)
@@ -167,7 +184,6 @@ class MemoryClaimStore:
                 self._entered += 1
                 entered = self._entered
             if entered == 1:
-                # Wait until the second racer has also entered create().
                 while True:
                     with self._entered_lock:
                         if self._entered >= 2:
@@ -179,7 +195,11 @@ class MemoryClaimStore:
             existing = self._claims.get(key)
             if existing is not None:
                 return existing
-            active = sum(1 for item in self._claims.values() if item.status == "claimed")
+            active = sum(
+                1
+                for item in self._claims.values()
+                if item.status == "claimed" and item.head_sha == claim.head_sha
+            )
             if max_concurrent is not None and active >= max_concurrent:
                 raise ClaimRefusal("concurrency bound refuses a new agent delivery claim")
             self._claims[key] = claim
@@ -194,14 +214,26 @@ class CommentClaimStore:
         *,
         list_comments: Callable[[], list[dict]],
         create_comment: Callable[[str], dict],
+        trusted_authors: Collection[str] = DEFAULT_TRUSTED_CLAIM_AUTHORS,
+        race_on_create: bool = False,
     ) -> None:
+        authors = frozenset(trusted_authors)
+        if not authors:
+            raise ClaimRefusal("trusted claim author allowlist is empty")
         self._list_comments = list_comments
         self._create_comment = create_comment
+        self._trusted_authors = authors
         self._lock = threading.RLock()
+        self._race_on_create = race_on_create
+        self._create_gate = threading.Event()
+        self._entered = 0
+        self._entered_lock = threading.Lock()
 
-    def _claims(self) -> list[Claim]:
+    def _trusted_claims(self) -> list[Claim]:
         claims: list[Claim] = []
         for comment in self._list_comments():
+            if _comment_author(comment) not in self._trusted_authors:
+                continue
             body = comment.get("body") if isinstance(comment, dict) else None
             parsed = parse_claim_marker(body if isinstance(body, str) else "")
             if parsed is not None:
@@ -210,7 +242,7 @@ class CommentClaimStore:
 
     def find(self, repository: str, pull_request: int, head_sha: str) -> Claim | None:
         with self._lock:
-            for claim in self._claims():
+            for claim in self._trusted_claims():
                 if (
                     claim.repository == repository
                     and claim.pull_request == pull_request
@@ -219,16 +251,34 @@ class CommentClaimStore:
                     return claim
             return None
 
-    def active_count(self) -> int:
+    def active_count(self, head_sha: str | None = None) -> int:
         with self._lock:
-            return sum(1 for claim in self._claims() if claim.status == "claimed")
+            return sum(
+                1
+                for claim in self._trusted_claims()
+                if claim.status == "claimed"
+                and (head_sha is None or claim.head_sha == head_sha)
+            )
 
     def create(self, claim: Claim, *, max_concurrent: int | None = None) -> Claim:
+        if self._race_on_create:
+            with self._entered_lock:
+                self._entered += 1
+                entered = self._entered
+            if entered == 1:
+                while True:
+                    with self._entered_lock:
+                        if self._entered >= 2:
+                            break
+                self._create_gate.set()
+            else:
+                self._create_gate.wait(timeout=5)
+        # Find + concurrency check + durable insert share one critical section.
         with self._lock:
             existing = self.find(claim.repository, claim.pull_request, claim.head_sha)
             if existing is not None:
                 return existing
-            if max_concurrent is not None and self.active_count() >= max_concurrent:
+            if max_concurrent is not None and self.active_count(head_sha=claim.head_sha) >= max_concurrent:
                 raise ClaimRefusal("concurrency bound refuses a new agent delivery claim")
             self._create_comment(format_claim_receipt(claim))
             created = self.find(claim.repository, claim.pull_request, claim.head_sha)
@@ -250,10 +300,6 @@ def claim_delivery(
     if not isinstance(max_concurrent, int) or isinstance(max_concurrent, bool) or max_concurrent < 1:
         raise ClaimRefusal("concurrency bound is malformed")
     triple = validate_triple(repository, pull_request, head_sha)
-    existing = store.find(triple.repository, triple.pull_request, triple.head_sha)
-    if existing is not None:
-        return ClaimResult(claim=existing, created=False)
-
     claim_id = new_claim_id()
     if not isinstance(claim_id, str) or not CLAIM_ID_RE.fullmatch(claim_id):
         raise ClaimRefusal("claim id is malformed")
@@ -264,7 +310,7 @@ def claim_delivery(
         head_sha=triple.head_sha,
         status="claimed",
     )
-    # Bound + insert are atomic inside store.create when the store supports it.
+    # Idempotent find+insert and the concurrency bound live inside store.create.
     stored = store.create(candidate, max_concurrent=max_concurrent)
     created = stored.claim_id == candidate.claim_id
     if created and worker is not None:
@@ -284,6 +330,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pull-request", required=True, type=int)
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--max-concurrent", type=int, default=DEFAULT_MAX_CONCURRENT)
+    parser.add_argument(
+        "--trusted-author",
+        action="append",
+        dest="trusted_authors",
+        default=None,
+        help="Allowlisted comment author for durable markers (repeatable).",
+    )
     parser.add_argument(
         "--store",
         choices=("memory", "comment"),
@@ -321,7 +374,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--paginate",
                 f"repos/{args.repository}/issues/{args.pull_request}/comments?per_page=100",
             )
-            # --paginate may emit multiple JSON arrays; normalize.
             chunks = []
             decoder = json.JSONDecoder()
             idx = 0
@@ -362,7 +414,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return json.loads(completed.stdout)
 
-        store = CommentClaimStore(list_comments=list_comments, create_comment=create_comment)
+        trusted = (
+            frozenset(args.trusted_authors)
+            if args.trusted_authors
+            else DEFAULT_TRUSTED_CLAIM_AUTHORS
+        )
+        store = CommentClaimStore(
+            list_comments=list_comments,
+            create_comment=create_comment,
+            trusted_authors=trusted,
+        )
 
     try:
         result = claim_delivery(
@@ -371,7 +432,6 @@ def main(argv: list[str] | None = None) -> int:
             pull_request=args.pull_request,
             head_sha=args.head_sha,
             max_concurrent=args.max_concurrent,
-            # CLI always attaches the stub so deferred worker outcome is logged.
             worker=StubDependencyUpgradeWorker(),
         )
     except ClaimRefusal as exc:
