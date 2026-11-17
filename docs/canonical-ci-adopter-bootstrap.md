@@ -144,9 +144,8 @@ review is never a required check and never feeds merge authorization.
 - Do not add `quality-review` to a required-check ruleset.
 
 Managed canaries already ship generated callers (`Verjson/.github` canary,
-`verJSON/verjson-ci`, `verJSON/verjson-git-runners`). Broader fleet regeneration
-continues under [#1820](https://github.com/VerJSON/.github/issues/1820) and
-completeness follow-on [#2199](https://github.com/VerJSON/.github/issues/2199).
+`verJSON/verjson-ci`, `verJSON/verjson-git-runners`). Broader fleet opt-in
+continues under [#1820](https://github.com/VerJSON/.github/issues/1820).
 
 ## App roles and trust boundaries
 
