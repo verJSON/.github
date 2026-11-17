@@ -42,3 +42,15 @@ custom files, symlinks, concurrent edits and rollback; separately verify
 provider ref semantics and merge-candidate admission. The CLI and bootstrap
 must use or verify the same contract, with a reviewed migration and live
 provider evidence before claiming automatic deployment.
+
+## Amendment — 2026-11-17
+
+ARB Option A assigns managed-file delivery to verjson-ci; `.github`
+`bootstrap-canonical-ci.py` is verifier/consumer only. The apply hold for
+non-empty `callers` remains absolute. Inspection rejects output and parent-path
+symlinks (including dangling) by testing `is_symlink()` before `exists()` /
+`is_dir()`. A pure delivery-preview verifier rejects `readyForApply: false`
+(and malformed previews) so draft verjson-ci#333 preimages cannot authorize
+apply; true apply still waits on the sealed verjson-ci writer
+([verjson-ci#295](https://github.com/VerJSON/verjson-ci/issues/295) /
+[verjson-ci#333](https://github.com/VerJSON/verjson-ci/pull/333)).
