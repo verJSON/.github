@@ -110,6 +110,12 @@ class AgentDeliveryClaimWorkflowTest(unittest.TestCase):
         )
         self.assertIn(".agent-delivery-claim-trusted/scripts/ci-gate/agent_delivery_claim.py", claim_step["run"])
         self.assertNotRegex(claim_step["run"], r"(?m)^\s*python3 -I scripts/ci-gate/agent_delivery_claim\.py")
+        self.assertIn("PR_TITLE: ${{ github.event.pull_request.title }}", self.text)
+        self.assertIn("PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}", self.text)
+        self.assertNotIn("--pr-title", claim_step["run"])
+        # Worker still must not write NEXT/ from the claim job.
+        self.assertNotIn("NEXT/", claim_step["run"])
+        self.assertNotIn("pull_request_target", self.text)
 
     def _run_signal(self, *, changelog_rc: int, changelog_stdout: str) -> tuple[int, str, dict[str, str]]:
         with tempfile.TemporaryDirectory() as tmp:

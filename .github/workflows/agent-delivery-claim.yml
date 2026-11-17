@@ -95,12 +95,16 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           MAX_CONCURRENT: "8"
         run: |
           set -euo pipefail
           [[ "$REPOSITORY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]
           [[ "$PULL_REQUEST" =~ ^[123456789][0123456789]{0,14}$ ]]
           [[ "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          # Title/labels travel via env (not argv) so Renovate titles cannot
+          # inject argparse flags.
           python3 -I "$GITHUB_WORKSPACE/.agent-delivery-claim-trusted/scripts/ci-gate/agent_delivery_claim.py" \
             --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" \

@@ -192,8 +192,17 @@ class AgentDeliveryClaimTest(unittest.TestCase):
         self.assertFalse(second.created)
         self.assertEqual(calls, ["1" * 32])
 
-    def test_stub_worker_records_deferred_dependency_upgrade(self):
-        worker = MODULE.StubDependencyUpgradeWorker()
+    def test_worker_fail_closed_on_major_bump_without_skill_run(self):
+        runs: list[str] = []
+
+        def skill(claim):
+            runs.append(claim.claim_id)
+            return MODULE.WorkerOutcome(status="completed", detail="should-not-run")
+
+        worker = MODULE.DependencyUpgradeWorker(
+            bump_kind="major",
+            skill_runner=skill,
+        )
         claim = MODULE.Claim(
             claim_id="9" * 32,
             repository=REPO,
@@ -202,9 +211,145 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             status="claimed",
         )
         outcome = worker.run(claim)
-        self.assertEqual(outcome.status, "deferred")
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("major", outcome.detail.lower())
+        self.assertIn("no fragment", outcome.detail.lower())
+        self.assertEqual(runs, [])
+
+    def test_worker_fail_closed_on_breaking_bump_without_skill_run(self):
+        runs: list[str] = []
+
+        def skill(claim):
+            runs.append(claim.claim_id)
+            return MODULE.WorkerOutcome(status="completed", detail="should-not-run")
+
+        worker = MODULE.DependencyUpgradeWorker(
+            bump_kind="breaking",
+            skill_runner=skill,
+        )
+        claim = MODULE.Claim(
+            claim_id="8" * 32,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            status="claimed",
+        )
+        outcome = worker.run(claim)
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("breaking", outcome.detail.lower())
+        self.assertEqual(runs, [])
+
+    def test_worker_runs_skill_for_eligible_bump_and_records_completed(self):
+        runs: list[str] = []
+
+        def skill(claim):
+            runs.append(claim.claim_id)
+            return MODULE.WorkerOutcome(
+                status="completed",
+                detail=(
+                    f"dependency-upgrade skill completed for "
+                    f"{claim.repository}#{claim.pull_request}@{claim.head_sha}"
+                ),
+            )
+
+        worker = MODULE.DependencyUpgradeWorker(
+            bump_kind="minor",
+            skill_runner=skill,
+        )
+        claim = MODULE.Claim(
+            claim_id="7" * 32,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            status="claimed",
+        )
+        outcome = worker.run(claim)
+        self.assertEqual(outcome.status, "completed")
         self.assertIn("dependency-upgrade", outcome.detail)
-        self.assertIn("#2191", outcome.detail)
+        self.assertEqual(runs, ["7" * 32])
+
+    def test_default_handoff_runner_queues_without_inventing_fragment(self):
+        posted: list[str] = []
+
+        def post(body: str) -> None:
+            posted.append(body)
+
+        worker = MODULE.DependencyUpgradeWorker(
+            bump_kind="patch",
+            skill_runner=MODULE.AgentHandoffRunner(post_comment=post),
+        )
+        claim = MODULE.Claim(
+            claim_id="6" * 32,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            status="claimed",
+        )
+        outcome = worker.run(claim)
+        self.assertEqual(outcome.status, "queued")
+        self.assertEqual(len(posted), 1)
+        body = posted[0]
+        self.assertIn("agent-delivery-worker:v1", body)
+        self.assertIn(claim.claim_id, body)
+        self.assertIn("dependency-upgrade", body)
+        # Must not embed a fabricated fragment body
+        self.assertNotRegex(body, r"(?m)^impact:\s")
+        self.assertNotRegex(body, r"(?m)^---\s*$")
+
+    def test_classify_renovate_title_detects_major(self):
+        self.assertEqual(
+            MODULE.classify_renovate_bump(
+                title="chore(deps): update dependency left-pad to v2",
+                labels=["major"],
+            ),
+            "major",
+        )
+        self.assertEqual(
+            MODULE.classify_renovate_bump(
+                title="fix(deps): update dependency foo to v3 (breaking change)",
+                labels=[],
+            ),
+            "breaking",
+        )
+        self.assertEqual(
+            MODULE.classify_renovate_bump(
+                title="chore(deps): update dependency left-pad to v1.2.3",
+                labels=[],
+            ),
+            "eligible",
+        )
+
+    def test_claim_delivery_invokes_worker_only_on_create(self):
+        calls: list[str] = []
+
+        class RecordingWorker:
+            def run(self, claim):
+                calls.append(claim.claim_id)
+                return MODULE.WorkerOutcome(status="queued", detail="ok")
+
+        store = self.store()
+        worker = RecordingWorker()
+        first = MODULE.claim_delivery(
+            store,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            max_concurrent=8,
+            new_claim_id=claim_id_factory(["1" * 32]),
+            worker=worker,
+        )
+        second = MODULE.claim_delivery(
+            store,
+            repository=REPO,
+            pull_request=PR,
+            head_sha=HEAD,
+            max_concurrent=8,
+            new_claim_id=claim_id_factory(["2" * 32]),
+            worker=worker,
+        )
+        self.assertTrue(first.created)
+        self.assertFalse(second.created)
+        self.assertEqual(calls, ["1" * 32])
 
 
 class CommentClaimStoreTest(unittest.TestCase):

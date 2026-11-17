@@ -66,18 +66,134 @@ class Worker(Protocol):
         ...
 
 
-class StubDependencyUpgradeWorker:
-    """Placeholder until the dependency-upgrade skill worker lands (#2191)."""
+DEPENDENCY_UPGRADE_SKILL = (
+    "https://github.com/Verjson/verjson-agents/blob/main/skills/dependency-upgrade/SKILL.md"
+)
+_MAJOR_LABELS = frozenset({"major", "breaking", "semver-major"})
+_BREAKING_TITLE = re.compile(r"\bbreaking(?:\s+change)?\b", re.IGNORECASE)
 
-    def run(self, claim: Claim) -> WorkerOutcome:
+
+def classify_renovate_bump(*, title: str | None = None, labels: Collection[str] | None = None) -> str:
+    """Classify a Renovate bump for worker fail-closed gates.
+
+    Returns one of: ``major``, ``breaking``, ``eligible``. Label signals win
+    over title heuristics. Unknown/empty metadata stays ``eligible`` so the
+    agent skill (not this classifier) remains the authority for fragment
+    authorship; majors that are labeled or titled as such fail closed here.
+    """
+    label_set = {label.strip().lower() for label in (labels or ()) if isinstance(label, str)}
+    if "breaking" in label_set:
+        return "breaking"
+    if label_set & _MAJOR_LABELS:
+        return "major"
+    text = title if isinstance(title, str) else ""
+    if _BREAKING_TITLE.search(text):
+        return "breaking"
+    # Renovate often encodes majors as "update X to v2" / "to v2.0.0".
+    if re.search(r"\bto\s+v?[2-9](?:\.\d+){0,2}\b", text, re.IGNORECASE):
+        return "major"
+    if re.search(r"\bto\s+v?\d{2,}(?:\.\d+){0,2}\b", text, re.IGNORECASE):
+        return "major"
+    return "eligible"
+
+
+def format_worker_handoff(claim: Claim, *, status: str) -> str:
+    if not CLAIM_ID_RE.fullmatch(claim.claim_id):
+        raise ClaimRefusal("claim id is malformed")
+    if status not in {"queued", "failed", "completed"}:
+        raise ClaimRefusal("worker status is malformed")
+    marker = (
+        f"<!-- agent-delivery-worker:v1 repo:{claim.repository} "
+        f"pr:{claim.pull_request} head:{claim.head_sha} "
+        f"claim_id:{claim.claim_id} status:{status} -->"
+    )
+    return (
+        f"{marker}\n"
+        f"## Agent delivery worker\n\n"
+        f"- claim_id: `{claim.claim_id}`\n"
+        f"- repository: `{claim.repository}`\n"
+        f"- pull_request: `{claim.pull_request}`\n"
+        f"- head_sha: `{claim.head_sha}`\n"
+        f"- status: `{status}`\n"
+        f"- skill: {DEPENDENCY_UPGRADE_SKILL}\n\n"
+        f"Claimed agent must run the dependency-upgrade skill "
+        f"(install → exercise → adapt → author accurate `NEXT/` → "
+        f"control-test `check-pr` / `validate` → push under reviewer gate). "
+        f"This handoff invents no fragment and carries no credentials. "
+        f"Part of #2209 (ARB `arb-2139-2026-11-17`).\n"
+    )
+
+
+class AgentHandoffRunner:
+    """Durable handoff for an agent to run the dependency-upgrade skill.
+
+    The claim workflow must not author `NEXT/` fragments (ADR 0243). It posts a
+    visible worker receipt and returns ``queued`` for PM/agent pickup.
+    """
+
+    def __init__(self, *, post_comment: Callable[[str], object] | None = None) -> None:
+        self._post_comment = post_comment
+
+    def __call__(self, claim: Claim) -> WorkerOutcome:
+        body = format_worker_handoff(claim, status="queued")
+        if self._post_comment is not None:
+            self._post_comment(body)
         return WorkerOutcome(
-            status="deferred",
+            status="queued",
             detail=(
-                f"worker deferred: dependency-upgrade skill end-to-end for "
+                f"dependency-upgrade skill queued for "
                 f"{claim.repository}#{claim.pull_request}@{claim.head_sha} "
-                f"(Part of #2191)"
+                f"(claim_id={claim.claim_id}; Part of #2209)"
             ),
         )
+
+
+class DependencyUpgradeWorker:
+    """Worker for a claimed Renovate delivery job (#2209 / ADR 0243).
+
+    Major/breaking bumps fail closed with a visible outcome and never invoke
+    the skill runner (so no invented fragment). Eligible bumps invoke the
+    injected skill runner — production default is ``AgentHandoffRunner``.
+    """
+
+    def __init__(
+        self,
+        *,
+        bump_kind: str = "eligible",
+        skill_runner: Callable[[Claim], WorkerOutcome] | None = None,
+        post_failure: Callable[[str], object] | None = None,
+    ) -> None:
+        if bump_kind not in {"eligible", "major", "breaking", "patch", "minor"}:
+            raise ClaimRefusal("bump kind is malformed")
+        # patch/minor are eligible aliases for callers that already classified.
+        self._bump_kind = "eligible" if bump_kind in {"patch", "minor"} else bump_kind
+        self._skill_runner = skill_runner if skill_runner is not None else AgentHandoffRunner()
+        self._post_failure = post_failure
+
+    def run(self, claim: Claim) -> WorkerOutcome:
+        if self._bump_kind in {"major", "breaking"}:
+            detail = (
+                f"worker failed closed: {self._bump_kind} bump for "
+                f"{claim.repository}#{claim.pull_request}@{claim.head_sha} "
+                f"— no fragment invented (Part of #2209)"
+            )
+            outcome = WorkerOutcome(status="failed", detail=detail)
+            if self._post_failure is not None:
+                self._post_failure(format_worker_handoff(claim, status="failed") + f"\n{detail}\n")
+            return outcome
+        outcome = self._skill_runner(claim)
+        if not isinstance(outcome, WorkerOutcome):
+            raise ClaimRefusal("skill runner returned a malformed outcome")
+        if outcome.status not in {"queued", "completed", "failed"}:
+            raise ClaimRefusal("skill runner returned a malformed status")
+        return outcome
+
+
+class StubDependencyUpgradeWorker(DependencyUpgradeWorker):
+    """Deprecated alias — prefer ``DependencyUpgradeWorker`` (#2209)."""
+
+    def __init__(self) -> None:
+        super().__init__(bump_kind="eligible", skill_runner=AgentHandoffRunner())
 
 
 def validate_triple(repository: object, pull_request: object, head_sha: object) -> Claim:
@@ -348,7 +464,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Use the in-memory store and print the receipt without posting.",
     )
+    parser.add_argument(
+        "--pr-title",
+        default=None,
+        help="Renovate PR title used for major/breaking fail-closed classification.",
+    )
+    parser.add_argument(
+        "--pr-label",
+        action="append",
+        dest="pr_labels",
+        default=None,
+        help="Renovate PR label (repeatable) for major/breaking classification.",
+    )
     args = parser.parse_args(argv)
+
+    create_comment_fn: Callable[[str], object] | None = None
 
     if args.dry_run or args.store == "memory":
         store = MemoryClaimStore()
@@ -414,6 +544,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return json.loads(completed.stdout)
 
+        create_comment_fn = create_comment
         trusted = (
             frozenset(args.trusted_authors)
             if args.trusted_authors
@@ -425,6 +556,18 @@ def main(argv: list[str] | None = None) -> int:
             trusted_authors=trusted,
         )
 
+    pr_title = args.pr_title if args.pr_title is not None else os.environ.get("PR_TITLE")
+    pr_labels = list(args.pr_labels or [])
+    if not pr_labels:
+        raw_labels = os.environ.get("PR_LABELS", "")
+        pr_labels = [part for part in raw_labels.split(",") if part]
+    bump_kind = classify_renovate_bump(title=pr_title, labels=pr_labels)
+    worker = DependencyUpgradeWorker(
+        bump_kind=bump_kind,
+        skill_runner=AgentHandoffRunner(post_comment=create_comment_fn),
+        post_failure=create_comment_fn,
+    )
+
     try:
         result = claim_delivery(
             store,
@@ -432,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
             pull_request=args.pull_request,
             head_sha=args.head_sha,
             max_concurrent=args.max_concurrent,
-            worker=StubDependencyUpgradeWorker(),
+            worker=worker,
         )
     except ClaimRefusal as exc:
         print(f"::error::{exc}", file=sys.stderr)
@@ -442,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
     print(receipt)
     print(f"created={str(result.created).lower()}")
     print(f"claim_id={result.claim.claim_id}")
+    print(f"bump_kind={bump_kind}")
     return 0
 
 
