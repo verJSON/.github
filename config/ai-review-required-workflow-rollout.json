@@ -336,11 +336,14 @@
     "repositories": [
       "Verjson/.github",
       "Verjson/AiB",
+      "Verjson/extreme-operations-dot-ai",
+      "Verjson/toquorum",
       "Verjson/verjson-agent-observer",
       "Verjson/verjson-agents",
       "Verjson/verjson-ai",
       "Verjson/verjson-ai-gguf",
       "Verjson/verjson-authn",
+      "Verjson/verjson-authz",
       "Verjson/verjson-browser-agent",
       "Verjson/verjson-ci",
       "Verjson/verjson-cli",
@@ -349,6 +352,7 @@
       "Verjson/verjson-cloud-storage",
       "Verjson/verjson-compliance",
       "Verjson/verjson-compliance-schema",
+      "Verjson/verjson-consent",
       "Verjson/verjson-customer-lifecycle",
       "Verjson/verjson-document-contracts",
       "Verjson/verjson-editor",
@@ -365,6 +369,7 @@
       "Verjson/verjson-oidc-claims-middleware",
       "Verjson/verjson-payments",
       "Verjson/verjson-temporal-kit",
+      "Verjson/verjson-vault",
       "Verjson/verjson-video-forge"
     ]
   },
