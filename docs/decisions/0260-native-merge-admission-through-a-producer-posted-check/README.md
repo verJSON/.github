@@ -721,3 +721,14 @@ enabled on 2026-11-16:
   recorded on #2031 (24 distinct check-run ids since #2055).
 - **Decision 7 canaries** and #2031 close receipts are recorded on the issue after
   enablement.
+
+## 2026-11-17 amendment: enrollment property schema
+
+Created organization custom property `verjson-merge-admission` (single_select,
+allowed value `enforced`, optional / unset means not enrolled) via
+`PUT /orgs/Verjson/properties/schema/verjson-merge-admission`. Ruleset
+`merge-admission-required` (**27387670**) remains canary-scoped to
+`repository_id` `[1269388380]`; it was **not** retargeted to the property in
+this step. Property-based enrollment with `verjson-actions-state=paused`
+exclusion stays the Decision 2 wider path and is tracked under #1945 / #1990
+rollout residuals.

@@ -91,7 +91,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
 
-- [#1945](https://github.com/verJSON/.github/issues/1945) — The autonomous terminal helper remains fail-closed; ADR 0260 and #2055 ship the producer, but no live `merge-admission-required` ruleset exists. Draft [ecosystem ADR 0014](https://github.com/VerJSON/verjson-docs/pull/34) and #1946 retain the queue proposal and evidence. Blocks #1861 and #1949; not blocked by #1964 after the 2026-11-13 ARB. [#2115](https://github.com/verJSON/.github/pull/2115) landed the #1861 verifier code slice; rollout still waits on this issue. Verified 2026-11-15 via `gh pr view 2115` and issue relationships.
+- [#1945](https://github.com/verJSON/.github/issues/1945) — Producer + ADR 0260/#2055 and canary ruleset `merge-admission-required` (27387670) are live on `.github` (`repository_id` 1269388380). Org custom property `verjson-merge-admission` schema exists (allowed `enforced`; created 2026-11-17). Still open: C3-OBS, property-based enrollment with paused exclusion, and fleet rollout before closing with #1990. Blocks #1861 and #1949; not blocked by #1964. Verified 2026-11-17 via live `gh api` ruleset + property schema readback.
 
 - [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
 
