@@ -2,24 +2,15 @@
 """Fail-closed tests for the read-only agent-delivery claim ledger (#2212)."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
-CLAIM_PATH = Path(__file__).with_name("agent_delivery_claim.py")
-CLAIM_SPEC = importlib.util.spec_from_file_location("agent_delivery_claim", CLAIM_PATH)
-CLAIM = importlib.util.module_from_spec(CLAIM_SPEC)
-assert CLAIM_SPEC.loader is not None
-sys.modules[CLAIM_SPEC.name] = CLAIM
-CLAIM_SPEC.loader.exec_module(CLAIM)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-PATH = Path(__file__).with_name("agent_delivery_claim_ledger.py")
-SPEC = importlib.util.spec_from_file_location("agent_delivery_claim_ledger", PATH)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules[SPEC.name] = MODULE
-SPEC.loader.exec_module(MODULE)
+# Static imports so ADR 0193 counts this test as an importer of the NON_GATE ledger.
+import agent_delivery_claim as CLAIM
+import agent_delivery_claim_ledger as MODULE
 
 REPO = "Verjson/demo"
 OTHER = "Verjson/other"
