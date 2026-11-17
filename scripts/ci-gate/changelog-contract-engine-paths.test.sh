@@ -203,14 +203,39 @@ call_sites = [
 if len(call_sites) != 1 or not (early_begin < call_sites[0] < early_end):
     die("scan_retired_callers must be called only inside early-retired-caller-scan")
 
+VALIDATE_OK = 'echo "ok - canonical validation accepts this repository"'
+validate_oks = [index for index, line in enumerate(lines) if line == VALIDATE_OK]
+if len(validate_oks) != 1:
+    die("expected one canonical-validation ok line before the early scan")
+validate_ok = validate_oks[0]
+if not (validate_ok < early_begin):
+    die("early retired-caller scan must follow canonical validation")
+between_validate = [
+    line
+    for line in lines[validate_ok + 1 : early_begin]
+    if line.strip() and not line.lstrip().startswith("#")
+]
+if between_validate:
+    die("early retired-caller scan must be immediately after canonical validation")
+
+GENERATED_SET_PIN = "generated_set_header_pin="
+generated_set_pins = [
+    index for index, line in enumerate(lines) if line.startswith(GENERATED_SET_PIN)
+]
+if len(generated_set_pins) != 1:
+    die("expected one generated_set_header_pin assignment")
+generated_set_pin = generated_set_pins[0]
+if not (early_end < generated_set_pin):
+    die("early retired-caller scan must precede the generated-set body")
+
 dependency_begin, dependency_end, dependency = marker_span(
     "engine-path-dependency-fixtures"
 )
 executable_begin, executable_end, executable = marker_span(
     "engine-path-executable-fixtures"
 )
-if not (early_end < dependency_begin < executable_begin):
-    die("early retired-caller scan must precede engine-path fixtures")
+if not (generated_set_pin < dependency_begin < executable_begin):
+    die("generated-set must precede engine-path fixtures")
 require_shared_base(
     dependency,
     "dependency_path",
