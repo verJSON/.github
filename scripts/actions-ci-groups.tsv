@@ -319,3 +319,4 @@ platform	bash scripts/actions-ci-group-records.test.sh
 platform	python3 scripts/ci-gate/reusable-ci-no-concurrency.test.py
 platform	python3 scripts/ci-gate/ci-fail-fast.test.py
 platform	python3 scripts/ci-gate/ci-runner-minutes.test.py
+platform	python3 scripts/quality_review/providers/contract.test.py
