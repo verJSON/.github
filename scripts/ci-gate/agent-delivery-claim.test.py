@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 PATH = Path(__file__).with_name("agent_delivery_claim.py")
@@ -338,6 +339,46 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             ),
             "eligible",
         )
+
+    def test_classify_major_label_wins_over_breaking_title(self):
+        # Label precedence: major label beats a "breaking" title heuristic (#2215).
+        self.assertEqual(
+            MODULE.classify_renovate_bump(
+                title="fix(deps): update dependency foo to v2 (breaking change)",
+                labels=["major"],
+            ),
+            "major",
+        )
+        self.assertEqual(
+            MODULE.classify_renovate_bump(
+                title="chore(deps): update dependency foo to v2",
+                labels=["breaking"],
+            ),
+            "breaking",
+        )
+
+    def test_main_fail_closes_major_before_comment_store(self):
+        # #2214: classify before opening CommentClaimStore / posting.
+        # Without an early classify, --store comment would require a token and
+        # would call `gh api`. Fail-closed majors must exit 1 with no GH_TOKEN.
+        with mock.patch.dict("os.environ", {}, clear=True):
+            status = MODULE.main(
+                [
+                    "--repository",
+                    REPO,
+                    "--pull-request",
+                    "7",
+                    "--head-sha",
+                    "a" * 40,
+                    "--pr-title",
+                    "chore(deps): update left-pad to v2",
+                    "--pr-label",
+                    "major",
+                    "--store",
+                    "comment",
+                ]
+            )
+        self.assertEqual(1, status)
 
     def test_claim_delivery_invokes_worker_only_on_create(self):
         calls: list[str] = []
