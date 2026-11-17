@@ -47,6 +47,8 @@ chmod 0644 "$tmp/run/.gate-trust/scripts/ci-gate/verify-arm-receipt.sh"
 cp "$root/scripts/ci-gate/review-policy-envelope.py" "$tmp/run/.gate-trust/scripts/ci-gate/review-policy-envelope.py"
 cp "$root/scripts/ci-gate/terminal-merge.sh" "$tmp/run/.gate-trust/scripts/ci-gate/terminal-merge.sh"
 cp "$root/scripts/ci-gate/independent-review-receipt.sh" "$tmp/run/.gate-trust/scripts/ci-gate/independent-review-receipt.sh"
+cp "$root/scripts/ci-gate/arb-consensus-citation.sh" "$tmp/run/.gate-trust/scripts/ci-gate/arb-consensus-citation.sh"
+chmod +x "$tmp/run/.gate-trust/scripts/ci-gate/arb-consensus-citation.sh"
 cat >"$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$CALLS"
@@ -62,9 +64,26 @@ case "$*" in
   *"actions/runs/7002"*) cat "$CI_RUN_FILE" ;;
   *"contents/.github/workflows/actions-ci.yml?ref=$EXPECTED_HEAD_SHA"*) printf '%s\n' "$WORKFLOW_BLOB_HEAD" ;;
   *"contents/.github/workflows/actions-ci.yml?ref=main"*) printf '%s\n' "$WORKFLOW_BLOB_TRUSTED" ;;
+  *"repos/"*"/contents/"*)
+    # ARB chair/ledger archive for Gate R citation verification (#2184).
+    jq -nc --arg c "$ARCHIVE_B64" '{content:$c,encoding:"base64"}' ;;
   *"repos/Verjson/.github/commits/main"*) printf '%s\n' "$EXECUTING_WORKFLOW_SHA" ;;
   *"check-runs/$AUTHORIZATION_CHECK_ID"*) cat "$CHECK_FILE" ;;
-  *"pulls/$PR_NUMBER/reviews/"*) cat "$REVIEW_REFETCH_FILE" ;;
+  *"pulls/$PR_NUMBER/reviews/"[0-9]*)
+    # Do not use ${*##...}: bash applies ## to each positional and rejoins, so
+    # `api repos/.../reviews/82` becomes id=api. Parse digits after /reviews/.
+    id="$(sed -n 's|.*/reviews/\([0-9][0-9]*\).*|\1|p' <<<"$*")"
+    [ -n "$id" ] || exit 1
+    # Prefer the live refetch override for the receipt id when tests mutate it;
+    # otherwise resolve from the reviews list (citation + receipt).
+    if [ -n "${REVIEW_REFETCH_FILE:-}" ] && [ -f "$REVIEW_REFETCH_FILE" ] \
+      && jq -e --argjson id "$id" '.id == $id' "$REVIEW_REFETCH_FILE" >/dev/null 2>&1; then
+      cat "$REVIEW_REFETCH_FILE"
+    else
+      jq -ce --argjson id "$id" '.[] | select(.id == $id)' "$REVIEWS_FILE" \
+        || jq -ce --argjson id "$id" '.[] | select(.id == $id)' "$LATEST_REVIEWS_FILE" \
+        || exit 1
+    fi ;;
   *"pulls/$PR_NUMBER/reviews?per_page=100"*)
     review_calls="$(cat "$REVIEW_CALLS_FILE")"
     review_calls=$((review_calls + 1))
@@ -75,6 +94,10 @@ case "$*" in
     permission_calls="$(cat "$PERMISSION_CALLS_FILE")"
     permission_calls=$((permission_calls + 1))
     printf '%s\n' "$permission_calls" >"$PERMISSION_CALLS_FILE"
+    # First lookup answers INDEPENDENT (default maintain). Later lookups honor
+    # TERMINAL when set so "permission downgrade before token mint" fails at
+    # receipt revalidation before citation runs. Happy path leaves TERMINAL
+    # unset so every lookup stays maintain (receipt + citation).
     if [ "$permission_calls" -eq 1 ]; then
       printf '%s\n' "${INDEPENDENT_REVIEWER_ROLE:-maintain}"
     else
@@ -137,13 +160,24 @@ write_base() {
   cp "$BASE_META_FILE" "$TERMINAL_META_FILE"
   jq -nc --arg head "$EXPECTED_HEAD_SHA" \
     '{id:9001,name:"AI review authorization",head_sha:$head,status:"completed",conclusion:"success",app:{id:15368,slug:"github-actions"}}' >"$CHECK_FILE"
+  ARB_RUN=arb-test-2026-11-17
+  ARB_SLATE=e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d
+  ARB_ARCHIVE_REPO=verJSON/.github
+  ARB_ARCHIVE_SHA=ee9899ba3803ed95f5883bd65a30952777f4ce7b
+  ARB_ARCHIVE_PATH=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
+  ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'
+  ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+  export ARCHIVE_B64
   jq -nc --arg head "$EXPECTED_HEAD_SHA" --arg login "${EXPECTED_APP_SLUG}[bot]" --arg check "$AUTHORIZATION_CHECK_ID" \
     --arg marker "<!-- independent-review:v1 pr:${PR_NUMBER} head:${EXPECTED_HEAD_SHA} verdict:approved -->" \
+    --arg citation "<!-- arb-consensus:v1 run:${ARB_RUN} slate:${ARB_SLATE} archive:${ARB_ARCHIVE_REPO}@${ARB_ARCHIVE_SHA}:${ARB_ARCHIVE_PATH} -->" \
     '[
-      {id:81,state:"APPROVED",commit_id:$head,user:{login:$login,type:"Bot"},body:("<!-- ai-review-authorization:"+$check+" -->")},
+      {id:80,state:"APPROVED",commit_id:$head,user:{login:$login,type:"Bot"},body:("<!-- ai-review-authorization:"+$check+" -->")},
+      {id:81,state:"COMMENTED",commit_id:$head,user:{login:"independent-reviewer",type:"User"},author_association:"MEMBER",body:$citation},
       {id:82,state:"COMMENTED",commit_id:$head,user:{login:"independent-reviewer",type:"User"},author_association:"MEMBER",body:$marker}
     ]' >"$REVIEWS_FILE"
-  jq '.[1]' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"
+  # Receipt refetch default: the ADR 0202 marker review (id 82).
+  jq '.[] | select(.id == 82)' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"
   cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
   jq -nc --arg head "$EXPECTED_HEAD_SHA" '{check_runs:[{id:101,name:"shell-tests",head_sha:$head,status:"completed",conclusion:"success",details_url:"https://github.com/Verjson/example/actions/runs/7002/job/8002",app:{id:15368,slug:"github-actions"},check_suite:{id:6002}}]}' >"$CI_CHECKS_FILE"
   jq -nc --arg head "$EXPECTED_HEAD_SHA" '{id:7002,check_suite_id:6002,workflow_id:315894159,path:".github/workflows/actions-ci.yml",event:"pull_request",head_sha:$head,head_repository:{full_name:"Verjson/example"},status:"completed",conclusion:"success",workflow_url:"https://api.github.com/repos/Verjson/example/actions/workflows/315894159"}' >"$CI_RUN_FILE"
@@ -178,8 +212,8 @@ write_base
 # "NONE"). The independent-review revalidation must not gate on that unreliable field; the
 # live admin/maintain collaborator-permission check is the actual, already-authoritative
 # eligibility test.
-jq '.[1].author_association="NONE"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
-jq '.[1]' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"
+jq '(.[] | select(.id == 82) | .author_association) = "NONE"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
+jq '.[] | select(.id == 82)' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"
 cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
 expect_pass "unresolvable author_association still promotes a real admin/maintain reviewer (#1615)" run_promote
 ! grep -q 'pr merge' "$CALLS" || fail "authorization preflight attempted a merge"
@@ -190,7 +224,7 @@ write_base
 # actually a collaborator must not block or supersede a real approval — selection has to
 # walk candidates from the highest ID down and accept the first that still holds live
 # admin/maintain, not trust the highest ID outright.
-jq '.[1] as $base | . + [($base | .id=90 | .user.login="attacker" | .body="unrelated comment")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
+jq '(.[] | select(.id == 82)) as $base | . + [($base | .id=90 | .user.login="attacker" | .body="unrelated comment")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
 cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
 expect_pass "a higher-ID review from a non-privileged public account cannot block or supersede a real approval" run_promote
 ! grep -q 'pr merge' "$CALLS" || fail "authorization preflight attempted a merge"
@@ -199,7 +233,7 @@ write_base
 # bounded: without a cap, a flood of junk reviews posted above the real approval would
 # force an unbounded number of live permission lookups. More non-privileged candidates
 # than the search bound allows must fail closed rather than search indefinitely.
-jq --argjson base "$(jq '.[1]' "$REVIEWS_FILE")" '
+jq --argjson base "$(jq '.[] | select(.id == 82)' "$REVIEWS_FILE")" '
     . + [range(100; 125) as $n | $base | .id=$n | .user.login="attacker" | .body="unrelated comment"]
   ' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
 cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
@@ -219,8 +253,8 @@ write_base; jq '.conclusion=null' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK
 write_base; printf '[]\n' >"$REVIEWS_FILE"; expect_fail "missing exact App approval never promotes" '::error::the exact-head dedicated App approval is absent' run_promote
 write_base; jq '.[0].user.login="attacker[bot]"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "wrong approval identity never promotes" '::error::the exact-head dedicated App approval is absent' run_promote
 write_base; jq '.[0].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale App approval never promotes" '::error::the exact-head dedicated App approval is absent' run_promote
-write_base; jq 'del(.[1])' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "missing independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
-write_base; jq '.[1].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale-head independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; jq 'map(select(.id != 81 and .id != 82))' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "missing independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; jq '(.[] | select(.id == 81 or .id == 82) | .commit_id) = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale-head independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
 write_base; jq '.body="prefix <!-- independent-review:v1 pr:7 head:0123456789abcdef0123456789abcdef01234567 verdict:approved --> suffix"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "surrounding context cannot impersonate independent-review receipt" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
 write_base; jq '.body="```\n<!-- independent-review:v1 pr:7 head:0123456789abcdef0123456789abcdef01234567 verdict:approved -->\n```"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "fenced marker cannot impersonate independent-review receipt" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
 write_base; jq '.body |= sub("pr:7"; "pr:8")' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "foreign-PR independent-review receipt never promotes" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
@@ -228,9 +262,9 @@ write_base; jq '.state="APPROVED"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/
 write_base; jq '.body="edited after selection"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "edited receipt body fails terminal revalidation" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
 write_base; jq '.state="DISMISSED"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "dismissed receipt fails terminal revalidation" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
 write_base; jq '.body |= sub("verdict:approved"; "verdict:withdrawn")' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "withdrawn receipt fails terminal revalidation" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
-write_base; jq '.[1] as $base | . + [($base | .id=83 | .state="CHANGES_REQUESTED" | .body="changes requested")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; jq '.[2]' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"; cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"; expect_fail "later changes-requested verdict supersedes approval" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
-write_base; jq '.[1] as $base | . + [($base | .id=83 | .body="later verdict")]' "$LATEST_REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_REVIEWS_FILE"; expect_fail "later review appearing during authorization supersedes receipt" '::error::a later independent-review verdict superseded receipt 82' run_promote
-write_base; jq '.[1].user.type="Bot"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "bot-authored independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; jq '(.[] | select(.id == 82)) as $base | . + [($base | .id=83 | .state="CHANGES_REQUESTED" | .body="changes requested")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; jq '.[] | select(.id == 83)' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"; cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"; expect_fail "later changes-requested verdict supersedes approval" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '(.[] | select(.id == 82)) as $base | . + [($base | .id=83 | .body="later verdict")]' "$LATEST_REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_REVIEWS_FILE"; expect_fail "later review appearing during authorization supersedes receipt" '::error::a later independent-review verdict superseded receipt 82' run_promote
+write_base; jq 'map(if .id == 82 then .user.type = "Bot" else . end) | map(select(.id != 81))' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "bot-authored independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
 write_base; export INDEPENDENT_REVIEWER_ROLE=write; expect_fail "write-only receipt author never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
 write_base; export TERMINAL_REVIEWER_ROLE=write; expect_fail "permission downgrade before token mint never promotes" '::error::could not revalidate latest independent-review verdict' run_promote
 write_base; jq '.headRepositoryOwner.login="outsider"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_fail "fork PR fails closed" '::error::fork PRs are not eligible for autonomous merge' run_promote

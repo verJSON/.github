@@ -125,4 +125,33 @@ latest_selected="$(select_privileged_candidate "$latest_reviews")" || {
 [ "$latest_selected" = "$selected" ] || {
   echo "::error::a later independent-review verdict superseded receipt $review_id"; exit 1;
 }
+
+# ADR 0271 / #2184: marker bytes stay digest-free; a preceding COMMENT must cite
+# ARB run id + slate digest and verify against an archived chair/ledger locator.
+citation_verifier="$(dirname "${BASH_SOURCE[0]}")/arb-consensus-citation.sh"
+[ -x "$citation_verifier" ] || [ -f "$citation_verifier" ] \
+  || { echo "::error::arb-consensus citation verifier $citation_verifier is missing"; exit 1; }
+reviews_tmp="$(mktemp)"
+printf '%s\n' "$latest_reviews" >"$reviews_tmp"
+citation_status=0
+citation_out="$(bash "$citation_verifier" "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA" \
+  "$review_id" "$reviews_tmp" 2>&1)" || citation_status=$?
+rm -f "$reviews_tmp"
+case "$citation_status" in
+  0) ;;
+  3)
+    # Preserve the companion's ::error:: line for Gate R's receipt_reason.
+    printf '%s\n' "$citation_out" >&2
+    exit 3
+    ;;
+  *)
+    if grep -q '^::error::' <<<"$citation_out"; then
+      printf '%s\n' "$citation_out" >&2
+    else
+      echo "::error::an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge" >&2
+    fi
+    exit 1
+    ;;
+esac
+
 printf '%s\t%s\n' "$review_id" "$reviewer" >"$result_file"

@@ -288,6 +288,7 @@ class ProducerTests(unittest.TestCase):
             set(checkout["sparse-checkout"].split()),
             {
                 "scripts/assert-mergeable-head.sh",
+                "scripts/ci-gate/arb-consensus-citation.sh",
                 "scripts/ci-gate/independent-review-receipt.sh",
                 "scripts/ci-gate/merge-admission.sh",
                 "scripts/ci-gate/merge-admission-plan.sh",

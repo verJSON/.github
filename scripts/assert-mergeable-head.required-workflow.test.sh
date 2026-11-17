@@ -56,9 +56,14 @@ case "$args" in
     cat "$fixture" ;;
   *"/annotations?per_page"*) printf '[]\n' ;;
   # The repository is promotion-enabled, so Gate R (ADR 0257) also reads its
-  # independent-review receipt; every case here carries a valid one for the head.
-  *"/pulls/121/reviews?per_page=100"*) printf '[%s]\n' "$RECEIPT_FIXTURE" ;;
-  *"/pulls/121/reviews/"*) printf '%s\n' "$RECEIPT_FIXTURE" ;;
+  # independent-review receipt plus a preceding arb-consensus citation (#2184).
+  *"/contents/"*)
+    jq -nc --arg c "$ARCHIVE_B64" '{content: $c, encoding: "base64"}' ;;
+  *"/pulls/121/reviews?per_page=100"*) printf '%s\n' "$REVIEWS_FIXTURE" ;;
+  *"/pulls/121/reviews/"[0-9]*)
+    id="$(sed -n 's|.*/reviews/\([0-9][0-9]*\).*|\1|p' <<<"$args")"
+    [ -n "$id" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    jq -ce --argjson id "$id" '.[] | select(.id == $id)' <<<"$REVIEWS_FIXTURE"       || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;;
   *"/collaborators/independent-reviewer/permission"*) printf 'maintain\n' ;;
   *) echo "gh: unstubbed call: $args" >&2; exit 1 ;;
 esac
@@ -66,10 +71,18 @@ GH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH"
 export JOBS_DIR="$tmp/jobs"
-RECEIPT_FIXTURE="$(jq -nc --arg head "$HEAD_SHA" '{id: 82, state: "COMMENTED", commit_id: $head,
-  user: {login: "independent-reviewer", type: "User"},
-  body: "<!-- independent-review:v1 pr:121 head:\($head) verdict:approved -->"}')"
-export RECEIPT_FIXTURE
+ARB_RUN=arb-test-2026-11-17
+ARB_SLATE=e9cc47d2c9cb580380abf0f83ce8252a90409f4698855129d3b82e47c1d57e1d
+ARB_ARCHIVE_REPO=verJSON/.github
+ARB_ARCHIVE_SHA=ee9899ba3803ed95f5883bd65a30952777f4ce7b
+ARB_ARCHIVE_PATH=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
+CITATION="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH -->"
+ARCHIVE_TEXT="# chair"$'\n'"run \`$ARB_RUN\`"$'\n'"slate digest \`$ARB_SLATE\`"$'\n'
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+REVIEWS_FIXTURE="$(jq -nc --arg head "$HEAD_SHA" --arg citation "$CITATION"   --arg marker "<!-- independent-review:v1 pr:121 head:$HEAD_SHA verdict:approved -->"   '[{id:81,state:"COMMENTED",commit_id:$head,user:{login:"independent-reviewer",type:"User"},body:$citation},
+    {id:82,state:"COMMENTED",commit_id:$head,user:{login:"independent-reviewer",type:"User"},body:$marker}]')"
+export REVIEWS_FIXTURE
 
 check_run() { # id name conclusion check-suite-id
   printf '{"id":%s,"name":"%s","status":"completed","conclusion":"%s","app":{"id":%s},"check_suite":{"id":%s}}' \

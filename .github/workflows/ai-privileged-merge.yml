@@ -208,6 +208,7 @@ jobs:
           path: .gate-trust
           sparse-checkout: |
             scripts/ci-gate/closing-issue-visibility.py
+            scripts/ci-gate/arb-consensus-citation.sh
             scripts/ci-gate/independent-review-receipt.sh
             scripts/ci-gate/terminal-merge.sh
             scripts/ci-gate/verify-arm-receipt.sh
