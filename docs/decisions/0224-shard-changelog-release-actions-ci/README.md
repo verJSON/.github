@@ -22,3 +22,21 @@ The caller contract builds an adopter and runs the generated suite once per muta
 ## Consequences
 
 One caller-contract case runs in exactly one cell and still executes every generated assertion. Wall-clock comparison against the 24-minute cell belongs to the next `actions-ci` run of this change. Rollback is the single `changelog-release` group and an unsharded caller contract; `shell-tests` does not move.
+
+## Amendment 2026-11-17 — early retired-caller scan (#1977 A-3)
+
+The emitted suite still has no section switch and every caller-contract mutation
+still executes the whole generated contract (Decisions 2–3). Within that suite,
+`scan_retired_callers` now runs immediately after canonical validation and before
+the generated-set and fixture loops.
+
+**Why:** about two dozen retired-caller mutation cases each paid for ~85% of an
+emitted run before reaching the scan. Moving the scan forward fails those cases
+as soon as the retired path is detectable.
+
+**Adopter-visible diagnostic change:** a dual-fault adopter that both retains a
+retired Renovate fragment-writer path and has a later suite failure now sees the
+retired-path diagnostic first. That ordering is deliberate: the retired writer is
+the higher-severity custody defect and must not be masked by later fixture noise.
+
+This amendment does not authorize skipping any generated assertion for a mutation.

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # The emitted contract's dependency and executable-YAML loops each check every
 # path with its own check-pr. Building a repository per path repeated the same
-# base commit (#1977). One base repository and a branch per path must keep
+# base commit (#1977 A-7). One base repository and a branch per path must keep
 # those rejections, and the executable-YAML cases must stay inside the
 # is_release_relevant_change re-pin guard.
+#
+# #1977 A-3: scan_retired_callers must run once up front (after validate, before
+# generated-set / engine-path fixtures), not at the end of the suite.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -189,12 +192,25 @@ def next_code(index):
     return ""
 
 
+early_begin, early_end, early = marker_span("early-retired-caller-scan")
+if early.count("scan_retired_callers") != 1:
+    die("early-retired-caller-scan must invoke scan_retired_callers exactly once")
+call_sites = [
+    index
+    for index, line in enumerate(lines)
+    if line.strip() == "scan_retired_callers"
+]
+if len(call_sites) != 1 or not (early_begin < call_sites[0] < early_end):
+    die("scan_retired_callers must be called only inside early-retired-caller-scan")
+
 dependency_begin, dependency_end, dependency = marker_span(
     "engine-path-dependency-fixtures"
 )
 executable_begin, executable_end, executable = marker_span(
     "engine-path-executable-fixtures"
 )
+if not (early_end < dependency_begin < executable_begin):
+    die("early retired-caller scan must precede engine-path fixtures")
 require_shared_base(
     dependency,
     "dependency_path",
@@ -250,7 +266,7 @@ for name, section in (
 print("ok structure")
 PY
 then
-  pass "emitted loops share one base, one check-pr per path, and the re-pin guard"
+  pass "emitted loops share one base, early retired-caller scan, and the re-pin guard"
 else
   fail "emitted engine-path fixture shape: $(tr '\n' ' ' <"$tmp/structure.err" | cut -c1-500)"
 fi

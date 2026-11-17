@@ -3373,6 +3373,14 @@ trap 'rm -rf "$work" "$fixture_root"' EXIT
 python3 "$contract" validate --repo-root "$root"
 echo "ok - canonical validation accepts this repository"
 
+# Fail closed on a retired privileged Renovate writer path before the expensive
+# generated-set and fixture loops. A dual-fault adopter therefore sees the
+# retired-path diagnostic first; ADR 0224 amendment 2026-11-17 (#1977 A-3).
+# BEGIN early-retired-caller-scan
+scan_retired_callers
+echo "ok - no retired Renovate fragment-writer path remains in workflows"
+# END early-retired-caller-scan
+
 # --- the generated set moves as one commit (verJSON/.github #1369) ---------
 #
 # This suite, the renderer, the changelog caller, the PR gate and the release
@@ -7948,7 +7956,7 @@ diff -q "$work/after" "$fixture_root/case/CHANGELOG.md" >/dev/null \
 if python3 "$contract" render-next --repo-root "$fixture_root/case" >/dev/null 2>&1; then
   fail "render-next succeeded on an emptied NEXT/; the guard above is now dead code"
 fi
-scan_retired_callers
+# Retired-caller scan runs once up front (#1977 A-3); do not repeat it here.
 echo "ok - a real release produces exactly the state asserted above"
 EOF
 }
