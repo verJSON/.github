@@ -206,6 +206,9 @@ jobs:
           fi
           export QR_PROVIDER="$provider"
           export QR_MODEL="$model"
+          mkdir -p "$RUNNER_TEMP/quality-review"
+          export REPORT_PATH="$RUNNER_TEMP/quality-review/report.json"
+          export COMMENT_PATH="$RUNNER_TEMP/quality-review/comment.md"
           set +e
           # -I ignores PYTHONPATH; inject the contract scripts dir explicitly.
           summary="$(python3 -I - <<'PY'
@@ -216,6 +219,7 @@ jobs:
           scripts = Path(os.environ["GITHUB_WORKSPACE"]) / ".quality-review-contract" / "scripts"
           sys.path.insert(0, str(scripts))
           from quality_review.gitleaks import subprocess_scanner, verify_pinned_binary
+          from quality_review.report import render_comment, write_artifact
           from quality_review.run import run_review
 
           binary = Path(os.environ["GITLEAKS_PATH"])
@@ -230,6 +234,8 @@ jobs:
               model_override=model,
               scanner=scanner,
           )
+          write_artifact(os.environ["REPORT_PATH"], result)
+          Path(os.environ["COMMENT_PATH"]).write_text(render_comment(result), encoding="utf-8")
           print(result.summary)
           PY
           )"
@@ -259,10 +265,14 @@ jobs:
           set -euo pipefail
           # Do not read the contract checkout here: this step runs under
           # always() and must stay safe if the symlink refusal stopped checkout.
+          # Prefer the Evaluate-written report/comment when present (full payload).
           summary="${SUMMARY:-quality evidence not obtained: skipped}"
           mkdir -p "$RUNNER_TEMP/quality-review"
-          export SUMMARY="$summary"
-          python3 -I - <<'PY' >"$RUNNER_TEMP/quality-review/report.json"
+          report_path="$RUNNER_TEMP/quality-review/report.json"
+          comment_path="$RUNNER_TEMP/quality-review/comment.md"
+          if [ ! -f "$report_path" ]; then
+            export SUMMARY="$summary"
+            python3 -I - <<'PY' >"$report_path"
           import json, os
           summary = os.environ.get("SUMMARY") or "quality evidence not obtained: skipped"
           print(json.dumps({
@@ -274,8 +284,13 @@ jobs:
               "dropped": [],
           }, indent=2, sort_keys=True))
           PY
+          fi
           marker='<!-- quality-review:v1 -->'
-          body="$(printf '%s\n## Advisory quality review\n\n%s\n\n_Advisory only — never a required check (ADR 0270)._\n' "$marker" "$summary")"
+          if [ -f "$comment_path" ]; then
+            body="$(cat "$comment_path")"
+          else
+            body="$(printf '%s\n## Advisory quality review\n\n%s\n\n_Advisory only — never a required check (ADR 0270)._\n' "$marker" "$summary")"
+          fi
           set +e
           existing="$(gh api "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"
           comment_id="$(printf '%s' "$existing" | jq -r --arg m "$marker" '.[] | select((.body // "") | contains($m)) | .id' | head -n1)"

@@ -30,6 +30,8 @@ class QualityReviewWorkflowTest(unittest.TestCase):
         self.assertIn("GITLEAKS_VERSION:", text)
         self.assertIn("subprocess_scanner", text)
         self.assertIn("verify_pinned_binary", text)
+        self.assertIn("write_artifact", text)
+        self.assertIn("render_comment", text)
         # always() sticky/artifact must not import from the fixed checkout path
         # (scripts/ci-gate/fixed-path-checkout-refusal.test.py).
         write_step = text.split("- name: Write artifact and sticky comment", 1)[1]
