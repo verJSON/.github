@@ -160,12 +160,14 @@ the host until evidence is repaired or an independently approved rollback is dis
 Rollback is a new, independently approved `production` dispatch with `action: rollback`.
 Select the exact manifest identity recorded as `observedDeployedRelease` on the failed or
 interrupted attempt and supply that attempt's retained canonical receipt digest. The
-consumer evidence adapter retrieves the retained receipt by that identity; it is never a
-dispatcher-controlled filesystem path. The controller rejects a
-predecessor from another attempt, a changed baseline, or a receipt-digest mismatch. The
-same canary, sequential capacity floor, probes, and admission checks apply. If the exact
-baseline manifest or evidence is unavailable, stop and escalate; do not rebuild or use a
-tag as recovery authority.
+trusted parent transport retrieves the prior `runner-deployment-*-{admitted|progress|final}`
+Actions artifact and binds `rollbackSource` before host export; the evidence adapter must
+not call GitHub for that receipt and never receives `GITHUB_TOKEN` / `GH_TOKEN`. The digest
+is never a dispatcher-controlled filesystem path. The controller rejects a predecessor from
+another attempt, a changed baseline, or a receipt-digest mismatch. The same canary,
+sequential capacity floor, probes, and admission checks apply. If the exact baseline
+manifest or evidence is unavailable, stop and escalate; do not rebuild or use a tag as
+recovery authority.
 
 ## Credential rotation and incidents
 

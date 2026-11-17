@@ -516,6 +516,29 @@ grep -q 'control=True' "$root/scripts/container_deployment_controller.py"
 assert_absent -q 'SSH_AUTH_SOCK' "$root/scripts/container_deployment_controller.py"
 grep -q 'def complete_workflow_runs' "$root/scripts/container_deployment_transport.py"
 grep -q 'MAX_RUN_RECORDS' "$root/scripts/container_deployment_transport.py"
+grep -q 'deployment-receipt' "$root/scripts/container_deployment_transport.py"
+grep -q 'fetch_deployment_receipt' "$root/scripts/container_deployment_transport.py"
+grep -q '_run_deployment_receipt_transport' "$root/scripts/container_deployment_controller.py"
+# Parent transport owns rollback receipt retrieval; the evidence child never sees the digest flag.
+# Use assert_absent (file scan) — never pipe into grep -q (pipefail-sigpipe / #1430).
+assert_absent -q 'command.extend(("--rollback-receipt"' "$root/scripts/container_deployment_controller.py"
+# Evidence/probe child allowlist must stay credential-free.
+python3 - "$root/scripts/container_deployment_controller.py" <<'PY'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(
+    r"^def _child_environment\([\s\S]*?^    return environment\n",
+    text,
+    flags=re.M,
+)
+assert match, "_child_environment definition missing"
+block = match.group(0)
+assert "GITHUB_TOKEN" not in block and "GH_TOKEN" not in block, block
+assert '"PATH"' in block and "allowed" in block
+print("child environment allowlist omits GitHub tokens")
+PY
 if grep -vF 'actions/create-github-app-token@' "$workflow" \
   | grep -E 'doctl|ssh |droplet|--replicas|--standard|resize|create' >/dev/null; then
   echo "reusable workflow contains fleet mechanics or a spend-increasing operation" >&2

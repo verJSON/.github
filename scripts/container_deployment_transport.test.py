@@ -808,5 +808,215 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(api.opener.open.call_count, 1)
 
 
+def receipt_request(**overrides):
+    value = {
+        'schemaVersion': 1,
+        'operation': 'deployment-receipt',
+        'issuedAt': stamp(NOW - 1),
+        'expiresAt': stamp(NOW + 60),
+        'github': {'repository': 'Verjson/verjson-github-runner', 'repositoryId': 42},
+        'receiptDigest': 'sha256:' + 'a' * 64,
+        'purpose': 'rollback',
+        'sourceAttemptId': '9001.1',
+        'retainedReceiptAuthority': None,
+    }
+    value.update(overrides)
+    return value
+
+
+def failed_receipt_chain():
+    controller_spec = importlib.util.spec_from_file_location(
+        'container_deployment_controller_for_receipt',
+        ROOT / 'container_deployment_controller.test.py',
+    )
+    controller_test = importlib.util.module_from_spec(controller_spec)
+    sys.modules[controller_spec.name] = controller_test
+    controller_spec.loader.exec_module(controller_test)
+    c = controller_test.controller
+    candidate = controller_test.evidence()
+    plan = c.build_plan(controller_test.configuration(), candidate, 'production')
+    admitted = c.admitted_receipt(
+        plan, controller_test.configuration(), candidate, controller_test.FakeClock().now()
+    )
+    failed = c._next_revision(
+        admitted,
+        outcome='failed',
+        runners=[],
+        completed_at='2026-08-14T00:01:00Z',
+        failure='canary failed',
+    )
+    return [admitted, failed], c.receipt_digest(failed)
+
+
+def receipt_archive(chain, prefix='deployment-receipts/'):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w') as archive:
+        for receipt in chain:
+            archive.writestr(
+                f"{prefix}revision-{receipt['revision']:04d}.json",
+                t.canonical(receipt),
+            )
+    return output.getvalue()
+
+
+class ReceiptAPI:
+    def __init__(self, value, chain, artifact_name='runner-deployment-9001-1-admitted',
+                 artifact_id=501, expired=False, extra_artifacts=None):
+        self.value = value
+        self.chain = chain
+        self.calls = []
+        self.archive = receipt_archive(chain)
+        self.artifact = {
+            'id': artifact_id,
+            'name': artifact_name,
+            'expired': expired,
+            'digest': t.digest(self.archive),
+            'workflow_run': {'id': 9001},
+        }
+        self.artifacts = [self.artifact]
+        if extra_artifacts:
+            self.artifacts.extend(extra_artifacts)
+        self.repository = {
+            'id': value['github']['repositoryId'],
+            'full_name': value['github']['repository'],
+        }
+
+    def call(self, method, path, token, body=None, binary=False):
+        self.calls.append((method, path, token, body, binary))
+        if path.startswith('/repositories/'):
+            return self.repository
+        if path.endswith('/zip'):
+            return self.archive
+        if re.fullmatch(r'/repos/.+/actions/artifacts/[1-9][0-9]*', path):
+            artifact_id = int(path.rsplit('/', 1)[-1])
+            for artifact in self.artifacts:
+                if artifact['id'] == artifact_id:
+                    return artifact
+            raise AssertionError(path)
+        if '/artifacts' in path:
+            return {'total_count': len(self.artifacts), 'artifacts': self.artifacts}
+        raise AssertionError((method, path))
+
+
+class DeploymentReceiptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.chain, cls.receipt_digest = failed_receipt_chain()
+
+    def test_request_shape_rejects_probe_and_app_fields(self):
+        value = receipt_request(receiptDigest=self.receipt_digest)
+        t.validate_request(value, NOW)
+        value['github']['appId'] = 1
+        with self.assertRaisesRegex(t.TransportError, 'GitHub authority fields differ'):
+            t.validate_request(value, NOW)
+
+    def test_source_attempt_fetch_returns_matching_failed_receipt(self):
+        preflight = importlib.import_module('container_deployment_preflight')
+        value = receipt_request(receiptDigest=self.receipt_digest, sourceAttemptId='9001.1')
+        api = ReceiptAPI(value, self.chain)
+        result = t.fetch_deployment_receipt(api, value, 'job-token', clock=lambda: NOW)
+        self.assertEqual('passed', result['outcome'])
+        self.assertEqual(self.receipt_digest, preflight.receipt_digest(result['rollbackSource']))
+        self.assertEqual(501, result['artifactId'])
+        self.assertEqual('9001.1', result['sourceAttemptId'])
+        self.assertEqual(self.chain, result['retainedRevisions'])
+        self.assertTrue(any(call[2] == 'job-token' for call in api.calls))
+
+    def test_prefers_progress_artifact_over_admitted(self):
+        value = receipt_request(receiptDigest=self.receipt_digest, sourceAttemptId='9001.1')
+        archive = receipt_archive(self.chain)
+        progress = {
+            'id': 502,
+            'name': 'runner-deployment-9001-1-progress-1',
+            'expired': False,
+            'digest': t.digest(archive),
+        }
+        api = ReceiptAPI(value, self.chain, extra_artifacts=[progress])
+        api.archive = archive
+        result = t.fetch_deployment_receipt(api, value, 'job-token', clock=lambda: NOW)
+        self.assertEqual(502, result['artifactId'])
+        self.assertEqual('runner-deployment-9001-1-progress-1', result['artifactName'])
+
+    def test_wrong_digest_and_expired_and_ambiguous_fail_closed(self):
+        value = receipt_request(receiptDigest='sha256:' + 'b' * 64, sourceAttemptId='9001.1')
+        api = ReceiptAPI(value, self.chain)
+        with self.assertRaisesRegex(t.TransportError, 'requested deployment receipt was not found'):
+            t.fetch_deployment_receipt(api, value, 'job-token', clock=lambda: NOW)
+
+        expired = receipt_request(receiptDigest=self.receipt_digest, sourceAttemptId='9001.1')
+        api = ReceiptAPI(expired, self.chain, expired=True)
+        with self.assertRaisesRegex(t.TransportError, 'deployment receipt artifact was not found'):
+            t.fetch_deployment_receipt(api, expired, 'job-token', clock=lambda: NOW)
+
+        ambiguous = receipt_request(receiptDigest=self.receipt_digest, sourceAttemptId='9001.1')
+        archive = receipt_archive(self.chain)
+        twin = {
+            'id': 777,
+            'name': 'runner-deployment-9001-1-admitted',
+            'expired': False,
+            'digest': t.digest(archive),
+        }
+        api = ReceiptAPI(ambiguous, self.chain, extra_artifacts=[twin])
+        api.archive = archive
+        with self.assertRaisesRegex(t.TransportError, 'artifact identity is ambiguous'):
+            t.fetch_deployment_receipt(api, ambiguous, 'job-token', clock=lambda: NOW)
+
+    def test_missing_token_and_hostile_zip_fail_closed(self):
+        value = receipt_request(receiptDigest=self.receipt_digest)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with tempfile.TemporaryDirectory() as directory:
+                request_path = Path(directory) / 'request.json'
+                output_path = Path(directory) / 'out.json'
+                request_path.write_bytes(t.canonical(value))
+                with mock.patch.object(t, 'GitHubHTTP') as api_type, \
+                        mock.patch.object(t.time, 'time', return_value=NOW), \
+                        mock.patch.object(sys, 'argv', [
+                            'transport', '--request', str(request_path),
+                            '--output', str(output_path),
+                        ]):
+                    with self.assertRaisesRegex(t.TransportError, 'job-scoped GitHub token is required'):
+                        t.main()
+                    api_type.assert_not_called()
+
+        hostile = receipt_request(receiptDigest=self.receipt_digest, sourceAttemptId='9001.1')
+        api = ReceiptAPI(hostile, self.chain)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w') as archive:
+            archive.writestr('../escape.json', b'{}')
+        api.archive = output.getvalue()
+        api.artifact['digest'] = t.digest(api.archive)
+        with self.assertRaisesRegex(t.TransportError, 'archive layout is invalid'):
+            t.fetch_deployment_receipt(api, hostile, 'job-token', clock=lambda: NOW)
+
+    def test_digest_only_scan_and_redirect_keeps_token_off_storage(self):
+        value = receipt_request(
+            receiptDigest=self.receipt_digest,
+            sourceAttemptId=None,
+            retainedReceiptAuthority=None,
+        )
+        api = ReceiptAPI(value, self.chain)
+        result = t.fetch_deployment_receipt(api, value, 'job-token', clock=lambda: NOW)
+        self.assertEqual(501, result['artifactId'])
+
+        http = t.GitHubHTTP()
+        http.opener = mock.Mock()
+        redirect = HTTPError(
+            'https://api.github.com/repos/x/actions/artifacts/501/zip',
+            302,
+            'redirect',
+            {'Location': 'https://objects.githubusercontent.com/signed'},
+            None,
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = api.archive
+        http.opener.open.side_effect = [redirect, response]
+        raw = http.call('GET', '/repos/Verjson/verjson-github-runner/actions/artifacts/501/zip', 'job-token', binary=True)
+        self.assertEqual(api.archive, raw)
+        self.assertIsNone(http.opener.open.call_args_list[1].args[0].get_header('Authorization'))
+
+    def test_operation_is_omitted_from_app_permissions_table(self):
+        self.assertNotIn('deployment-receipt', t.PERMISSIONS)
+
+
 if __name__ == '__main__':
     unittest.main()

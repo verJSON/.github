@@ -599,6 +599,181 @@ class HostExportRequestTests(unittest.TestCase):
                 )
         export.assert_not_called()
 
+    def test_collect_evidence_fetches_rollback_receipt_without_child_credentials(self):
+        config = configuration()
+        candidate = evidence()
+        plan = controller.build_plan(config, candidate, "production")
+        admitted = controller.admitted_receipt(
+            plan, config, candidate, datetime(2026, 8, 14, tzinfo=timezone.utc)
+        )
+        failed = controller._next_revision(
+            admitted,
+            outcome="failed",
+            runners=[],
+            completed_at="2026-08-14T00:01:00Z",
+            failure="canary failed",
+        )
+        digest = controller.receipt_digest(failed)
+        adapter_evidence = copy.deepcopy(candidate)
+        adapter_evidence.pop("rollbackSource", None)
+        adapter_evidence["workflowRunAttempt"] = 1
+        observed_commands = []
+        observed_envs = []
+
+        def run_adapter(command, **kwargs):
+            observed_commands.append(list(command))
+            observed_envs.append(dict(kwargs.get("env") or {}))
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(adapter_evidence), stderr=""
+            )
+
+        def export(request):
+            result = copy.deepcopy(candidate["hostExport"])
+            result["requestDigest"] = controller.canonical_digest(request)
+            result["releaseManifest"] = {
+                "manifestIdentity": candidate["manifestIdentity"],
+                "manifestBytes": candidate["manifestBytes"],
+                "manifest": candidate["manifest"],
+                "attestation": candidate["attestation"],
+            }
+            return result
+
+        receipt_result = {
+            "schemaVersion": 1,
+            "requestDigest": "sha256:" + "0" * 64,
+            "outcome": "passed",
+            "rollbackSource": failed,
+            "retainedRevisions": [admitted, failed],
+            "artifactId": 501,
+            "artifactName": "runner-deployment-9001-1-admitted",
+            "artifactDigest": "sha256:" + "1" * 64,
+            "sourceAttemptId": "9001.1",
+        }
+
+        environment = {
+            **{name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV},
+            "GITHUB_TOKEN": "job-token",
+            "GITHUB_REPOSITORY": "Verjson/verjson-github-runner",
+            "GITHUB_REPOSITORY_ID": "42",
+            "GITHUB_RUN_ID": "9001",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_SHA": candidate["headCommit"],
+            "GITHUB_HEAD_TREE": candidate["headTree"],
+            "VERJSON_DEPLOYMENT_CONTRACT_REF": "a" * 40,
+            "PATH": "/usr/bin",
+        }
+
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(controller.subprocess, "run", side_effect=run_adapter), \
+                mock.patch.object(controller, "_run_host_export_transport", side_effect=export), \
+                mock.patch.object(
+                    controller,
+                    "_run_deployment_receipt_transport",
+                    return_value=receipt_result,
+                ) as receipt_transport:
+            # Fix requestDigest to match the built request inside collect.
+            def receipt_side_effect(request, timeout_seconds=120):
+                payload = copy.deepcopy(receipt_result)
+                payload["requestDigest"] = controller.canonical_digest(request)
+                return payload
+
+            receipt_transport.side_effect = receipt_side_effect
+            collected = controller._collect_evidence(
+                config,
+                candidate["manifestIdentity"],
+                "production",
+                rollback_receipt=digest,
+            )
+
+        self.assertEqual(failed, collected["rollbackSource"])
+        self.assertEqual(digest, collected["rollbackReceiptIdentity"])
+        self.assertEqual(1, len(observed_commands))
+        self.assertNotIn("--rollback-receipt", observed_commands[0])
+        self.assertNotIn("GITHUB_TOKEN", observed_envs[0])
+        self.assertNotIn("GH_TOKEN", observed_envs[0])
+        receipt_transport.assert_called_once()
+        request = receipt_transport.call_args.args[0]
+        self.assertEqual("deployment-receipt", request["operation"])
+        self.assertEqual(digest, request["receiptDigest"])
+        self.assertEqual({"repository", "repositoryId"}, set(request["github"]))
+
+    def test_collect_evidence_rejects_rollback_digest_mismatch_and_missing_token(self):
+        config = configuration()
+        candidate = evidence()
+        plan = controller.build_plan(config, candidate, "production")
+        admitted = controller.admitted_receipt(
+            plan, config, candidate, datetime(2026, 8, 14, tzinfo=timezone.utc)
+        )
+        failed = controller._next_revision(
+            admitted,
+            outcome="failed",
+            runners=[],
+            completed_at="2026-08-14T00:01:00Z",
+            failure="canary failed",
+        )
+        requested = "sha256:" + "c" * 64
+        candidate = copy.deepcopy(candidate)
+        candidate["workflowRunAttempt"] = 1
+        environment = {
+            **{name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV},
+            "GITHUB_TOKEN": "job-token",
+            "GITHUB_REPOSITORY": "Verjson/verjson-github-runner",
+            "GITHUB_REPOSITORY_ID": "42",
+            "GITHUB_RUN_ID": "9001",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_SHA": candidate["headCommit"],
+            "GITHUB_HEAD_TREE": candidate["headTree"],
+            "VERJSON_DEPLOYMENT_CONTRACT_REF": "a" * 40,
+            "PATH": "/usr/bin",
+        }
+
+        def receipt_side_effect(request, timeout_seconds=120):
+            return {
+                "schemaVersion": 1,
+                "requestDigest": controller.canonical_digest(request),
+                "outcome": "passed",
+                "rollbackSource": failed,
+            }
+
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(
+                    controller.ProcessAdapter, "_run", return_value=candidate
+                ), \
+                mock.patch.object(controller, "_run_host_export_transport") as export, \
+                mock.patch.object(
+                    controller,
+                    "_run_deployment_receipt_transport",
+                    side_effect=receipt_side_effect,
+                ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                "retrieved rollback receipt differs from requested digest",
+            ):
+                controller._collect_evidence(
+                    config,
+                    candidate["manifestIdentity"],
+                    "production",
+                    rollback_receipt=requested,
+                )
+        export.assert_not_called()
+
+        environment.pop("GITHUB_TOKEN")
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(controller.ProcessAdapter, "_run") as run, \
+                mock.patch.object(controller, "_run_host_export_transport") as export:
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                "job-scoped GitHub token is required for receipt retrieval",
+            ):
+                controller._collect_evidence(
+                    config,
+                    candidate["manifestIdentity"],
+                    "production",
+                    rollback_receipt=requested,
+                )
+        run.assert_not_called()
+        export.assert_not_called()
+
 
 class FakeAdapter:
     def __init__(
