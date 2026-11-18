@@ -128,3 +128,36 @@ name into the consumer file and still resolve the same values; it adds review
 surface without reducing access. Splitting `production` into per-purpose
 environments would reduce the inherited set and remains open under
 verjson-git-runners#197's Pulumi-managed environment policy.
+
+## 2026-11-18 amendment: operator diagnostics relay only allowlisted forms
+
+[#2250](https://github.com/verJSON/.github/issues/2250) /
+[#2251](https://github.com/verJSON/.github/pull/2251). Dry-run
+[44253156883](https://github.com/verJSON/verjson-git-runners/actions/runs/44253156883)
+hid the doctl auth failure behind `canonical host evidence transport failed`,
+and review of the first fix found its denylist could relay an uncaught
+exception repr carrying a command line, a signed or credentialed URL, or an
+HTTP body into the Actions log. The delivery ARB's second run (Claude and
+Codex seats) asked for an allowlist instead.
+
+Every diagnostic that leaves the transport, or that the controller relays
+from a child, now fits an allowlisted form defined once in
+`scripts/container_deployment_transport.py` and imported by the controller:
+
+- doctl output maps to fixed messages (`doctl access token is required`,
+  `doctl authentication rejected (HTTP 401)`, `doctl API request rejected
+  (HTTP <status>)`, `doctl probe failed`); doctl's own text is never relayed.
+- The CLI's last `✗`-marked error line, an adapter command's first
+  `::error::` line, and the transport's own `deployment transport: `-marked
+  exit line relay only as short plain prose: no URL, query, assignment, double
+  quote, brace, command flag, token-shaped run, credential marker, or line of a
+  provisioned secret. An unmarked or nonconforming line relays nothing and is
+  never replaced by an earlier line; any traceback withholds the transport's
+  output entirely.
+
+This supersedes the "one sanitized CLI/adapter stderr line" relay detail
+recorded with [ADR 0280](../0280-host-export-node-cli-stderr-delivery-arb/README.md).
+The secret storage, routing and echo-rejection decisions above are unchanged.
+Evidence: the controller and transport suites, including a test that runs
+the real transport process, plus a mutation table in which removing any one of
+27 guards fails a test.

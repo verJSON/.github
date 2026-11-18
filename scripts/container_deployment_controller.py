@@ -18,6 +18,10 @@ from typing import Any
 # Workflows start this script with `python3 -I`, which leaves its own directory
 # off the module path; the sibling it imports lives there.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from container_deployment_transport import (  # noqa: E402
+    is_relayable_diagnostic,
+    transport_failure_line,
+)
 from container_deployment_preflight import (  # noqa: E402
     PreflightError,
     receipt_digest,
@@ -1630,21 +1634,16 @@ class ProcessAdapter:
         try:
             completed = cls._invoke(command, timeout_seconds=timeout_seconds)
         except subprocess.CalledProcessError as error:
-            # evidenceCommand/probeCommand print ::error:: lines; relay one short
-            # sanitized line instead of the opaque CalledProcessError repr
-            # (dry-run 44236464509).
-            detail = (error.stderr or "").strip()
-            line = detail.splitlines()[0] if detail else ""
-            if line.startswith("::error::"):
-                line = line[len("::error::") :].strip()
-            if (
-                line
-                and "\n" not in line
-                and len(line) <= 200
-                and "-----" not in line
-                and "Bearer" not in line
-            ):
-                raise DeploymentError(f"adapter command failed: {line}") from None
+            # evidenceCommand/probeCommand report failures as ::error:: lines;
+            # relay the first one, in the allowlisted diagnostic form, instead
+            # of the opaque CalledProcessError repr (dry-run 44236464509).
+            annotations = [
+                line.strip()[len("::error::") :].strip()
+                for line in (error.stderr or "").splitlines()
+                if line.strip().startswith("::error::")
+            ]
+            if annotations and is_relayable_diagnostic(annotations[0]):
+                raise DeploymentError(f"adapter command failed: {annotations[0]}") from None
             raise DeploymentError("adapter command failed") from None
         try:
             value = json.loads(completed.stdout)
@@ -1941,55 +1940,6 @@ def _build_host_export_request(
     }
 
 
-# Shorter secret lines (YAML keys, a lone brace) carry no credential and would
-# withhold ordinary diagnostics.
-MIN_SECRET_FRAGMENT_LENGTH = 8
-
-
-# Diagnostic shapes that can carry a credential or unvetted remote content even
-# without a known secret: signed or credentialed URLs, key=value credentials,
-# AWS/HTTP auth headers, execa/child_process command echoes, and HTTP bodies.
-UNSAFE_RELAY_PATTERN = re.compile(
-    r"https?://[^\s]*[?#@]"
-    r"|(?:token|signature|sig|key|password|secret|credential)s?\s*[:=]"
-    r"|x-amz-|authorization\s*:|command failed"
-    r"|^[\[{<]",
-    re.IGNORECASE,
-)
-
-
-def _public_transport_line(stderr: str | None) -> str | None:
-    """Return the transport's final stderr line when it is safe to relay.
-
-    The transport reports a vetted failure as its last line (``SystemExit``).
-    The whole blob used to have to be a single line, so a preceding warning
-    hid that diagnostic (dry-run 44253156883). Any traceback, including an
-    exception group, ends in an unvetted exception repr that can carry a
-    command line, so its presence withholds everything; an unsafe final line
-    is withheld rather than replaced by an earlier, unrelated one.
-    """
-    text = (stderr or "").strip()
-    if not text or "Traceback (most recent call last)" in text:
-        return None
-    line = text.splitlines()[-1].strip()
-    fragments = (
-        part.strip()
-        for name in HOST_EXPORT_SECRET_ENV
-        for part in os.environ.get(name, "").splitlines()
-        if len(part.strip()) >= MIN_SECRET_FRAGMENT_LENGTH
-    )
-    if (
-        len(line) > 200
-        or not line.isprintable()
-        or "-----" in line
-        or "Bearer" in line
-        or UNSAFE_RELAY_PATTERN.search(line)
-        or any(fragment in line for fragment in fragments)
-    ):
-        return None
-    return line
-
-
 def _run_host_export_transport(
     request: dict[str, Any], timeout_seconds: int = ADMISSION_EVIDENCE_SECONDS
 ) -> dict[str, Any]:
@@ -2012,10 +1962,12 @@ def _run_host_export_transport(
                 timeout_seconds=timeout_seconds,
             )
         except subprocess.CalledProcessError as error:
-            # TransportExit messages are designed to omit secrets; relay one
-            # short line so operators see the doctl/CLI cause rather than the
-            # opaque wrapper (dry-runs 44232618346 and 44253156883).
-            line = _public_transport_line(error.stderr)
+            # Relay the transport's own allowlisted failure line so operators
+            # see the host-tool or CLI cause rather than the opaque wrapper (dry-runs
+            # 44232618346 and 44253156883).
+            line = transport_failure_line(
+                error.stderr, [os.environ.get(name, "") for name in HOST_EXPORT_SECRET_ENV]
+            )
             if line:
                 raise DeploymentError(
                     f"canonical host evidence transport failed: {line}"
