@@ -1859,7 +1859,13 @@ def _build_host_export_request(
     if not isinstance(contract_ref, str) or re.fullmatch(r"[0-9a-f]{40}", contract_ref) is None:
         raise DeploymentError("immutable deployment contract identity is unavailable")
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    release = _release(
+    # _release validates SemVer and pairs it with the manifest digest for
+    # _release_variant_digest; the host-export transport request must then omit
+    # releaseVersion so validate_request's exact key set matches
+    # (repository, assetId, manifestDigest, variant, imageDigest, sourceCommit,
+    # sourceRef, signerWorkflow, signerCommit). Extra keys fail closed as
+    # "release fields differ" before attestation (dry-run 44232618346).
+    release_identity = _release(
         manifest.get("releaseVersion"), identity, "host export release"
     )
     variant = expected.get("variant")
@@ -1871,18 +1877,19 @@ def _build_host_export_request(
     )
     if _REPOSITORY_IDENTITY.fullmatch(signed_source_repository) is None:
         raise DeploymentError("release manifest source repository is unavailable")
-    release.update({
+    release = {
         "repository": signed_source_repository,
         "assetId": asset_id,
+        "manifestDigest": identity,
         "variant": variant,
         "imageDigest": _release_variant_digest(
-            manifest, release, variant, "release manifest", manifest_bytes
+            manifest, release_identity, variant, "release manifest", manifest_bytes
         ),
         "sourceCommit": source_commit,
         "sourceRef": expected.get("sourceRef"),
         "signerWorkflow": expected.get("signerWorkflow"),
         "signerCommit": workflow.get("contractCommit"),
-    })
+    }
     host = {
         "project": fleet.get("project"),
         "doContext": do_context,
@@ -1937,6 +1944,22 @@ def _run_host_export_transport(
                 control=True,
                 timeout_seconds=timeout_seconds,
             )
+        except subprocess.CalledProcessError as error:
+            # TransportExit messages are designed to omit secrets; relay a single
+            # short line so operators see "release fields differ" rather than the
+            # opaque wrapper that hid dry-run 44232618346's root cause.
+            detail = (error.stderr or "").strip()
+            if (
+                detail
+                and "\n" not in detail
+                and len(detail) <= 200
+                and "-----" not in detail
+                and "Bearer" not in detail
+            ):
+                raise DeploymentError(
+                    f"canonical host evidence transport failed: {detail}"
+                ) from None
+            raise DeploymentError("canonical host evidence transport failed") from None
         except (OSError, subprocess.SubprocessError, DeploymentError):
             raise DeploymentError("canonical host evidence transport failed") from None
         result = _load(output_path)
