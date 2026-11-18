@@ -18,6 +18,10 @@ from typing import Any
 # Workflows start this script with `python3 -I`, which leaves its own directory
 # off the module path; the sibling it imports lives there.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from container_deployment_transport import (  # noqa: E402
+    is_relayable_diagnostic,
+    transport_failure_line,
+)
 from container_deployment_preflight import (  # noqa: E402
     PreflightError,
     receipt_digest,
@@ -51,6 +55,14 @@ HOST_EXPORT_SECRET_ENV = (
     "RUNNER_HOST_EVIDENCE_SSH_PRIVATE_KEY",
     "RUNNER_HOST_EVIDENCE_DOCTL_CONFIG",
     "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS",
+)
+# Every credential this process can hold; a relayed adapter diagnostic must
+# contain none of them.
+CONTROLLER_SECRET_ENV = (
+    *HOST_EXPORT_SECRET_ENV,
+    "DIGITALOCEAN_RUNNER_FLEET_TOKEN",
+    "GH_RUNNER_CONTROL_TOKEN",
+    "GITHUB_TOKEN",
 )
 
 
@@ -1630,21 +1642,17 @@ class ProcessAdapter:
         try:
             completed = cls._invoke(command, timeout_seconds=timeout_seconds)
         except subprocess.CalledProcessError as error:
-            # evidenceCommand/probeCommand print ::error:: lines; relay one short
-            # sanitized line instead of the opaque CalledProcessError repr
-            # (dry-run 44236464509).
-            detail = (error.stderr or "").strip()
-            line = detail.splitlines()[0] if detail else ""
-            if line.startswith("::error::"):
-                line = line[len("::error::") :].strip()
-            if (
-                line
-                and "\n" not in line
-                and len(line) <= 200
-                and "-----" not in line
-                and "Bearer" not in line
-            ):
-                raise DeploymentError(f"adapter command failed: {line}") from None
+            # evidenceCommand/probeCommand report failures as ::error:: lines;
+            # relay the first one, in the allowlisted diagnostic form, instead
+            # of the opaque CalledProcessError repr (dry-run 44236464509).
+            annotations = [
+                line.strip()[len("::error::") :].strip()
+                for line in (error.stderr or "").splitlines()
+                if line.strip().startswith("::error::")
+            ]
+            held_secrets = [os.environ.get(name, "") for name in CONTROLLER_SECRET_ENV]
+            if annotations and is_relayable_diagnostic(annotations[0], held_secrets):
+                raise DeploymentError(f"adapter command failed: {annotations[0]}") from None
             raise DeploymentError("adapter command failed") from None
         try:
             value = json.loads(completed.stdout)
@@ -1963,19 +1971,15 @@ def _run_host_export_transport(
                 timeout_seconds=timeout_seconds,
             )
         except subprocess.CalledProcessError as error:
-            # TransportExit messages are designed to omit secrets; relay a single
-            # short line so operators see "release fields differ" rather than the
-            # opaque wrapper that hid dry-run 44232618346's root cause.
-            detail = (error.stderr or "").strip()
-            if (
-                detail
-                and "\n" not in detail
-                and len(detail) <= 200
-                and "-----" not in detail
-                and "Bearer" not in detail
-            ):
+            # Relay the transport's own allowlisted failure line so operators
+            # see the host-tool or CLI cause rather than the opaque wrapper (dry-runs
+            # 44232618346 and 44253156883).
+            line = transport_failure_line(
+                error.stderr, [os.environ.get(name, "") for name in HOST_EXPORT_SECRET_ENV]
+            )
+            if line:
                 raise DeploymentError(
-                    f"canonical host evidence transport failed: {detail}"
+                    f"canonical host evidence transport failed: {line}"
                 ) from None
             raise DeploymentError("canonical host evidence transport failed") from None
         except (OSError, subprocess.SubprocessError, DeploymentError):

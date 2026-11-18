@@ -589,7 +589,7 @@ def _verify_host_baseline(raw, runner, value, token, home, run):
     ]
     try:
         completed = run(command, check=False, capture_output=True, text=True,
-                        env=environment, timeout=120)
+                        errors='replace', env=environment, timeout=120)
     except (OSError, subprocess.SubprocessError):
         raise TransportError('runner baseline attestation verification failed') from None
     require(completed.returncode == 0, 'runner baseline attestation verification failed')
@@ -602,6 +602,160 @@ def _verify_host_baseline(raw, runner, value, token, home, run):
         'signerCommit': workflow['contractCommit'],
         'verified': True,
     }
+
+
+# Operator diagnostics reach public Actions logs (.github#2250), so only
+# allowlisted forms are relayed. A line outside them is withheld, never
+# replaced by an earlier line.
+#
+# A relayable line is short plain prose: letters, digits, spaces and
+# . , : ; ' ( ) / _ + -. No URL, query, assignment, double quote, brace, @,
+# $, backtick or redirection fits, so no signed URL, HTTP body, key=value
+# credential or quoted command can be relayed.
+DIAGNOSTIC_FORM = re.compile(r"[A-Za-z0-9 .,:;'()/_+-]+")
+MAX_DIAGNOSTIC_LENGTH = 200
+COMMAND_FLAG = re.compile(r'(?:^|\s)--?[A-Za-z]')
+# Hyphens separate words (runner names such as verjson-git-runner-01), so they
+# end a run; token prefixes such as dop_v1_ and ghs_ use underscores. A run
+# mixing letters and digits is token-shaped from 20 characters; any run is from
+# 32, which no English word or ordinary identifier reaches.
+LONG_RUN = re.compile(r'[A-Za-z0-9_+/]{20,}')
+MAX_WORD_RUN = 32
+CREDENTIAL_MARKERS = ('-----', 'bearer', 'basic ', 'authorization', 'x-amz-')
+# Shorter secret lines (YAML keys, a lone brace) carry no credential.
+MIN_SECRET_FRAGMENT_LENGTH = 8
+# verjson-cli-cloud prefixes every error it logs with this marker (log.err).
+CLI_ERROR_MARKER = '\u2717'
+# Prefix the transport adds to a relayed CLI or doctl line.
+HOST_EXPORT_FAILURE = 'read-only runner host export failed'
+
+# The transport's deliberate exit line starts with this marker. The controller
+# relays only a marked line, never a warning or other interpreter output.
+DIAGNOSTIC_MARKER = 'deployment transport: '
+# doctl output is classified into fixed messages; its own text never relays.
+DOCTL_HTTP_STATUS = re.compile(r': ([1-5][0-9]{2}) \(request ')
+
+
+def _is_token_shaped(run):
+    if len(run) >= MAX_WORD_RUN:
+        return True
+    return any(c.isdigit() for c in run) and any(c.isalpha() for c in run)
+
+
+def _json_string_values(secret):
+    """String values of a JSON-shaped secret (e.g. a minified doctl config)."""
+    try:
+        parsed = json.loads(secret)
+    except (ValueError, RecursionError):
+        return []
+    pending, values = [parsed], []
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            values.append(item.strip())
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return values
+
+
+def _secret_fragments(sensitive_values):
+    """Substrings a relayed line must not contain.
+
+    A single-line secret is checked whole, whatever its length. Every line of a
+    secret (a key, a YAML or JSON config) of 8+ characters is checked, plus the
+    value of each ``key: value`` or ``key=value`` line, so a token embedded in
+    a config is caught on its own. Non-secret config values of 8+ characters,
+    such as a context name, are withheld too; that fails closed.
+    """
+    fragments = set()
+    for secret in sensitive_values:
+        if not isinstance(secret, str) or not secret.strip():
+            continue
+        lines = [part.strip() for part in secret.strip().splitlines()]
+        if len(lines) == 1:
+            fragments.add(lines[0])
+        fragments.update(
+            value for value in _json_string_values(secret)
+            if len(value) >= MIN_SECRET_FRAGMENT_LENGTH
+        )
+        for part in lines:
+            value = re.split(r'[:=]', part, maxsplit=1)[-1].strip().strip('"\',')
+            fragments.update(
+                candidate for candidate in (part, value)
+                if len(candidate) >= MIN_SECRET_FRAGMENT_LENGTH
+            )
+    return fragments
+
+
+def is_relayable_diagnostic(line, sensitive_values=(), max_length=MAX_DIAGNOSTIC_LENGTH):
+    """Return True when ``line`` fits the operator-diagnostic allowlist."""
+    lowered = line.lower()
+    fragments = _secret_fragments(sensitive_values)
+    return bool(
+        len(line) <= max_length
+        and DIAGNOSTIC_FORM.fullmatch(line)
+        and '//' not in line
+        and not COMMAND_FLAG.search(line)
+        and not any(_is_token_shaped(run) for run in LONG_RUN.findall(line))
+        and not any(marker in lowered for marker in CREDENTIAL_MARKERS)
+        and not any(fragment in line for fragment in fragments)
+    )
+
+
+def doctl_diagnostic(output):
+    """Classify a failed doctl call into a fixed operator message."""
+    text = (output or '').lower()
+    if 'access token is required' in text:
+        return 'doctl access token is required'
+    if 'unable to authenticate you' in text:
+        return 'doctl authentication rejected (HTTP 401)'
+    status = DOCTL_HTTP_STATUS.search(text)
+    if status:
+        return f'doctl API request rejected (HTTP {status.group(1)})'
+    return 'doctl probe failed'
+
+
+def cli_diagnostic(output, sensitive_values):
+    """Return the deployment CLI's last marked error line when it fits the allowlist.
+
+    The CLI marks every error it reports; an unmarked crash (a Node stack and
+    its version trailer) relays nothing. The bound leaves room for the relay
+    prefix, so a line accepted here also fits the controller's bound.
+    """
+    marked = [
+        line.strip()[len(CLI_ERROR_MARKER):].strip()
+        for line in (output or '').splitlines()
+        if line.strip().startswith(CLI_ERROR_MARKER)
+    ]
+    if not marked:
+        return None
+    line = marked[-1]
+    bound = MAX_DIAGNOSTIC_LENGTH - len(f'{HOST_EXPORT_FAILURE}: ')
+    return line if is_relayable_diagnostic(line, sensitive_values, bound) else None
+
+
+def transport_failure_line(stderr, sensitive_values):
+    """Return this transport's final failure line when the controller may relay it.
+
+    Any traceback, including an exception group, ends in an unvetted exception
+    repr that can carry a command line, so its presence withholds everything.
+    """
+    text = (stderr or '').strip()
+    if not text or 'Traceback (most recent call last)' in text:
+        return None
+    line = text.splitlines()[-1].strip()
+    if not line.startswith(DIAGNOSTIC_MARKER):
+        return None
+    detail = line[len(DIAGNOSTIC_MARKER):].strip()
+    return detail if is_relayable_diagnostic(detail, sensitive_values) else None
+
+
+def exit_message(failure):
+    """Marked exit line; only a TransportError message is ever surfaced."""
+    detail = str(failure) if isinstance(failure, TransportError) else 'deployment transport failed'
+    return DIAGNOSTIC_MARKER + detail
 
 
 def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock=time.time):
@@ -675,57 +829,29 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
                 probe = run(
                     [doctl_bin, 'projects', 'list', '--context', host['doContext'],
                      '--output', 'json'],
-                    check=False, capture_output=True, text=True,
+                    check=False, capture_output=True, text=True, errors='replace',
                     env=child_environment, timeout=60,
                 )
             except (OSError, subprocess.SubprocessError):
                 probe = None
             if probe is not None and probe.returncode != 0:
-                detail = (probe.stderr or probe.stdout or '').strip()
-                line = detail.splitlines()[0] if detail else ''
-                sensitive_values = (*secrets.values(), token)
-                if (
-                    line
-                    and len(line) <= 200
-                    and '-----' not in line
-                    and 'Bearer' not in line
-                    and all(
-                        not isinstance(secret, str) or secret not in line
-                        for secret in sensitive_values
-                    )
-                ):
-                    raise TransportError(
-                        f'read-only runner host export failed: {line}'
-                    ) from None
-                raise TransportError(
-                    'read-only runner host export failed: doctl authentication failed'
-                ) from None
+                # doctl --output json writes its error to stdout.
+                diagnostic = doctl_diagnostic(f'{probe.stderr}\n{probe.stdout}')
+                raise TransportError(f'{HOST_EXPORT_FAILURE}: {diagnostic}') from None
         try:
             completed = run(command, check=False, capture_output=True, text=True,
-                            env=child_environment, timeout=900)
+                            errors='replace', env=child_environment, timeout=900)
         except (OSError, subprocess.SubprocessError):
             raise TransportError('read-only runner host export failed') from None
         if completed.returncode != 0:
-            # CLI stderr is usually operator-facing; relay one short line only when
-            # it cannot contain the host-export secrets or installation token
-            # (dry-run 44236715751). Marker denylist alone is not enough — the
-            # same values later scanned in stdout must block relay here too.
-            detail = (completed.stderr or completed.stdout or '').strip()
-            line = detail.splitlines()[0] if detail else ''
-            sensitive_values = (*secrets.values(), token)
-            if (
-                line
-                and len(line) <= 200
-                and '-----' not in line
-                and 'Bearer' not in line
-                and all(
-                    not isinstance(secret, str) or secret not in line
-                    for secret in sensitive_values
-                )
-            ):
-                raise TransportError(
-                    f'read-only runner host export failed: {line}'
-                ) from None
+            # CLI stderr is usually operator-facing (dry-run 44236715751); relay
+            # its final line only in the allowlisted form and only when it
+            # carries none of the host-export secrets or installation token.
+            line = cli_diagnostic(
+                completed.stderr or completed.stdout, (*secrets.values(), token)
+            )
+            if line:
+                raise TransportError(f'{HOST_EXPORT_FAILURE}: {line}') from None
             raise TransportError('read-only runner host export failed') from None
         try:
             response_bytes = completed.stdout.encode('utf-8')
@@ -1177,4 +1303,4 @@ if __name__ == '__main__':
         main()
     except (TransportError, OSError, KeyError, TypeError) as failure:
         # Never relay HTTP bodies, JWTs, headers, signed asset URLs, or subprocess stderr.
-        raise SystemExit(str(failure) if isinstance(failure, TransportError) else 'deployment transport failed') from None
+        raise SystemExit(exit_message(failure)) from None

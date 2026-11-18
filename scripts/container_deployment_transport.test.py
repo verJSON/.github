@@ -527,7 +527,7 @@ class HostExportTests(unittest.TestCase):
             "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS": "preprovisioned-host-pin",
         }
 
-    def test_host_export_relays_single_line_cli_stderr_on_nonzero_exit(self):
+    def test_host_export_relays_final_cli_stderr_line_on_nonzero_exit(self):
         value = host_request()
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, self._host_export_cli_env(directory), clear=True):
@@ -544,7 +544,9 @@ class HostExportTests(unittest.TestCase):
                         },
                         run=mock.Mock(
                             return_value=subprocess.CompletedProcess(
-                                [], 1, stdout='', stderr='ssh: connection refused\nmore\n'
+                                [], 1, stdout='',
+                                stderr='(node:7) [DEP0040] DeprecationWarning: punycode\n'
+                                '\u2717 ssh: connection refused\n',
                             )
                         ),
                         clock=lambda: NOW,
@@ -553,12 +555,29 @@ class HostExportTests(unittest.TestCase):
     def test_host_export_suppresses_secret_bearing_cli_stderr(self):
         value = host_request()
         cases = (
-            'Authorization: Bearer leaked-token\n',
-            'doctl failed using doctl-read-token-secret\n',
-            'token mirror installation-read-token\n',
+            '\u2717 Authorization: Bearer leaked-token\n',
+            '\u2717 doctl failed using doctl-read-token-secret\n',
+            '\u2717 token mirror installation-read-token\n',
+            '\u2717 unexpected key b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n',
+            '\u2717 \x1b[31mleaked-token\x07\n',
+            '\u2717 ' + 'x' * 201 + '\n',
+            '\u2717 GET https://objects.example/asset?X-Amz-Signature=abc failed\n',
+            '\u2717 fetch https://api.example/v2/projects failed\n',
+            '\u2717 doctl failed: token=dop_v1_leaked\n',
+            '\u2717 upload failed x-amz-security-token: abc\n',
+            '\u2717 request rejected authorization: basic dXNlcjpwYXNz\n',
+            '\u2717 Command failed with exit code 1: doctl compute ssh --context default\n',
+            '\u2717 {"message": "Bad credentials", "documentation_url": "x"}\n',
+            '\u2717 unexpected response ghs16C7e42F292c6912E7710c838\n',
+            '\u2717 rejected ' + 'abcdefghijklmnopqrstuvwxyzABCDEF' + '\n',
         )
         with tempfile.TemporaryDirectory() as directory:
             env = self._host_export_cli_env(directory)
+            env['RUNNER_HOST_EVIDENCE_SSH_PRIVATE_KEY'] = (
+                '-----BEGIN OPENSSH PRIVATE KEY-----\n'
+                'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n'
+                '-----END OPENSSH PRIVATE KEY-----\n'
+            )
             for stderr in cases:
                 with self.subTest(stderr=stderr.strip()), mock.patch.dict(
                     os.environ, env, clear=True
@@ -586,6 +605,146 @@ class HostExportTests(unittest.TestCase):
                     self.assertNotIn('leaked-token', message)
                     self.assertNotIn('doctl-read-token-secret', message)
                     self.assertNotIn('installation-read-token', message)
+
+    def _decoding_run(self, results):
+        """Stub subprocess.run that decodes bytes exactly as text=True would."""
+        def run(command, **kwargs):
+            returncode, stderr, *stdout = results.pop(0)
+            errors = kwargs.get('errors', 'strict')
+            return subprocess.CompletedProcess(
+                command, returncode,
+                stdout=(stdout[0] if stdout else b'').decode('utf-8', errors),
+                stderr=stderr.decode('utf-8', errors),
+            )
+        return run
+
+    def _host_export_with(self, value, env, run):
+        with mock.patch.dict(os.environ, env, clear=True):
+            t.host_export(
+                value,
+                'installation-read-token',
+                {
+                    'manifestIdentity': value['release']['manifestDigest'],
+                    'manifestBytes': '{}',
+                },
+                run=run,
+                clock=lambda: NOW,
+            )
+
+    def test_host_export_relays_cli_line_containing_only_short_secret_lines(self):
+        value = host_request()
+        run = self._decoding_run([(1, '\u2717 release fields differ: auth: missing\n'.encode())])
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._host_export_cli_env(directory)
+            env['RUNNER_HOST_EVIDENCE_DOCTL_CONFIG'] = (
+                'auth:\n  access-token: doctl-read-token-secret\n'
+            )
+            with mock.patch.object(t.shutil, 'which', return_value=None), self.assertRaisesRegex(
+                t.TransportError,
+                exactly('read-only runner host export failed: release fields differ: auth: missing'),
+            ):
+                self._host_export_with(value, env, run)
+
+    def test_host_export_cli_relay_selects_marked_line_in_end_to_end_bound(self):
+        value = host_request()
+        prefix = 'read-only runner host export failed: '
+        longest = ('runner refused ' * 20)[: 200 - len(prefix) - 1] + 'x'
+        self.assertEqual(len(prefix + longest), 200)
+        cases = {
+            'runner name': (
+                '\u2717 Runner verjson-git-runner-01 is offline.\n',
+                prefix + 'Runner verjson-git-runner-01 is offline.',
+            ),
+            'marked line before trailer': (
+                '\u2717 release fields differ\nwarning: retry budget spent\n',
+                prefix + 'release fields differ',
+            ),
+            'last of several marked lines': (
+                '\u2717 runner retry refused\n\u2717 release fields differ\n',
+                prefix + 'release fields differ',
+            ),
+            'unmarked crash': (
+                'TypeError: x is undefined\n    at main (/cli/dist/cli.js:1:2)\nNode.js v24.22.2\n',
+                'read-only runner host export failed',
+            ),
+            'longest relayable': ('\u2717 ' + longest + '\n', prefix + longest),
+            'one past the bound': ('\u2717 ' + longest + 'x\n', 'read-only runner host export failed'),
+        }
+        for name, (stderr, message) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(t.shutil, 'which', return_value=None):
+                with self.assertRaisesRegex(t.TransportError, exactly(message)) as raised:
+                    self._host_export_with(
+                        value, self._host_export_cli_env(directory),
+                        self._decoding_run([(1, stderr.encode())]),
+                    )
+                relayed = t.transport_failure_line(t.exit_message(raised.exception), ())
+                self.assertEqual(relayed, message)
+
+    def test_deeply_nested_json_secret_does_not_crash_the_relay_check(self):
+        nested = '[' * 100_000 + ']' * 100_000
+        self.assertTrue(t.is_relayable_diagnostic('release fields differ', (nested,)))
+
+    def test_exit_message_marks_only_transport_errors(self):
+        self.assertEqual(
+            t.exit_message(t.TransportError('release fields differ')),
+            'deployment transport: release fields differ',
+        )
+        self.assertEqual(
+            t.exit_message(KeyError('dop_v1_leaked')),
+            'deployment transport: deployment transport failed',
+        )
+        self.assertEqual(t.transport_failure_line('deployment transport:  refused', ()), 'refused')
+
+    def test_host_export_classifies_doctl_failures_into_fixed_messages(self):
+        # Captured from doctl 1.164.0: JSON mode writes errors to stdout.
+        token_required = (
+            b'{"errors":[{"detail":"Unable to initialize DigitalOcean API client: '
+            b'access token is required. (hint: run \'doctl auth init\')"}]}\n'
+        )
+        cases = {
+            'json access token': ((1, b'', token_required), 'doctl access token is required'),
+            'non-utf8 banner': (
+                (1, b'\xff\xfe banner\n', token_required), 'doctl access token is required'
+            ),
+            'json 401': (
+                (1, b'', b'{"errors":[{"detail":"GET https://api.digitalocean.com/v2/projects'
+                         b'?page=1\\u0026per_page=200: 401 (request \\"a1b2\\") '
+                         b'Unable to authenticate you"}]}\n'),
+                'doctl authentication rejected (HTTP 401)',
+            ),
+            'text 403': (
+                (1, b'Error: GET https://api.digitalocean.com/v2/projects?page=1&per_page=200: '
+                    b'403 (request "c3d4") You are not authorized\n'),
+                'doctl API request rejected (HTTP 403)',
+            ),
+            'unrecognized': (
+                (1, b'Error: dop_v1_leakedtoken1234567890 is not valid\n'),
+                'doctl probe failed',
+            ),
+        }
+        value = host_request()
+        for name, (result, message) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(t.shutil, 'which', return_value='/usr/bin/doctl'):
+                with self.assertRaisesRegex(
+                    t.TransportError,
+                    exactly(f'read-only runner host export failed: {message}'),
+                ):
+                    self._host_export_with(
+                        value, self._host_export_cli_env(directory), self._decoding_run([result])
+                    )
+
+    def test_host_export_relays_final_cli_line_past_non_utf8_output(self):
+        value = host_request()
+        run = self._decoding_run([(1, b'\xff progress\n\xe2\x9c\x97 release fields differ\n')])
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._host_export_cli_env(directory)
+            with mock.patch.object(t.shutil, 'which', return_value=None), self.assertRaisesRegex(
+                t.TransportError,
+                exactly('read-only runner host export failed: release fields differ'),
+            ):
+                self._host_export_with(value, env, run)
 
 
 class HostExportJwtTests(unittest.TestCase):

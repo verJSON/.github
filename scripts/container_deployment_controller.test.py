@@ -693,7 +693,7 @@ class HostExportRequestTests(unittest.TestCase):
         request = {"schemaVersion": 1, "operation": "host-export"}
         environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
         failure = subprocess.CalledProcessError(
-            1, ["python3"], stderr="release fields differ\n"
+            1, ["python3"], stderr="deployment transport: release fields differ\n"
         )
         with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
             controller.ProcessAdapter, "_invoke", side_effect=failure
@@ -703,6 +703,119 @@ class HostExportRequestTests(unittest.TestCase):
                 r"^canonical host evidence transport failed: release fields differ$",
             ):
                 controller._run_host_export_transport(request)
+
+    def test_host_export_transport_relays_diagnostic_past_extra_stderr_lines(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        failure = subprocess.CalledProcessError(
+            1,
+            ["python3"],
+            stderr=(
+                "scripts/container_deployment_transport.py:9: DeprecationWarning: url.parse\n"
+                "  import urllib.parse\n"
+                "deployment transport: read-only runner host export failed: "
+                "doctl authentication failed\n"
+            ),
+        )
+        with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^canonical host evidence transport failed: "
+                r"read-only runner host export failed: doctl authentication failed$",
+            ):
+                controller._run_host_export_transport(request)
+
+    def test_host_export_transport_ignores_short_secret_lines(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        environment["RUNNER_HOST_EVIDENCE_DOCTL_CONFIG"] = (
+            "auth:\n  access-token: dop_v1_secretvalue\n"
+        )
+        failure = subprocess.CalledProcessError(
+            1, ["python3"],
+            stderr=(
+                "deployment transport: read-only runner host export failed: "
+                "release fields differ: auth: missing\n"
+            ),
+        )
+        with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^canonical host evidence transport failed: "
+                r"read-only runner host export failed: release fields differ: auth: missing$",
+            ):
+                controller._run_host_export_transport(request)
+
+    def test_host_export_transport_relays_real_transport_exit_line(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {
+            **{name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV},
+            "PATH": controller.os.environ.get("PATH", "/usr/bin:/bin"),
+        }
+        with mock.patch.dict(controller.os.environ, environment, clear=True):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^canonical host evidence transport failed: request fields differ$",
+            ) as raised:
+                controller._run_host_export_transport(request)
+        self.assertNotIn("deployment transport:", str(raised.exception))
+
+    def test_host_export_transport_withholds_unsafe_final_stderr(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        environment["RUNNER_HOST_EVIDENCE_KNOWN_HOSTS"] = (
+            "preprovisioned host pin\nsecond preprovisioned pin\n"
+        )
+        warning = "scripts/container_deployment_transport.py:9: DeprecationWarning: url.parse\n"
+        head = "deployment transport: read-only runner host export failed: "
+        cases = {
+            "traceback": (
+                warning
+                + "Traceback (most recent call last):\n"
+                + '  File "scripts/container_deployment_transport.py", line 1, in <module>\n'
+                + "subprocess.TimeoutExpired: Command '['doctl', '--access-token', "
+                + "'dop_v1_leaked']' timed out after 60 seconds\n"
+            ),
+            "exception group": (
+                "  + Exception Group Traceback (most recent call last):\n"
+                + "  | ExceptionGroup: transport (1 sub-exception)\n"
+                + "    | read-only runner host export failed: release fields differ\n"
+            ),
+            "forged marker after traceback": (
+                "Traceback (most recent call last):\n"
+                + '  File "scripts/container_deployment_transport.py", line 1, in <module>\n'
+                + "ValueError: remote said\n"
+                + "deployment transport: read-only runner host export failed: refused\n"
+            ),
+            "unmarked warning": warning,
+            "unmarked transport text": "read-only runner host export failed: refused\n",
+            "bearer": head + "Authorization Bearer abc\n",
+            "pem marker": head + "-----BEGIN RSA PRIVATE KEY-----\n",
+            "secret line": head + "preprovisioned host pin mismatch\n",
+            "token-shaped": head + "dop_v1_abc123def456ghi789jkl\n",
+            "control characters": head + "\x1b[31mrefused\x07\n",
+            "over-long final line": head + "x" * 170 + "\n",
+            "plain url": head + "fetch https://api.example/v2/projects failed\n",
+            "query": head + "asset?X-Amz-Signature=abc\n",
+            "credential assignment": head + "token=abc\n",
+            "auth header": head + "authorization: basic dXNlcjpwYXNz\n",
+            "command flag": head + "Command failed: doctl compute ssh --context default\n",
+            "http body": head + '{"message": "Not Found"}\n',
+        }
+        for name, stderr in cases.items():
+            failure = subprocess.CalledProcessError(1, ["python3"], stderr=stderr)
+            with self.subTest(name), mock.patch.dict(
+                controller.os.environ, environment, clear=True
+            ), mock.patch.object(controller.ProcessAdapter, "_invoke", side_effect=failure):
+                with self.assertRaisesRegex(
+                    controller.DeploymentError,
+                    r"^canonical host evidence transport failed$",
+                ):
+                    controller._run_host_export_transport(request)
 
     def test_preview_rejects_deployment_authorization_and_missing_run_identity(self):
         candidate = evidence()
@@ -2479,6 +2592,52 @@ class DeploymentExecutionTests(unittest.TestCase):
                 r"^adapter command failed: release asset bytes differ from the requested manifest identity$",
             ):
                 controller.ProcessAdapter._run(["python3", "adapter.py"])
+
+    def test_process_adapter_relays_only_allowlisted_error_annotation(self):
+        cases = {
+            "annotation after warning": (
+                "warning: slow disk\n::error::runner verjson-git-runner-01 is offline\n",
+                r"^adapter command failed: runner verjson-git-runner-01 is offline$",
+            ),
+            "unannotated line": ("probe exploded\n", r"^adapter command failed$"),
+            "signed url": (
+                "::error::fetch https://objects.example/a?X-Amz-Signature=abc failed\n",
+                r"^adapter command failed$",
+            ),
+            "token-shaped": ("::error::token ghs16C7e42F292c6912E7710c838\n", r"^adapter command failed$"),
+            "alphabet-only long run": (
+                "::error::rejected abcdefghijklmnopqrstuvwxyzABCDEF\n", r"^adapter command failed$"
+            ),
+            "controller-held secret": (
+                "::error::fleet token fleet token value leaked\n", r"^adapter command failed$"
+            ),
+            "short single-line secret": ("::error::token abc123\n", r"^adapter command failed$"),
+            "value from a config line": (
+                "::error::rejected dopsecret1\n", r"^adapter command failed$"
+            ),
+            "value from a one-line config": (
+                "::error::rejected sshsecret9\n", r"^adapter command failed$"
+            ),
+            "value from a minified json config": (
+                "::error::rejected jsonsecret7\n", r"^adapter command failed$"
+            ),
+        }
+        environment = {
+            "DIGITALOCEAN_RUNNER_FLEET_TOKEN": "fleet token value",
+            "GH_RUNNER_CONTROL_TOKEN": "abc123",
+            "RUNNER_HOST_EVIDENCE_DOCTL_CONFIG": "auth:\n  access-token: dopsecret1\n",
+            "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS": "pin: sshsecret9",
+            "GITHUB_TOKEN": '{"access-token":"jsonsecret7","context":"default"}',
+        }
+        for name, (stderr, expected) in cases.items():
+            failure = subprocess.CalledProcessError(1, ["python3", "adapter.py"], stderr=stderr)
+            with self.subTest(name), mock.patch.dict(
+                controller.os.environ, environment, clear=True
+            ), mock.patch.object(
+                controller.ProcessAdapter, "_invoke", side_effect=failure
+            ):
+                with self.assertRaisesRegex(controller.DeploymentError, expected):
+                    controller.ProcessAdapter._run(["python3", "adapter.py"])
 
     def test_process_adapter_suppresses_secret_bearing_adapter_stderr(self):
         failure = subprocess.CalledProcessError(
