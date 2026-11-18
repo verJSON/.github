@@ -102,6 +102,23 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
+# GitHub owner/repository names are ASCII case-insensitive identities (ADR 0213).
+# After the Verjson → verJSON rename, Actions reports the live display case while
+# reviewed deployment config may still carry the prior spelling.
+_REPOSITORY_IDENTITY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+
+
+def _same_repository(observed: object, configured: object) -> bool:
+    if not isinstance(observed, str) or not isinstance(configured, str):
+        return False
+    if (
+        _REPOSITORY_IDENTITY.fullmatch(observed) is None
+        or _REPOSITORY_IDENTITY.fullmatch(configured) is None
+    ):
+        return False
+    return observed.casefold() == configured.casefold()
+
+
 def _safe_token(value: Any, field: str, pattern: str) -> str:
     token = _text(value, field)
     if token.startswith("-") or re.fullmatch(pattern, token) is None:
@@ -220,7 +237,7 @@ def _validate_release_evidence(
     attestation = _object(evidence.get("attestation"), "attestation")
     if attestation.get("verified") is not True:
         raise DeploymentError("release attestation is not verified")
-    if attestation.get("repository") != expected.get("sourceRepository"):
+    if not _same_repository(attestation.get("repository"), expected.get("sourceRepository")):
         raise DeploymentError("release attestation source repository differs")
     if attestation.get("sourceRef") != expected.get("sourceRef"):
         raise DeploymentError("release attestation source ref differs")
@@ -239,7 +256,7 @@ def _validate_release_evidence(
         "release manifest", evidence.get("manifestBytes", MISSING_MANIFEST_BYTES),
     )
     source = _object(manifest.get("source"), "manifest.source")
-    if source.get("repository") != expected.get("sourceRepository"):
+    if not _same_repository(source.get("repository"), expected.get("sourceRepository")):
         raise DeploymentError("manifest source repository differs")
     release_evidence = _object(manifest.get("release"), "manifest.release")
     workflow = _object(release_evidence.get("workflow"), "manifest.release.workflow")
@@ -440,12 +457,12 @@ def _validate_host_export_binding(
         or host_request.get("purpose") != "baseline"
         or host_request.get("runnerNames") != fleet.get("runners")
         or request.get("configDigest") != canonical_digest(config)
-        or github.get("repository") != release_evidence.get("repository")
+        or not _same_repository(github.get("repository"), release_evidence.get("repository"))
         or github.get("repositoryId") != _host_observation_authority(evidence).get("repositoryId")
         or github.get("appId") != authority.get("appId")
         or github.get("installationId") != authority.get("installationId")
         or release_request.get("manifestDigest") != evidence.get("manifestIdentity")
-        or release_request.get("repository") != release_evidence.get("repository")
+        or not _same_repository(release_request.get("repository"), release_evidence.get("repository"))
         or release_request.get("sourceRef") != release_evidence.get("sourceRef")
         or release_request.get("signerWorkflow") != release_evidence.get("signerWorkflow")
         or result.get("schemaVersion") != 1
@@ -495,7 +512,7 @@ def _validate_host_export_binding(
         if (
             proof.get("verified") is not True
             or proof.get("manifestIdentity") != identity
-            or proof.get("repository") != source_attestation.get("repository")
+            or not _same_repository(proof.get("repository"), source_attestation.get("repository"))
             or proof.get("sourceRef") != source_attestation.get("sourceRef")
             or proof.get("signerWorkflow") != source_attestation.get("signerWorkflow")
             or proof.get("signerCommit") != workflow.get("contractCommit")
@@ -1812,8 +1829,15 @@ def _build_host_export_request(
     authority = _host_observation_authority(evidence)
     repository = _text(authority.get("repository"), "host observation repository")
     repository_id = authority.get("repositoryId")
-    if repository != expected.get("sourceRepository") or not isinstance(repository_id, int) or isinstance(repository_id, bool) or repository_id < 1:
+    expected_repository = expected.get("sourceRepository")
+    if (
+        not _same_repository(repository, expected_repository)
+        or not isinstance(repository_id, int)
+        or isinstance(repository_id, bool)
+        or repository_id < 1
+    ):
         raise DeploymentError("host observation repository identity is unavailable")
+    repository = _text(expected_repository, "expectedRelease.sourceRepository")
     attempt_id = plan.get("attemptId") if plan else None
     if not attempt_id:
         workflow_run_id = authority.get("workflowRunId")

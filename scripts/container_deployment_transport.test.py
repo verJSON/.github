@@ -577,6 +577,40 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(t.installation_token(api, value, 'explicit-app-jwt', NOW), 'installation-secret')
             self.assertEqual(api.call.call_args_list[2].args[3], {'repository_ids': [11], 'permissions': t.PERMISSIONS[operation]})
 
+    def test_renamed_org_display_case_matches_reviewed_repository_identity(self):
+        """Live API login/full_name may use verJSON while the request keeps Verjson."""
+        value = host_request()
+        owner, _, name = value['github']['repository'].partition('/')
+        self.assertEqual(owner, 'Verjson')
+        permissions = copy.deepcopy(t.PERMISSIONS[value['operation']])
+        api = mock.Mock(call=mock.Mock(side_effect=[
+            {'id': value['github']['appId'], 'permissions': permissions},
+            {
+                'id': value['github']['installationId'],
+                'app_id': value['github']['appId'],
+                'account': {'login': 'verJSON'},
+                'repository_selection': 'selected',
+                'suspended_at': None,
+                'permissions': permissions,
+            },
+            {
+                'permissions': permissions,
+                'token': 'installation-secret',
+                'expires_at': stamp(NOW + 3600),
+            },
+            {
+                'total_count': 1,
+                'repositories': [{
+                    'id': value['github']['repositoryId'],
+                    'full_name': f'verJSON/{name}',
+                }],
+            },
+        ]))
+        self.assertEqual(
+            t.installation_token(api, value, 'explicit-app-jwt', NOW),
+            'installation-secret',
+        )
+
     def test_missing_credential_does_not_fall_back_to_ambient_tokens(self):
         api = mock.Mock()
         with mock.patch.dict(os.environ, {'GH_TOKEN': 'broad', 'GH_RUNNER_CONTROL_TOKEN': 'control'}):
@@ -621,6 +655,20 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(set(kwargs['env']), {'PATH', 'HOME', 'GH_TOKEN', 'GH_HOST'})
         self.assertNotEqual(kwargs['env']['HOME'], '/untrusted')
         self.assertEqual(kwargs['env']['GH_TOKEN'], 'read-only-token')
+
+    def test_renamed_org_display_case_matches_release_api_repository_identity(self):
+        value, raw, metadata = self.fixture()
+        owner, _, name = value['github']['repository'].partition('/')
+        self.assertEqual(owner, 'Verjson')
+        api = mock.Mock(call=mock.Mock(side_effect=[
+            {'id': value['github']['repositoryId'], 'full_name': f'verJSON/{name}'},
+            metadata,
+            raw,
+        ]))
+        verifier = mock.Mock(return_value=mock.Mock(stdout=b'[{}]'))
+        result = t.fetch_manifest(api, value, 'read', run=verifier, clock=lambda: NOW)
+        self.assertEqual(result['manifestBytes'].encode(), raw)
+        verifier.assert_called_once()
 
     def test_renamed_repository_uses_stable_api_identity_and_historical_signed_source(self):
         raw = (Path(__file__).parent / 'fixtures/container-deployment/transport/runner-v0.2.1-manifest.json').read_bytes()
