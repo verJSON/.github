@@ -642,16 +642,57 @@ def _is_token_shaped(run):
     return any(c.isdigit() for c in run) and any(c.isalpha() for c in run)
 
 
+def _json_string_values(secret):
+    """String values of a JSON-shaped secret (e.g. a minified doctl config)."""
+    try:
+        parsed = json.loads(secret)
+    except (ValueError, RecursionError):
+        return []
+    pending, values = [parsed], []
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            values.append(item.strip())
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return values
+
+
+def _secret_fragments(sensitive_values):
+    """Substrings a relayed line must not contain.
+
+    A single-line secret is checked whole, whatever its length. Every line of a
+    secret (a key, a YAML or JSON config) of 8+ characters is checked, plus the
+    value of each ``key: value`` or ``key=value`` line, so a token embedded in
+    a config is caught on its own. Non-secret config values of 8+ characters,
+    such as a context name, are withheld too; that fails closed.
+    """
+    fragments = set()
+    for secret in sensitive_values:
+        if not isinstance(secret, str) or not secret.strip():
+            continue
+        lines = [part.strip() for part in secret.strip().splitlines()]
+        if len(lines) == 1:
+            fragments.add(lines[0])
+        fragments.update(
+            value for value in _json_string_values(secret)
+            if len(value) >= MIN_SECRET_FRAGMENT_LENGTH
+        )
+        for part in lines:
+            value = re.split(r'[:=]', part, maxsplit=1)[-1].strip().strip('"\',')
+            fragments.update(
+                candidate for candidate in (part, value)
+                if len(candidate) >= MIN_SECRET_FRAGMENT_LENGTH
+            )
+    return fragments
+
+
 def is_relayable_diagnostic(line, sensitive_values=(), max_length=MAX_DIAGNOSTIC_LENGTH):
     """Return True when ``line`` fits the operator-diagnostic allowlist."""
     lowered = line.lower()
-    fragments = (
-        part.strip()
-        for secret in sensitive_values
-        if isinstance(secret, str)
-        for part in secret.splitlines()
-        if len(part.strip()) >= MIN_SECRET_FRAGMENT_LENGTH
-    )
+    fragments = _secret_fragments(sensitive_values)
     return bool(
         len(line) <= max_length
         and DIAGNOSTIC_FORM.fullmatch(line)

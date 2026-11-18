@@ -2611,8 +2611,24 @@ class DeploymentExecutionTests(unittest.TestCase):
             "controller-held secret": (
                 "::error::fleet token fleet token value leaked\n", r"^adapter command failed$"
             ),
+            "short single-line secret": ("::error::token abc123\n", r"^adapter command failed$"),
+            "value from a config line": (
+                "::error::rejected dopsecret1\n", r"^adapter command failed$"
+            ),
+            "value from a one-line config": (
+                "::error::rejected sshsecret9\n", r"^adapter command failed$"
+            ),
+            "value from a minified json config": (
+                "::error::rejected jsonsecret7\n", r"^adapter command failed$"
+            ),
         }
-        environment = {"DIGITALOCEAN_RUNNER_FLEET_TOKEN": "fleet token value"}
+        environment = {
+            "DIGITALOCEAN_RUNNER_FLEET_TOKEN": "fleet token value",
+            "GH_RUNNER_CONTROL_TOKEN": "abc123",
+            "RUNNER_HOST_EVIDENCE_DOCTL_CONFIG": "auth:\n  access-token: dopsecret1\n",
+            "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS": "pin: sshsecret9",
+            "GITHUB_TOKEN": '{"access-token":"jsonsecret7","context":"default"}',
+        }
         for name, (stderr, expected) in cases.items():
             failure = subprocess.CalledProcessError(1, ["python3", "adapter.py"], stderr=stderr)
             with self.subTest(name), mock.patch.dict(

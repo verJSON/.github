@@ -681,6 +681,10 @@ class HostExportTests(unittest.TestCase):
                 relayed = t.transport_failure_line(t.exit_message(raised.exception), ())
                 self.assertEqual(relayed, message)
 
+    def test_deeply_nested_json_secret_does_not_crash_the_relay_check(self):
+        nested = '[' * 100_000 + ']' * 100_000
+        self.assertTrue(t.is_relayable_diagnostic('release fields differ', (nested,)))
+
     def test_exit_message_marks_only_transport_errors(self):
         self.assertEqual(
             t.exit_message(t.TransportError('release fields differ')),
