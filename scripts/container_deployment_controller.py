@@ -1627,7 +1627,25 @@ class ProcessAdapter:
             raise DeploymentError(
                 f"adapter timeout must be between 1 and {MAX_ADAPTER_JSON_SECONDS} seconds"
             )
-        completed = cls._invoke(command, timeout_seconds=timeout_seconds)
+        try:
+            completed = cls._invoke(command, timeout_seconds=timeout_seconds)
+        except subprocess.CalledProcessError as error:
+            # evidenceCommand/probeCommand print ::error:: lines; relay one short
+            # sanitized line instead of the opaque CalledProcessError repr
+            # (dry-run 44236464509).
+            detail = (error.stderr or "").strip()
+            line = detail.splitlines()[0] if detail else ""
+            if line.startswith("::error::"):
+                line = line[len("::error::") :].strip()
+            if (
+                line
+                and "\n" not in line
+                and len(line) <= 200
+                and "-----" not in line
+                and "Bearer" not in line
+            ):
+                raise DeploymentError(f"adapter command failed: {line}") from None
+            raise DeploymentError("adapter command failed") from None
         try:
             value = json.loads(completed.stdout)
         except json.JSONDecodeError as error:
