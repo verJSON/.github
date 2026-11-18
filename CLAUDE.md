@@ -89,13 +89,14 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1966](https://github.com/VerJSON/.github/issues/1966) — Isolate compatibility lanes and verified inputs; open, verified 2026-10-30 via `gh issue view`.
 
-- [#1945](https://github.com/verJSON/.github/issues/1945) — Producer + ADR 0260/#2055 live; ruleset `merge-admission-required` (27387670) now property-scoped (`verjson-merge-admission=enforced`, exclude `verjson-actions-state=paused`). Managed three (`.github`, `verjson-ci`, `verjson-git-runners`) enrolled after caller landings + bound-App SUCCESS (ci#357/#359, runners#267/#269). Broader org fleet + #1964 bypass-list retirement remain. Verified 2026-11-17 via live ruleset readback + `org-ruleset-conformance.py` `conformant`/`merge-admission-receipt=full`.
 
 - [#1948](https://github.com/verJSON/.github/issues/1948) — Container candidate versions are not yet bound to the selected release fragments; natively blocked by #1949. Verified open 2026-11-12 via live `gh issue view`.
 
 - [#1949](https://github.com/verJSON/.github/issues/1949) — Container promotion is not yet bound to the authorized release source. The interim guard from #1952 (merged as eadc23b5, ADR 0078 amendment 2026-11-12) rejects candidates whose source commit differs from the release source. Draft [ecosystem ADR 0015](https://github.com/VerJSON/verjson-docs/pull/35) carries the proposed governing decision; #1950 retains its pointer. Natively blocked by #1945. Verified open 2026-11-13 via live `gh issue view` and the native dependency API.
 
 - [#1763](https://github.com/verJSON/.github/issues/1763) — Authorization arm could wait indefinitely on a lost runner assignment. ADR 0230 watchdog is on org ruleset 20722935 at `gate-rearm@24db445f` (live `gh api` 2026-11-15); [#2114](https://github.com/verJSON/.github/pull/2114) bound the same watchdog on `ai-review-merge.yml`. Open until a live cancel receipt exists. Original stuck runs: verjson-payments 37352915856 / 38427381694.
+
+- [#2223](https://github.com/verJSON/.github/issues/2223) — Fleet merge-admission caller generation before `verjson-merge-admission=enforced`; residual of [#1945](https://github.com/verJSON/.github/issues/1945) after property-scoped ruleset `27387670` and managed-cohort enrollment. Verified 2026-11-18 via live ruleset readback + conformance.
 
 - [#2199](https://github.com/verJSON/.github/issues/2199) — Armed adopters still missing generated completeness callers after #1810 closed (mostly `ai-review-lifecycle-rearm.yml`); quiet expectation re-recorded in #2201. [#2200](https://github.com/verJSON/.github/issues/2200) tracks missing dispatchable admission callers: `verjson-vault` callers landed on main via [verjson-vault#4](https://github.com/verJSON/verjson-vault/pull/4); `verjson-authz` remains with `verjson-authz-pm` ([authz#218](https://github.com/verJSON/verjson-authz/issues/218)). Verified 2026-11-17 via live contents probe + vault PR merge.
 
