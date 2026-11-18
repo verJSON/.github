@@ -154,8 +154,11 @@ from a child, now fits an allowlisted form defined once in
   20 characters, any unbroken run from 32), credential marker, or secret the
   process holds (the host-evidence secrets, and for adapter lines also the
   fleet, runner-control and job tokens). A single-line secret is checked
-  whole at any length; every secret line of 8+ characters is checked, plus the
-  value of each `key: value` line and each string value of a JSON secret. Diagnostics naming a non-secret config
+  whole at any length; every secret line, `key: value` value and JSON string
+  value of 8+ characters is checked. Shorter values are not checked, because
+  config values such as `default`, `true` or `1` would otherwise withhold
+  nearly every diagnostic; production credential values are long tokens and
+  host pins. Diagnostics naming a non-secret config
   value of 8+ characters (such as the DigitalOcean context) are withheld too. An unmarked or nonconforming line relays nothing and is
   never replaced by an earlier line; any traceback withholds the transport's
   output entirely.
