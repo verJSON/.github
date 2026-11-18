@@ -78,6 +78,35 @@ def positive(value):
     return type(value) is int and value > 0
 
 
+# GitHub owner/repository names are ASCII case-insensitive identities (ADR 0213).
+# Live API `login` / `full_name` may use the post-rename display case while the
+# reviewed request still carries the prior spelling.
+_ORGANIZATION_IDENTITY = re.compile(r'[A-Za-z0-9._-]+')
+_REPOSITORY_IDENTITY = re.compile(r'[A-Za-z0-9._-]+/[A-Za-z0-9._-]+')
+
+
+def same_organization(observed, configured):
+    if not isinstance(observed, str) or not isinstance(configured, str):
+        return False
+    if (
+        _ORGANIZATION_IDENTITY.fullmatch(observed) is None
+        or _ORGANIZATION_IDENTITY.fullmatch(configured) is None
+    ):
+        return False
+    return observed.casefold() == configured.casefold()
+
+
+def same_repository(observed, configured):
+    if not isinstance(observed, str) or not isinstance(configured, str):
+        return False
+    if (
+        _REPOSITORY_IDENTITY.fullmatch(observed) is None
+        or _REPOSITORY_IDENTITY.fullmatch(configured) is None
+    ):
+        return False
+    return observed.casefold() == configured.casefold()
+
+
 def timestamp(value):
     require(isinstance(value, str) and value.endswith('Z'), 'timestamp must be UTC')
     try:
@@ -230,7 +259,8 @@ def validate_request(value, now):
                 or (host['purpose'] != 'post-update' and runner_name is None),
                 'host export runner selection differs from purpose')
     if operation == 'probe':
-        require(github['repository'] == CANARY_REPOSITORY, 'canary dispatch targets another repository')
+        require(same_repository(github['repository'], CANARY_REPOSITORY),
+                'canary dispatch targets another repository')
     return value
 
 
@@ -289,7 +319,7 @@ def installation_token(api, value, jwt, now):
             'App identity or permissions differ from the dedicated transport role')
     installation = api.call('GET', f"/app/installations/{authority['installationId']}", jwt)
     require(positive(installation.get('id')) and positive(installation.get('app_id')) and installation['id'] == authority['installationId'] and installation.get('app_id') == authority['appId']
-            and installation.get('account', {}).get('login') == authority['repository'].split('/')[0]
+            and same_organization(installation.get('account', {}).get('login'), authority['repository'].split('/')[0])
             and installation.get('repository_selection') == 'selected' and installation.get('suspended_at') is None
             and installation.get('permissions') == expected, 'installation identity or scope differs')
     minted = api.call('POST', f"/app/installations/{authority['installationId']}/access_tokens", jwt,
@@ -301,7 +331,9 @@ def installation_token(api, value, jwt, now):
     require(type(repositories.get('total_count')) is int and repositories['total_count'] == 1 and len(repositories.get('repositories', [])) == 1,
             'installation token is not scoped to one repository')
     repository = repositories['repositories'][0]
-    require(positive(repository.get('id')) and repository['id'] == authority['repositoryId'] and repository.get('full_name') == authority['repository'], 'installation token repository differs')
+    require(positive(repository.get('id')) and repository['id'] == authority['repositoryId']
+            and same_repository(repository.get('full_name'), authority['repository']),
+            'installation token repository differs')
     return token
 
 
@@ -343,7 +375,8 @@ def fetch_manifest(api, value, token, run=subprocess.run, clock=time.time):
     authority = value['github']
     repository = api.call('GET', f"/repositories/{authority['repositoryId']}", token)
     require(positive(repository.get('id')) and repository['id'] == authority['repositoryId']
-            and repository.get('full_name') == authority['repository'], 'release API repository identity differs')
+            and same_repository(repository.get('full_name'), authority['repository']),
+            'release API repository identity differs')
     path = f"/repos/{authority['repository']}/releases/assets/{release['assetId']}"
     metadata = api.call('GET', path, token)
     require(positive(metadata.get('id')) and metadata['id'] == release['assetId'] and metadata.get('name') == 'release-manifest.json'
@@ -352,7 +385,7 @@ def fetch_manifest(api, value, token, run=subprocess.run, clock=time.time):
     raw = api.call('GET', path, token, binary=True)
     require(len(raw) == metadata['size'] and digest(raw) == release['manifestDigest'], 'release asset bytes differ from reviewed digest')
     manifest = decode(raw)
-    require(manifest.get('source', {}).get('repository') == release['repository']
+    require(same_repository(manifest.get('source', {}).get('repository'), release['repository'])
             and manifest['source'].get('commit') == release['sourceCommit'], 'manifest source differs')
     workflow = manifest.get('release', {}).get('workflow', {})
     require(workflow.get('path') == '.github/workflows/container-release.yml' and workflow.get('contractCommit') == release['signerCommit'], 'manifest release signer differs')
@@ -518,7 +551,7 @@ def _verify_host_baseline(raw, runner, value, token, home, run):
     source = manifest.get('source')
     workflow = manifest.get('release', {}).get('workflow')
     require(isinstance(source, dict)
-            and source.get('repository') == value['release']['repository']
+            and same_repository(source.get('repository'), value['release']['repository'])
             and isinstance(source.get('commit'), str)
             and SHA.fullmatch(source['commit']),
             'runner baseline manifest source differs')
@@ -949,7 +982,8 @@ def fetch_deployment_receipt(api, value, token, *, clock=time.time):
     repository_id = value['github']['repositoryId']
     repo = api.call('GET', f'/repositories/{repository_id}', token)
     require(positive(repo.get('id')) and repo['id'] == repository_id
-            and repo.get('full_name') == repository, 'receipt API repository identity differs')
+            and same_repository(repo.get('full_name'), repository),
+            'receipt API repository identity differs')
     requested = value['receiptDigest']
     purpose = value['purpose']
     authority = value.get('retainedReceiptAuthority')
