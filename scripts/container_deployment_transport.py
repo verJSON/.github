@@ -669,16 +669,22 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
         except (OSError, subprocess.SubprocessError):
             raise TransportError('read-only runner host export failed') from None
         if completed.returncode != 0:
-            # CLI stderr is operator-facing (no secrets by contract); relay one
-            # short line so dry-runs surface DO/SSH causes instead of the opaque
-            # wrapper alone (dry-run 44236715751).
+            # CLI stderr is usually operator-facing; relay one short line only when
+            # it cannot contain the host-export secrets or installation token
+            # (dry-run 44236715751). Marker denylist alone is not enough — the
+            # same values later scanned in stdout must block relay here too.
             detail = (completed.stderr or completed.stdout or '').strip()
             line = detail.splitlines()[0] if detail else ''
+            sensitive_values = (*secrets.values(), token)
             if (
                 line
                 and len(line) <= 200
                 and '-----' not in line
                 and 'Bearer' not in line
+                and all(
+                    not isinstance(secret, str) or secret not in line
+                    for secret in sensitive_values
+                )
             ):
                 raise TransportError(
                     f'read-only runner host export failed: {line}'

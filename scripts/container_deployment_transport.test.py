@@ -552,31 +552,40 @@ class HostExportTests(unittest.TestCase):
 
     def test_host_export_suppresses_secret_bearing_cli_stderr(self):
         value = host_request()
+        cases = (
+            'Authorization: Bearer leaked-token\n',
+            'doctl failed using doctl-read-token-secret\n',
+            'token mirror installation-read-token\n',
+        )
         with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.dict(os.environ, self._host_export_cli_env(directory), clear=True):
-                with self.assertRaisesRegex(
-                    t.TransportError,
-                    exactly('read-only runner host export failed'),
-                ) as raised:
-                    t.host_export(
-                        value,
-                        'installation-read-token',
-                        {
-                            'manifestIdentity': value['release']['manifestDigest'],
-                            'manifestBytes': '{}',
-                        },
-                        run=mock.Mock(
-                            return_value=subprocess.CompletedProcess(
-                                [],
-                                1,
-                                stdout='',
-                                stderr='Authorization: Bearer leaked-token\n',
-                            )
-                        ),
-                        clock=lambda: NOW,
-                    )
-                self.assertNotIn('Bearer', str(raised.exception))
-                self.assertNotIn('leaked-token', str(raised.exception))
+            env = self._host_export_cli_env(directory)
+            for stderr in cases:
+                with self.subTest(stderr=stderr.strip()), mock.patch.dict(
+                    os.environ, env, clear=True
+                ):
+                    with self.assertRaisesRegex(
+                        t.TransportError,
+                        exactly('read-only runner host export failed'),
+                    ) as raised:
+                        t.host_export(
+                            value,
+                            'installation-read-token',
+                            {
+                                'manifestIdentity': value['release']['manifestDigest'],
+                                'manifestBytes': '{}',
+                            },
+                            run=mock.Mock(
+                                return_value=subprocess.CompletedProcess(
+                                    [], 1, stdout='', stderr=stderr
+                                )
+                            ),
+                            clock=lambda: NOW,
+                        )
+                    message = str(raised.exception)
+                    self.assertNotIn('Bearer', message)
+                    self.assertNotIn('leaked-token', message)
+                    self.assertNotIn('doctl-read-token-secret', message)
+                    self.assertNotIn('installation-read-token', message)
 
 
 class HostExportJwtTests(unittest.TestCase):
