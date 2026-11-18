@@ -150,8 +150,10 @@ from a child, now fits an allowlisted form defined once in
 - The CLI's last `✗`-marked error line, an adapter command's first
   `::error::` line, and the transport's own `deployment transport: `-marked
   exit line relay only as short plain prose: no URL, query, assignment, double
-  quote, brace, command flag, token-shaped run, credential marker, or line of a
-  provisioned secret. An unmarked or nonconforming line relays nothing and is
+  quote, brace, command flag, token-shaped run (letters mixed with digits from
+  20 characters, any unbroken run from 32), credential marker, or line of a
+  secret the process holds (the host-evidence secrets, and for adapter lines
+  also the fleet, runner-control and job tokens). An unmarked or nonconforming line relays nothing and is
   never replaced by an earlier line; any traceback withholds the transport's
   output entirely.
 
@@ -160,4 +162,7 @@ recorded with [ADR 0280](../0280-host-export-node-cli-stderr-delivery-arb/README
 The secret storage, routing and echo-rejection decisions above are unchanged.
 Evidence: the controller and transport suites, including a test that runs
 the real transport process, plus a mutation table in which removing any one of
-27 guards fails a test.
+29 guards fails a test. Accepted limit: plain words from an HTTP body
+(for example `Not Found`) or unflagged command words can relay, because they
+carry no credential shape; the CLI and adapter vocabularies are owned by
+verjson-cli-cloud and adopters, so this repository does not enumerate them.

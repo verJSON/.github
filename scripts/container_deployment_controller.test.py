@@ -2605,10 +2605,19 @@ class DeploymentExecutionTests(unittest.TestCase):
                 r"^adapter command failed$",
             ),
             "token-shaped": ("::error::token ghs16C7e42F292c6912E7710c838\n", r"^adapter command failed$"),
+            "alphabet-only long run": (
+                "::error::rejected abcdefghijklmnopqrstuvwxyzABCDEF\n", r"^adapter command failed$"
+            ),
+            "controller-held secret": (
+                "::error::fleet token fleet token value leaked\n", r"^adapter command failed$"
+            ),
         }
+        environment = {"DIGITALOCEAN_RUNNER_FLEET_TOKEN": "fleet token value"}
         for name, (stderr, expected) in cases.items():
             failure = subprocess.CalledProcessError(1, ["python3", "adapter.py"], stderr=stderr)
-            with self.subTest(name), mock.patch.object(
+            with self.subTest(name), mock.patch.dict(
+                controller.os.environ, environment, clear=True
+            ), mock.patch.object(
                 controller.ProcessAdapter, "_invoke", side_effect=failure
             ):
                 with self.assertRaisesRegex(controller.DeploymentError, expected):

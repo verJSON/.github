@@ -569,6 +569,7 @@ class HostExportTests(unittest.TestCase):
             '\u2717 Command failed with exit code 1: doctl compute ssh --context default\n',
             '\u2717 {"message": "Bad credentials", "documentation_url": "x"}\n',
             '\u2717 unexpected response ghs16C7e42F292c6912E7710c838\n',
+            '\u2717 rejected ' + 'abcdefghijklmnopqrstuvwxyzABCDEF' + '\n',
         )
         with tempfile.TemporaryDirectory() as directory:
             env = self._host_export_cli_env(directory)
@@ -647,7 +648,8 @@ class HostExportTests(unittest.TestCase):
     def test_host_export_cli_relay_selects_marked_line_in_end_to_end_bound(self):
         value = host_request()
         prefix = 'read-only runner host export failed: '
-        longest = 'r' * (200 - len(prefix))
+        longest = ('runner refused ' * 20)[: 200 - len(prefix) - 1] + 'x'
+        self.assertEqual(len(prefix + longest), 200)
         cases = {
             'runner name': (
                 '\u2717 Runner verjson-git-runner-01 is offline.\n',
@@ -666,7 +668,7 @@ class HostExportTests(unittest.TestCase):
                 'read-only runner host export failed',
             ),
             'longest relayable': ('\u2717 ' + longest + '\n', prefix + longest),
-            'one past the bound': ('\u2717 ' + longest + 'r\n', 'read-only runner host export failed'),
+            'one past the bound': ('\u2717 ' + longest + 'x\n', 'read-only runner host export failed'),
         }
         for name, (stderr, message) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as directory, \

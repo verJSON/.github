@@ -616,8 +616,11 @@ DIAGNOSTIC_FORM = re.compile(r"[A-Za-z0-9 .,:;'()/_+-]+")
 MAX_DIAGNOSTIC_LENGTH = 200
 COMMAND_FLAG = re.compile(r'(?:^|\s)--?[A-Za-z]')
 # Hyphens separate words (runner names such as verjson-git-runner-01), so they
-# end a run; token prefixes such as dop_v1_ and ghs_ use underscores.
+# end a run; token prefixes such as dop_v1_ and ghs_ use underscores. A run
+# mixing letters and digits is token-shaped from 20 characters; any run is from
+# 32, which no English word or ordinary identifier reaches.
 LONG_RUN = re.compile(r'[A-Za-z0-9_+/]{20,}')
+MAX_WORD_RUN = 32
 CREDENTIAL_MARKERS = ('-----', 'bearer', 'basic ', 'authorization', 'x-amz-')
 # Shorter secret lines (YAML keys, a lone brace) carry no credential.
 MIN_SECRET_FRAGMENT_LENGTH = 8
@@ -634,6 +637,8 @@ DOCTL_HTTP_STATUS = re.compile(r': ([1-5][0-9]{2}) \(request ')
 
 
 def _is_token_shaped(run):
+    if len(run) >= MAX_WORD_RUN:
+        return True
     return any(c.isdigit() for c in run) and any(c.isalpha() for c in run)
 
 

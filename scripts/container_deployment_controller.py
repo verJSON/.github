@@ -56,6 +56,14 @@ HOST_EXPORT_SECRET_ENV = (
     "RUNNER_HOST_EVIDENCE_DOCTL_CONFIG",
     "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS",
 )
+# Every credential this process can hold; a relayed adapter diagnostic must
+# contain none of them.
+CONTROLLER_SECRET_ENV = (
+    *HOST_EXPORT_SECRET_ENV,
+    "DIGITALOCEAN_RUNNER_FLEET_TOKEN",
+    "GH_RUNNER_CONTROL_TOKEN",
+    "GITHUB_TOKEN",
+)
 
 
 class DeploymentError(ValueError):
@@ -1642,7 +1650,8 @@ class ProcessAdapter:
                 for line in (error.stderr or "").splitlines()
                 if line.strip().startswith("::error::")
             ]
-            if annotations and is_relayable_diagnostic(annotations[0]):
+            held_secrets = [os.environ.get(name, "") for name in CONTROLLER_SECRET_ENV]
+            if annotations and is_relayable_diagnostic(annotations[0], held_secrets):
                 raise DeploymentError(f"adapter command failed: {annotations[0]}") from None
             raise DeploymentError("adapter command failed") from None
         try:

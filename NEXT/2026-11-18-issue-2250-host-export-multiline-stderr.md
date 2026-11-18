@@ -21,8 +21,8 @@ Host-export and adapter diagnostics now relay only allowlisted forms
 - The deployment CLI's last `✗`-marked error line and an adapter command's
   first `::error::` line relay only as short plain prose (letters, digits,
   spaces and `.,:;'()/_+-`): no URL, query, assignment, double quote, brace,
-  command flag, token-shaped run, credential marker, or line of a provisioned
-  secret. An unmarked crash relays nothing.
+  command flag, token-shaped run, credential marker, or line of a secret the
+  process holds. An unmarked crash relays nothing.
 - The transport marks its deliberate exit line `deployment transport: `; the
   controller relays only that marked line, in the same form, and nothing when
   any traceback is present.
