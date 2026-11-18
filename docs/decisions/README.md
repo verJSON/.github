@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0273](0273-runners-268-deployment-cli-2-1-delivery-arb/README.md) | 2026-11-17 | Delivery ARB archive for runners#268 deployment cli-cloud 2.1.0 repin |
 | [0272](0272-custody-credential-arb-ratification/README.md) | 2026-11-17 | Archive custody / credential ARB ratification for Gate R |
 | [0271](0271-arb-consensus-is-approval-authority/README.md) | 2026-11-17 | ARB consensus is the approval authority; personal CODEOWNERS are not |
 | [0270](0270-advisory-quality-review-provider-port/README.md) | 2026-11-17 | Advisory quality review through a provider-neutral evaluation port |
