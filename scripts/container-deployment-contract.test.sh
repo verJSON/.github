@@ -625,10 +625,18 @@ for job_name in ("dry-run", "deploy"):
     assert len(setup) == 1
     assert setup[0]["uses"] == "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1"
     assert setup[0]["with"]["node-version"] == "26.13.1"
+    doctl_install = [step for step in steps if step.get("name") == "Install doctl"]
+    assert len(doctl_install) == 1
+    assert doctl_install[0]["uses"] == (
+        "digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f"
+    )
+    assert doctl_install[0]["with"] == {"version": "2.6.0", "no_auth": True}
+    assert steps.index(doctl_install[0]) == steps.index(setup[0]) + 1
     binding = [step for step in steps if step.get("name") == "Verify caller binds this immutable contract"]
     assert len(binding) == 1
     acquisition = [step for step in steps if step.get("name") == "Acquire immutable deployment CLI"]
     assert len(acquisition) == 1
+    assert steps.index(doctl_install[0]) < steps.index(acquisition[0])
     assert "NPM_CONFIG_CACHE" in acquisition[0]["env"]
     cleanup = [step for step in steps if step.get("name") == "Remove deployment acquisition state"]
     assert len(cleanup) == 1

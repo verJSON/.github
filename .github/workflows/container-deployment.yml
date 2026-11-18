@@ -108,6 +108,11 @@ jobs:
         with:
           node-version: 26.13.1
           registry-url: https://npm.pkg.github.com
+      - name: Install doctl
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f
+        with:
+          version: 2.6.0
+          no_auth: true
       - name: Acquire immutable deployment CLI
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
@@ -224,6 +229,11 @@ jobs:
         with:
           node-version: 26.13.1
           registry-url: https://npm.pkg.github.com
+      - name: Install doctl
+        uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f
+        with:
+          version: 2.6.0
+          no_auth: true
       - name: Acquire immutable deployment CLI
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
