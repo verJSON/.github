@@ -237,8 +237,6 @@ def _validate_release_evidence(
     attestation = _object(evidence.get("attestation"), "attestation")
     if attestation.get("verified") is not True:
         raise DeploymentError("release attestation is not verified")
-    if not _same_repository(attestation.get("repository"), expected.get("sourceRepository")):
-        raise DeploymentError("release attestation source repository differs")
     if attestation.get("sourceRef") != expected.get("sourceRef"):
         raise DeploymentError("release attestation source ref differs")
     if attestation.get("signerWorkflow") != expected.get("signerWorkflow"):
@@ -256,8 +254,11 @@ def _validate_release_evidence(
         "release manifest", evidence.get("manifestBytes", MISSING_MANIFEST_BYTES),
     )
     source = _object(manifest.get("source"), "manifest.source")
-    if not _same_repository(source.get("repository"), expected.get("sourceRepository")):
-        raise DeploymentError("manifest source repository differs")
+    # Attestation --repo and manifest.source carry the historical signed identity;
+    # expectedRelease.sourceRepository is the live post-rename API identity used for
+    # host observation / asset download (see renamed-repository transport test).
+    if not _same_repository(attestation.get("repository"), source.get("repository")):
+        raise DeploymentError("release attestation source repository differs")
     release_evidence = _object(manifest.get("release"), "manifest.release")
     workflow = _object(release_evidence.get("workflow"), "manifest.release.workflow")
     signer_workflow = str(expected.get("signerWorkflow", ""))
@@ -451,13 +452,14 @@ def _validate_host_export_binding(
     github = _object(request.get("github"), "host export GitHub authority")
     release_request = _object(request.get("release"), "host export release")
     release_evidence = _object(evidence.get("attestation"), "release attestation")
+    expected = _object(config.get("expectedRelease"), "expectedRelease")
     if (
         request.get("operation") != "host-export"
         or request.get("lane") != fleet.get("lane")
         or host_request.get("purpose") != "baseline"
         or host_request.get("runnerNames") != fleet.get("runners")
         or request.get("configDigest") != canonical_digest(config)
-        or not _same_repository(github.get("repository"), release_evidence.get("repository"))
+        or not _same_repository(github.get("repository"), expected.get("sourceRepository"))
         or github.get("repositoryId") != _host_observation_authority(evidence).get("repositoryId")
         or github.get("appId") != authority.get("appId")
         or github.get("installationId") != authority.get("installationId")
@@ -1861,8 +1863,16 @@ def _build_host_export_request(
         manifest.get("releaseVersion"), identity, "host export release"
     )
     variant = expected.get("variant")
+    # release.repository is the historical signed source (manifest.source), which may
+    # differ from the post-rename live API identity in github.repository / expectedRelease
+    # (transport test_renamed_repository_uses_stable_api_identity_and_historical_signed_source).
+    signed_source_repository = _text(
+        source.get("repository"), "release manifest source repository"
+    )
+    if _REPOSITORY_IDENTITY.fullmatch(signed_source_repository) is None:
+        raise DeploymentError("release manifest source repository is unavailable")
     release.update({
-        "repository": expected.get("sourceRepository"),
+        "repository": signed_source_repository,
         "assetId": asset_id,
         "variant": variant,
         "imageDigest": _release_variant_digest(
