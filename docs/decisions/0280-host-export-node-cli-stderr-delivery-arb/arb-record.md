@@ -62,5 +62,8 @@ None.
 
 ## Amendment
 
-Head advanced to  after CI required  to assert Node  (mechanical; slate intent unchanged). Seats re-balloted ACCEPT. Seat A REVISE twice (suppression test; sensitive_values scan before relay);
-both remediated on `5ce5173b1188407d63ed748eddb038b4c2401d5b`.
+Head advanced to `5ce5173b1188407d63ed748eddb038b4c2401d5b` after CI
+required `container-deployment-contract.test.sh` to assert Node `26.13.1`
+(mechanical; slate intent unchanged). Seats re-balloted ACCEPT. Earlier Seat A
+REVISE items (suppression test; sensitive_values scan before relay) remain
+remediated on this tip.
