@@ -589,7 +589,7 @@ def _verify_host_baseline(raw, runner, value, token, home, run):
     ]
     try:
         completed = run(command, check=False, capture_output=True, text=True,
-                        env=environment, timeout=120)
+                        errors='replace', env=environment, timeout=120)
     except (OSError, subprocess.SubprocessError):
         raise TransportError('runner baseline attestation verification failed') from None
     require(completed.returncode == 0, 'runner baseline attestation verification failed')
@@ -602,6 +602,42 @@ def _verify_host_baseline(raw, runner, value, token, home, run):
         'signerCommit': workflow['contractCommit'],
         'verified': True,
     }
+
+
+# Shorter secret lines (YAML keys, a lone brace) carry no credential and would
+# withhold ordinary diagnostics.
+MIN_SECRET_FRAGMENT_LENGTH = 8
+
+
+def _operator_line(output, sensitive_values):
+    """Return the final line of child output when it is safe to relay.
+
+    doctl and the deployment CLI print their error last; a leading banner or
+    Node deprecation warning hid it when the first line was relayed
+    (.github#2250). An unsafe final line is withheld, never replaced by an
+    earlier one: an over-long line, control characters, credential markers, or
+    any line of a provisioned secret (multi-line keys are checked line by line).
+    """
+    text = (output or '').strip()
+    if not text:
+        return None
+    line = text.splitlines()[-1].strip()
+    fragments = (
+        part.strip()
+        for secret in sensitive_values
+        if isinstance(secret, str)
+        for part in secret.splitlines()
+        if len(part.strip()) >= MIN_SECRET_FRAGMENT_LENGTH
+    )
+    if (
+        len(line) > 200
+        or not line.isprintable()
+        or '-----' in line
+        or 'Bearer' in line
+        or any(fragment in line for fragment in fragments)
+    ):
+        return None
+    return line
 
 
 def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock=time.time):
@@ -678,29 +714,13 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
                     check=False, capture_output=True, text=True, errors='replace',
                     env=child_environment, timeout=60,
                 )
-            except UnicodeError:
-                # A non-UTF-8 doctl banner must not become an uncaught traceback.
-                # That traceback is multi-line, and the controller then hides the
-                # failure entirely (dry-run 44253156883).
-                raise TransportError(
-                    'read-only runner host export failed: doctl authentication failed'
-                ) from None
             except (OSError, subprocess.SubprocessError):
                 probe = None
             if probe is not None and probe.returncode != 0:
-                detail = (probe.stderr or probe.stdout or '').strip()
-                line = detail.splitlines()[0] if detail else ''
-                sensitive_values = (*secrets.values(), token)
-                if (
-                    line
-                    and len(line) <= 200
-                    and '-----' not in line
-                    and 'Bearer' not in line
-                    and all(
-                        not isinstance(secret, str) or secret not in line
-                        for secret in sensitive_values
-                    )
-                ):
+                line = _operator_line(
+                    probe.stderr or probe.stdout, (*secrets.values(), token)
+                )
+                if line:
                     raise TransportError(
                         f'read-only runner host export failed: {line}'
                     ) from None
@@ -710,26 +730,17 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
         try:
             completed = run(command, check=False, capture_output=True, text=True,
                             errors='replace', env=child_environment, timeout=900)
-        except (OSError, subprocess.SubprocessError, UnicodeError):
+        except (OSError, subprocess.SubprocessError):
             raise TransportError('read-only runner host export failed') from None
         if completed.returncode != 0:
             # CLI stderr is usually operator-facing; relay one short line only when
             # it cannot contain the host-export secrets or installation token
             # (dry-run 44236715751). Marker denylist alone is not enough — the
             # same values later scanned in stdout must block relay here too.
-            detail = (completed.stderr or completed.stdout or '').strip()
-            line = detail.splitlines()[0] if detail else ''
-            sensitive_values = (*secrets.values(), token)
-            if (
-                line
-                and len(line) <= 200
-                and '-----' not in line
-                and 'Bearer' not in line
-                and all(
-                    not isinstance(secret, str) or secret not in line
-                    for secret in sensitive_values
-                )
-            ):
+            line = _operator_line(
+                completed.stderr or completed.stdout, (*secrets.values(), token)
+            )
+            if line:
                 raise TransportError(
                     f'read-only runner host export failed: {line}'
                 ) from None
@@ -1182,6 +1193,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (TransportError, OSError, KeyError, TypeError, UnicodeError) as failure:
+    except (TransportError, OSError, KeyError, TypeError) as failure:
         # Never relay HTTP bodies, JWTs, headers, signed asset URLs, or subprocess stderr.
         raise SystemExit(str(failure) if isinstance(failure, TransportError) else 'deployment transport failed') from None

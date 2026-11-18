@@ -711,10 +711,8 @@ class HostExportRequestTests(unittest.TestCase):
             1,
             ["python3"],
             stderr=(
-                "DeprecationWarning: url.parse\n"
-                "Traceback (most recent call last):\n"
-                '  File "scripts/container_deployment_transport.py", line 1, in <module>\n'
-                "    raise TransportError\n"
+                "scripts/container_deployment_transport.py:9: DeprecationWarning: url.parse\n"
+                "  import urllib.parse\n"
                 "read-only runner host export failed: doctl authentication failed\n"
             ),
         )
@@ -728,24 +726,63 @@ class HostExportRequestTests(unittest.TestCase):
             ):
                 controller._run_host_export_transport(request)
 
-    def test_host_export_transport_hides_secret_bearing_stderr(self):
+    def test_host_export_transport_ignores_short_secret_lines(self):
         request = {"schemaVersion": 1, "operation": "host-export"}
         environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        environment["RUNNER_HOST_EVIDENCE_DOCTL_CONFIG"] = (
+            "{\n  \"access-token\": \"dop_v1_secretvalue\"\n}\n"
+        )
         failure = subprocess.CalledProcessError(
-            1,
-            ["python3"],
-            stderr="Authorization: Bearer leaked-token\n-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            1, ["python3"], stderr="host export response is invalid: {}\n"
         )
         with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
             controller.ProcessAdapter, "_invoke", side_effect=failure
         ):
             with self.assertRaisesRegex(
                 controller.DeploymentError,
-                r"^canonical host evidence transport failed$",
-            ) as raised:
+                r"^canonical host evidence transport failed: "
+                r"host export response is invalid: \{\}$",
+            ):
                 controller._run_host_export_transport(request)
-        self.assertNotIn("Bearer", str(raised.exception))
-        self.assertNotIn("BEGIN", str(raised.exception))
+
+    def test_host_export_transport_withholds_unsafe_final_stderr(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        environment["RUNNER_HOST_EVIDENCE_SSH_PRIVATE_KEY"] = (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n"
+            "-----END OPENSSH PRIVATE KEY-----\n"
+        )
+        warning = "scripts/container_deployment_transport.py:9: DeprecationWarning: url.parse\n"
+        cases = {
+            "traceback": (
+                warning
+                + "Traceback (most recent call last):\n"
+                + '  File "scripts/container_deployment_transport.py", line 1, in <module>\n'
+                + "subprocess.TimeoutExpired: Command '['doctl', '--access-token', "
+                + "'dop_v1_leaked']' timed out after 60 seconds\n"
+            ),
+            "exception group": (
+                "  + Exception Group Traceback (most recent call last):\n"
+                + "  | ExceptionGroup: transport (1 sub-exception)\n"
+                + "    | subprocess.TimeoutExpired: Command '['doctl', 'dop_v1_leaked']'\n"
+            ),
+            "bearer": "Authorization: Bearer dop_v1_leaked\n",
+            "pem marker": "-----BEGIN RSA PRIVATE KEY-----\n",
+            "secret key line": "unexpected key b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n",
+            "control characters": "\x1b[31mdop_v1_leaked\x07\n",
+            "over-long final line": warning + "  import urllib.parse\n" + "x" * 201 + "\n",
+        }
+        for name, stderr in cases.items():
+            failure = subprocess.CalledProcessError(1, ["python3"], stderr=stderr)
+            with self.subTest(name), mock.patch.dict(
+                controller.os.environ, environment, clear=True
+            ), mock.patch.object(controller.ProcessAdapter, "_invoke", side_effect=failure):
+                with self.assertRaisesRegex(
+                    controller.DeploymentError,
+                    r"^canonical host evidence transport failed$",
+                ):
+                    controller._run_host_export_transport(request)
 
     def test_preview_rejects_deployment_authorization_and_missing_run_identity(self):
         candidate = evidence()

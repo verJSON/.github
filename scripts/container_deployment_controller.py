@@ -1941,32 +1941,40 @@ def _build_host_export_request(
     }
 
 
-_TRANSPORT_STDERR_MARKERS = ("-----", "Bearer", "BEGIN ")
+# Shorter secret lines (YAML keys, a lone brace) carry no credential and would
+# withhold ordinary diagnostics.
+MIN_SECRET_FRAGMENT_LENGTH = 8
 
 
 def _public_transport_line(stderr: str | None) -> str | None:
-    """Pick one operator-safe diagnostic from transport stderr.
+    """Return the transport's final stderr line when it is safe to relay.
 
-    The whole blob used to have to be a single line. Dry-run 44253156883
-    dropped ``read-only runner host export failed: ...`` because a warning or
-    traceback shared stderr with that line. Secret-bearing lines and traceback
-    frames stay hidden; the last remaining diagnostic is the one operators see.
+    The transport reports a vetted failure as its last line (``SystemExit``).
+    The whole blob used to have to be a single line, so a preceding warning
+    hid that diagnostic (dry-run 44253156883). Any traceback, including an
+    exception group, ends in an unvetted exception repr that can carry a
+    command line, so its presence withholds everything; an unsafe final line
+    is withheld rather than replaced by an earlier, unrelated one.
     """
-    chosen = None
-    for raw in (stderr or "").splitlines():
-        line = raw.strip()
-        if (
-            not line
-            or len(line) > 200
-            or any(marker in line for marker in _TRANSPORT_STDERR_MARKERS)
-            or line.startswith("Traceback")
-            or line.startswith('File "')
-            or line.startswith("During handling")
-            or set(line) <= {"^"}
-        ):
-            continue
-        chosen = line
-    return chosen
+    text = (stderr or "").strip()
+    if not text or "Traceback (most recent call last)" in text:
+        return None
+    line = text.splitlines()[-1].strip()
+    fragments = (
+        part.strip()
+        for name in HOST_EXPORT_SECRET_ENV
+        for part in os.environ.get(name, "").splitlines()
+        if len(part.strip()) >= MIN_SECRET_FRAGMENT_LENGTH
+    )
+    if (
+        len(line) > 200
+        or not line.isprintable()
+        or "-----" in line
+        or "Bearer" in line
+        or any(fragment in line for fragment in fragments)
+    ):
+        return None
+    return line
 
 
 def _run_host_export_transport(

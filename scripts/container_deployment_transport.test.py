@@ -527,7 +527,7 @@ class HostExportTests(unittest.TestCase):
             "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS": "preprovisioned-host-pin",
         }
 
-    def test_host_export_relays_single_line_cli_stderr_on_nonzero_exit(self):
+    def test_host_export_relays_final_cli_stderr_line_on_nonzero_exit(self):
         value = host_request()
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, self._host_export_cli_env(directory), clear=True):
@@ -544,7 +544,9 @@ class HostExportTests(unittest.TestCase):
                         },
                         run=mock.Mock(
                             return_value=subprocess.CompletedProcess(
-                                [], 1, stdout='', stderr='ssh: connection refused\nmore\n'
+                                [], 1, stdout='',
+                                stderr='(node:7) [DEP0040] DeprecationWarning: punycode\n'
+                                'ssh: connection refused\n',
                             )
                         ),
                         clock=lambda: NOW,
@@ -556,9 +558,17 @@ class HostExportTests(unittest.TestCase):
             'Authorization: Bearer leaked-token\n',
             'doctl failed using doctl-read-token-secret\n',
             'token mirror installation-read-token\n',
+            'unexpected key b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n',
+            'ssh: refused\n\x1b[31mleaked-token\x07\n',
+            'ssh: connection refused\n' + 'x' * 201 + '\n',
         )
         with tempfile.TemporaryDirectory() as directory:
             env = self._host_export_cli_env(directory)
+            env['RUNNER_HOST_EVIDENCE_SSH_PRIVATE_KEY'] = (
+                '-----BEGIN OPENSSH PRIVATE KEY-----\n'
+                'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n'
+                '-----END OPENSSH PRIVATE KEY-----\n'
+            )
             for stderr in cases:
                 with self.subTest(stderr=stderr.strip()), mock.patch.dict(
                     os.environ, env, clear=True
@@ -587,36 +597,69 @@ class HostExportTests(unittest.TestCase):
                     self.assertNotIn('doctl-read-token-secret', message)
                     self.assertNotIn('installation-read-token', message)
 
-    def test_host_export_doctl_probe_decode_error_is_one_line(self):
-        value = host_request()
-        calls = []
-
+    def _decoding_run(self, results):
+        """Stub subprocess.run that decodes bytes exactly as text=True would."""
         def run(command, **kwargs):
-            calls.append(kwargs)
-            raise UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
+            returncode, stderr = results.pop(0)
+            text = stderr.decode('utf-8', kwargs.get('errors', 'strict'))
+            return subprocess.CompletedProcess(command, returncode, stdout='', stderr=text)
+        return run
 
+    def _host_export_with(self, value, env, run):
+        with mock.patch.dict(os.environ, env, clear=True):
+            t.host_export(
+                value,
+                'installation-read-token',
+                {
+                    'manifestIdentity': value['release']['manifestDigest'],
+                    'manifestBytes': '{}',
+                },
+                run=run,
+                clock=lambda: NOW,
+            )
+
+    def test_host_export_relays_cli_line_containing_only_short_secret_lines(self):
+        value = host_request()
+        run = self._decoding_run([(1, b'release fields differ: {}\n')])
         with tempfile.TemporaryDirectory() as directory:
             env = self._host_export_cli_env(directory)
-            env['PATH'] = '/usr/bin:/bin'
-            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
-                t.shutil, 'which', return_value='/usr/bin/doctl'
+            env['RUNNER_HOST_EVIDENCE_DOCTL_CONFIG'] = (
+                '{\n"access-token": "doctl-read-token-secret"\n}\n'
+            )
+            with mock.patch.object(t.shutil, 'which', return_value=None), self.assertRaisesRegex(
+                t.TransportError,
+                exactly('read-only runner host export failed: release fields differ: {}'),
             ):
+                self._host_export_with(value, env, run)
+
+    def test_host_export_relays_final_doctl_line_past_non_utf8_banner(self):
+        value = host_request()
+        run = self._decoding_run([
+            (1, b'\xff\xfe banner\nError: unable to initialize DigitalOcean API client: '
+                b'access token is required\n'),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._host_export_cli_env(directory)
+            with mock.patch.object(t.shutil, 'which', return_value='/usr/bin/doctl'):
                 with self.assertRaisesRegex(
                     t.TransportError,
-                    exactly('read-only runner host export failed: doctl authentication failed'),
+                    exactly(
+                        'read-only runner host export failed: Error: unable to initialize '
+                        'DigitalOcean API client: access token is required'
+                    ),
                 ):
-                    t.host_export(
-                        value,
-                        'installation-read-token',
-                        {
-                            'manifestIdentity': value['release']['manifestDigest'],
-                            'manifestBytes': '{}',
-                        },
-                        run=run,
-                        clock=lambda: NOW,
-                    )
-        self.assertEqual(calls[0].get('errors'), 'replace')
-        self.assertNotIn('\n', str(calls))
+                    self._host_export_with(value, env, run)
+
+    def test_host_export_relays_final_cli_line_past_non_utf8_output(self):
+        value = host_request()
+        run = self._decoding_run([(1, b'\xff progress\nrelease fields differ\n')])
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._host_export_cli_env(directory)
+            with mock.patch.object(t.shutil, 'which', return_value=None), self.assertRaisesRegex(
+                t.TransportError,
+                exactly('read-only runner host export failed: release fields differ'),
+            ):
+                self._host_export_with(value, env, run)
 
 
 class HostExportJwtTests(unittest.TestCase):
