@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -663,6 +664,42 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
         for name in ('LANG', 'LC_ALL', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
             if name in os.environ:
                 child_environment[name] = os.environ[name]
+        # Probe doctl with the same isolated HOME/config before the CLI so
+        # dry-runs surface auth/context failures (exit 1 "access token is
+        # required") instead of execa's opaque shortMessage only
+        # (.github#2244 / dry-run 44248683810). Skip when doctl is absent
+        # (unit tests clear PATH to /usr/bin:/bin).
+        doctl_bin = shutil.which('doctl', path=child_environment['PATH'])
+        if doctl_bin:
+            try:
+                probe = run(
+                    [doctl_bin, 'projects', 'list', '--context', host['doContext'],
+                     '--output', 'json'],
+                    check=False, capture_output=True, text=True,
+                    env=child_environment, timeout=60,
+                )
+            except (OSError, subprocess.SubprocessError):
+                probe = None
+            if probe is not None and probe.returncode != 0:
+                detail = (probe.stderr or probe.stdout or '').strip()
+                line = detail.splitlines()[0] if detail else ''
+                sensitive_values = (*secrets.values(), token)
+                if (
+                    line
+                    and len(line) <= 200
+                    and '-----' not in line
+                    and 'Bearer' not in line
+                    and all(
+                        not isinstance(secret, str) or secret not in line
+                        for secret in sensitive_values
+                    )
+                ):
+                    raise TransportError(
+                        f'read-only runner host export failed: {line}'
+                    ) from None
+                raise TransportError(
+                    'read-only runner host export failed: doctl authentication failed'
+                ) from None
         try:
             completed = run(command, check=False, capture_output=True, text=True,
                             env=child_environment, timeout=900)
