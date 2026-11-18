@@ -512,23 +512,25 @@ class HostExportTests(unittest.TestCase):
                     run=mock.Mock(), clock=lambda: NOW,
                 )
 
+    def _host_export_cli_env(self, directory):
+        root = Path(directory)
+        cli = root / "node_modules/.bin/verjson-cloud"
+        cli.parent.mkdir(parents=True)
+        cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        cli.chmod(0o700)
+        return {
+            "VERJSON_DEPLOYMENT_CLI": str(cli),
+            "VERJSON_DEPLOYMENT_CLI_ROOT": directory,
+            "RUNNER_TEMP": directory,
+            "RUNNER_HOST_EVIDENCE_SSH_PRIVATE_KEY": "ssh-private-key-secret",
+            "RUNNER_HOST_EVIDENCE_DOCTL_CONFIG": "doctl-read-token-secret",
+            "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS": "preprovisioned-host-pin",
+        }
+
     def test_host_export_relays_single_line_cli_stderr_on_nonzero_exit(self):
         value = host_request()
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            cli = root / "node_modules/.bin/verjson-cloud"
-            cli.parent.mkdir(parents=True)
-            cli.write_text("#!/bin/sh\n", encoding="utf-8")
-            cli.chmod(0o700)
-            environment = {
-                "VERJSON_DEPLOYMENT_CLI": str(cli),
-                "VERJSON_DEPLOYMENT_CLI_ROOT": directory,
-                "RUNNER_TEMP": directory,
-                "RUNNER_HOST_EVIDENCE_SSH_PRIVATE_KEY": "ssh-private-key-secret",
-                "RUNNER_HOST_EVIDENCE_DOCTL_CONFIG": "doctl-read-token-secret",
-                "RUNNER_HOST_EVIDENCE_KNOWN_HOSTS": "preprovisioned-host-pin",
-            }
-            with mock.patch.dict(os.environ, environment, clear=True):
+            with mock.patch.dict(os.environ, self._host_export_cli_env(directory), clear=True):
                 with self.assertRaisesRegex(
                     t.TransportError,
                     exactly('read-only runner host export failed: ssh: connection refused'),
@@ -547,6 +549,34 @@ class HostExportTests(unittest.TestCase):
                         ),
                         clock=lambda: NOW,
                     )
+
+    def test_host_export_suppresses_secret_bearing_cli_stderr(self):
+        value = host_request()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, self._host_export_cli_env(directory), clear=True):
+                with self.assertRaisesRegex(
+                    t.TransportError,
+                    exactly('read-only runner host export failed'),
+                ) as raised:
+                    t.host_export(
+                        value,
+                        'installation-read-token',
+                        {
+                            'manifestIdentity': value['release']['manifestDigest'],
+                            'manifestBytes': '{}',
+                        },
+                        run=mock.Mock(
+                            return_value=subprocess.CompletedProcess(
+                                [],
+                                1,
+                                stdout='',
+                                stderr='Authorization: Bearer leaked-token\n',
+                            )
+                        ),
+                        clock=lambda: NOW,
+                    )
+                self.assertNotIn('Bearer', str(raised.exception))
+                self.assertNotIn('leaked-token', str(raised.exception))
 
 
 class HostExportJwtTests(unittest.TestCase):

@@ -2480,6 +2480,22 @@ class DeploymentExecutionTests(unittest.TestCase):
             ):
                 controller.ProcessAdapter._run(["python3", "adapter.py"])
 
+    def test_process_adapter_suppresses_secret_bearing_adapter_stderr(self):
+        failure = subprocess.CalledProcessError(
+            1,
+            ["python3", "scripts/runner-deployment-evidence.py"],
+            stderr="::error::Authorization: Bearer leaked-token\n",
+        )
+        with mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError, r"^adapter command failed$"
+            ) as raised:
+                controller.ProcessAdapter._run(["python3", "adapter.py"])
+            self.assertNotIn("Bearer", str(raised.exception))
+            self.assertNotIn("leaked-token", str(raised.exception))
+
     def test_probe_adapter_maps_reviewed_probe_windows_to_process_timeouts(self):
         adapter = controller.ProcessAdapter(
             configuration(), configuration()["fleets"]["production"]
