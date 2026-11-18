@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0279](0279-runners-272-host-export-fields-adopter-arb/README.md) | 2026-11-18 | Delivery ARB archive for runners#272 host-export release-fields adopter |
 | [0278](0278-host-export-release-fields-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for .github#2232 host-export release fields |
 | [0277](0277-runners-271-release-repo-adopter-arb/README.md) | 2026-11-18 | Delivery ARB archive for runners#271 release.repository adopter regen |
 | [0276](0276-release-repo-historical-source-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for release.repository historical source split |
