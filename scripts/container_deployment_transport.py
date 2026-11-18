@@ -668,7 +668,22 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
                             env=child_environment, timeout=900)
         except (OSError, subprocess.SubprocessError):
             raise TransportError('read-only runner host export failed') from None
-        require(completed.returncode == 0, 'read-only runner host export failed')
+        if completed.returncode != 0:
+            # CLI stderr is operator-facing (no secrets by contract); relay one
+            # short line so dry-runs surface DO/SSH causes instead of the opaque
+            # wrapper alone (dry-run 44236715751).
+            detail = (completed.stderr or completed.stdout or '').strip()
+            line = detail.splitlines()[0] if detail else ''
+            if (
+                line
+                and len(line) <= 200
+                and '-----' not in line
+                and 'Bearer' not in line
+            ):
+                raise TransportError(
+                    f'read-only runner host export failed: {line}'
+                ) from None
+            raise TransportError('read-only runner host export failed') from None
         try:
             response_bytes = completed.stdout.encode('utf-8')
         except (AttributeError, UnicodeError):

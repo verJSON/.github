@@ -1,5 +1,14 @@
 # v5.0.0
 
+## Deployment workflow pins Node 26.13.1 and relays host-export CLI stderr
+
+`container-deployment.yml` now installs Node `26.13.1`, matching
+`@verjson/cli-cloud@2.1.0`'s engine floor. Transport relays one short sanitized
+`runner-host-evidence` stderr line on non-zero exit, and the controller relays
+the same shape from evidence/probe adapter failures (#2235).
+
+_Date: 2026-11-18; issue #2235_
+
 ## Host-export release omits releaseVersion for transport validation
 
 `scripts/container_deployment_controller.py` now builds the host-export

@@ -2465,6 +2465,21 @@ class DeploymentExecutionTests(unittest.TestCase):
                     ["python3", "adapter.py"], timeout_seconds=931
                 )
 
+    def test_process_adapter_relays_single_line_adapter_stderr(self):
+        failure = subprocess.CalledProcessError(
+            1,
+            ["python3", "scripts/runner-deployment-evidence.py"],
+            stderr="::error::release asset bytes differ from the requested manifest identity\n",
+        )
+        with mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^adapter command failed: release asset bytes differ from the requested manifest identity$",
+            ):
+                controller.ProcessAdapter._run(["python3", "adapter.py"])
+
     def test_probe_adapter_maps_reviewed_probe_windows_to_process_timeouts(self):
         adapter = controller.ProcessAdapter(
             configuration(), configuration()["fleets"]["production"]
