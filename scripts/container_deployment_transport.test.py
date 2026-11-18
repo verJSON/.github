@@ -561,6 +561,13 @@ class HostExportTests(unittest.TestCase):
             'unexpected key b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n',
             'ssh: refused\n\x1b[31mleaked-token\x07\n',
             'ssh: connection refused\n' + 'x' * 201 + '\n',
+            'GET https://objects.example/asset?X-Amz-Signature=abc failed\n',
+            'fetch https://user:pass@api.example/v2 failed\n',
+            'doctl failed: token=dop_v1_leaked\n',
+            'upload failed x-amz-security-token present\n',
+            'request rejected authorization: basic abc\n',
+            'Command failed with exit code 1: ssh -i key root@203.0.113.9\n',
+            '{"message": "Bad credentials", "documentation_url": "x"}\n',
         )
         with tempfile.TemporaryDirectory() as directory:
             env = self._host_export_cli_env(directory)

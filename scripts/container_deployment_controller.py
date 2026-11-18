@@ -1946,6 +1946,18 @@ def _build_host_export_request(
 MIN_SECRET_FRAGMENT_LENGTH = 8
 
 
+# Diagnostic shapes that can carry a credential or unvetted remote content even
+# without a known secret: signed or credentialed URLs, key=value credentials,
+# AWS/HTTP auth headers, execa/child_process command echoes, and HTTP bodies.
+UNSAFE_RELAY_PATTERN = re.compile(
+    r"https?://[^\s]*[?#@]"
+    r"|(?:token|signature|sig|key|password|secret|credential)s?\s*[:=]"
+    r"|x-amz-|authorization\s*:|command failed"
+    r"|^[\[{<]",
+    re.IGNORECASE,
+)
+
+
 def _public_transport_line(stderr: str | None) -> str | None:
     """Return the transport's final stderr line when it is safe to relay.
 
@@ -1971,6 +1983,7 @@ def _public_transport_line(stderr: str | None) -> str | None:
         or not line.isprintable()
         or "-----" in line
         or "Bearer" in line
+        or UNSAFE_RELAY_PATTERN.search(line)
         or any(fragment in line for fragment in fragments)
     ):
         return None

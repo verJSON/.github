@@ -12,9 +12,10 @@ doctl and CLI output, so a warning, banner, or non-UTF-8 decode traceback hid
 the real diagnostic.
 
 Both layers now relay only the final output line, and only when it is short,
-printable, free of credential markers, and contains no line of a provisioned
-secret; an unsafe final line is withheld rather than replaced by an earlier
-one. The controller withholds any traceback (including exception groups),
+printable, free of credential markers, signed or credentialed URLs,
+`key=value` credentials, auth headers, command echoes and HTTP bodies, and
+contains no line of a provisioned secret; an unsafe final line is withheld
+rather than replaced by an earlier one. The controller withholds any traceback (including exception groups),
 whose final exception repr can carry a command line. doctl, the deployment
 CLI, and baseline attestation output decode with replacement characters.
 

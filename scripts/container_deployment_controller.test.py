@@ -772,6 +772,15 @@ class HostExportRequestTests(unittest.TestCase):
             "secret key line": "unexpected key b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n",
             "control characters": "\x1b[31mdop_v1_leaked\x07\n",
             "over-long final line": warning + "  import urllib.parse\n" + "x" * 201 + "\n",
+            "signed url": (
+                "asset download failed: https://objects.example/asset?X-Amz-Signature=abc\n"
+            ),
+            "credentialed url": "fetch https://user:pass@api.example/v2 failed\n",
+            "credential assignment": "doctl failed: token=dop_v1_leaked\n",
+            "amz header": "upload failed x-amz-security-token present\n",
+            "authorization header": "request rejected authorization: basic abc\n",
+            "command echo": "Command failed with exit code 1: ssh -i key root@203.0.113.9\n",
+            "http body": '{"message": "Not Found", "documentation_url": "x"}\n',
         }
         for name, stderr in cases.items():
             failure = subprocess.CalledProcessError(1, ["python3"], stderr=stderr)
