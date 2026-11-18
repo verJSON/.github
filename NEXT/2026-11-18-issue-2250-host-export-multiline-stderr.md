@@ -33,4 +33,7 @@ characters. The controller imports the allowlist from the transport, which
 the generator emits and digest-checks beside it, so one definition governs
 both.
 
+ADR 0286 archives the delivery ARB that approved this change, so Gate R can
+cite it.
+
 Fixes #2250. Part of verJSON/verjson-git-runners#197.
