@@ -4,7 +4,7 @@
 - **Status:** Accepted — ratified by the Architecture Review Board
   (`APPROVED` in the [ARB chair record][arb-record]; run
   `arb-2236-host-export-node-cli-stderr-2026-11-18`; slate digest
-  `07791a4133e555b343cc9656b0c26e69dcf12eea521e0d43c00fa35c935b585c`).
+  `9a69604367f22f34eb663db9c29f31070bd3b1871328858bacc924bf9773faa6`).
 - **Related:**
   [verJSON/.github#2236](https://github.com/verJSON/.github/pull/2236),
   [verJSON/.github#2235](https://github.com/verJSON/.github/issues/2235),
