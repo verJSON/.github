@@ -358,7 +358,7 @@ def refresh_host_export_binding(candidate: dict, config: dict | None = None) -> 
         target_variant = target_images[0]["variant"]
     image = next(item for item in target_images if item["variant"] == target_variant)
     request["release"].update({
-        "repository": expected["sourceRepository"],
+        "repository": source["repository"],
         "assetId": candidate["releaseAssetId"],
         "manifestDigest": candidate["manifestIdentity"],
         "variant": target_variant,
@@ -394,7 +394,7 @@ def refresh_host_export_binding(candidate: dict, config: dict | None = None) -> 
         {
             "runnerName": runner["name"],
             "manifestIdentity": runner["manifestIdentity"],
-            "repository": expected["sourceRepository"],
+            "repository": source["repository"],
             "sourceRef": expected["sourceRef"],
             "signerWorkflow": expected["signerWorkflow"],
             "signerCommit": runner["releaseManifest"]["release"]["workflow"]["contractCommit"],
@@ -599,6 +599,68 @@ class HostExportRequestTests(unittest.TestCase):
         )
         self.assertEqual("9001.1", plan["attemptId"])
         self.assertIs(plan["preview"], True)
+
+
+    def test_renamed_repository_binds_live_api_identity_and_historical_signed_source(self):
+        """Repo rename: live API/config name differs from signed manifest source name.
+
+        Mirrors transport test_renamed_repository_uses_stable_api_identity_and_historical_signed_source:
+        github.repository uses the post-rename identity; release.repository keeps the
+        historical signed source so attestation verify --repo matches the sigstore subject.
+        """
+        config = configuration()
+        config["expectedRelease"]["sourceRepository"] = "Verjson/verjson-git-runners"
+        candidate = evidence()
+        candidate["manifest"]["source"]["repository"] = "Verjson/verjson-github-runner"
+        bind_manifest_bytes(
+            candidate,
+            json.dumps(candidate["manifest"], indent=2, sort_keys=True) + "\n",
+        )
+        candidate["attestation"]["repository"] = "Verjson/verjson-github-runner"
+        # Preview observation authority carries the live post-rename display case.
+        candidate["observationAuthority"] = {
+            "repository": "verJSON/verjson-git-runners",
+            "repositoryId": 1301436066,
+            "workflowRunId": 9001,
+            "workflowRunAttempt": 1,
+        }
+        candidate["preview"] = True
+        candidate.pop("authorization", None)
+
+        with mock.patch.dict(
+            controller.os.environ,
+            {"VERJSON_DEPLOYMENT_CONTRACT_REF": "a" * 40},
+            clear=False,
+        ):
+            request = controller._build_host_export_request(
+                config, candidate, "production"
+            )
+
+        self.assertEqual("Verjson/verjson-git-runners", request["github"]["repository"])
+        self.assertEqual(1301436066, request["github"]["repositoryId"])
+        self.assertEqual(
+            "Verjson/verjson-github-runner", request["release"]["repository"]
+        )
+
+        # Bind the built request into evidence the way collect-evidence would after
+        # a successful transport that attested the historical signed source.
+        candidate["hostExportRequest"] = request
+        candidate["hostExport"]["requestDigest"] = controller.canonical_digest(request)
+        candidate["attestation"] = {
+            **candidate["attestation"],
+            "repository": "Verjson/verjson-github-runner",
+            "verified": True,
+        }
+        for proof in candidate["hostExport"]["baselineAttestations"]:
+            proof["repository"] = "Verjson/verjson-github-runner"
+        plan = controller.build_plan(
+            config,
+            candidate,
+            "production",
+            preview=True,
+            deployment_contract_ref="a" * 40,
+        )
+        self.assertEqual("9001.1", plan["attemptId"])
 
     def test_preview_rejects_deployment_authorization_and_missing_run_identity(self):
         candidate = evidence()
