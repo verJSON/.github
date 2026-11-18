@@ -732,3 +732,28 @@ allowed value `enforced`, optional / unset means not enrolled) via
 this step. Property-based enrollment with `verjson-actions-state=paused`
 exclusion stays the Decision 2 wider path and is tracked under #1945 / #1990
 rollout residuals.
+
+## 2026-11-18 — Property enrollment for the managed cohort (#1945 closeout)
+
+Issue [#1945](https://github.com/verJSON/.github/issues/1945) acceptance for the
+organization contract is met:
+
+1. Production workflows/scripts no longer invoke `gh pr merge --admin` (inventory
+   retained under ADR 0269 / `no-owner-admin-merge.test.sh`).
+2. Org ruleset `merge-admission-required` (`27387670`) requires the bound-App
+   `merge-admission` context (`integration_id` 4528902) on enrolled repositories.
+3. Refusal matrix remains ADR 0257 / 0260 (Gates A/W/B/C/R); owner `--admin`
+   retirement is ADR 0269 with the manual C11 escape until [#1964](https://github.com/verJSON/.github/issues/1964).
+4. Rollout: after the `.github` canary (#1990), the ruleset was retargeted from
+   `repository_id` 1269388380 to `repository_property` include
+   `verjson-merge-admission=enforced` with `verjson-actions-state=paused` excluded.
+   The managed cohort (`.github`, `verjson-ci`, `verjson-git-runners`) carries
+   generated callers/triggers, observed bound-App SUCCESS, and the enrollment
+   property. Live `org-ruleset-conformance.py` reads `conformant` with
+   `merge-admission-receipt=full` (2026-11-18).
+
+Wider adopter enrollment (caller generation before setting the property) continues
+under [#2223](https://github.com/verJSON/.github/issues/2223). Bypass-list retirement
+remains [#1964](https://github.com/verJSON/.github/issues/1964) (C11). Decision 7's
+non-bypass `lightningleap` merge-button canary stays credential-blocked as recorded
+on #2031; it is not reopened as a #1945 close gate.
