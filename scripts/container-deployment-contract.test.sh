@@ -539,8 +539,14 @@ assert "GITHUB_TOKEN" not in block and "GH_TOKEN" not in block, block
 assert '"PATH"' in block and "allowed" in block
 print("child environment allowlist omits GitHub tokens")
 PY
-if grep -vF 'actions/create-github-app-token@' "$workflow" \
-  | grep -E 'doctl|ssh |droplet|--replicas|--standard|resize|create' >/dev/null; then
+# Allow the pinned Install doctl step (binary only; auth stays transport
+# config.yaml). Still fail closed on any other doctl/fleet/spend surface.
+if awk '
+  $0 ~ /- name: Install doctl$/ { skip = 1; next }
+  skip && $0 ~ /^      - / { skip = 0 }
+  skip { next }
+  { print }
+' "$workflow"   | grep -vF 'actions/create-github-app-token@'   | grep -E 'doctl|ssh |droplet|--replicas|--standard|resize|create' >/dev/null; then
   echo "reusable workflow contains fleet mechanics or a spend-increasing operation" >&2
   exit 1
 fi
