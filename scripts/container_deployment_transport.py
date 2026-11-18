@@ -675,9 +675,16 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
                 probe = run(
                     [doctl_bin, 'projects', 'list', '--context', host['doContext'],
                      '--output', 'json'],
-                    check=False, capture_output=True, text=True,
+                    check=False, capture_output=True, text=True, errors='replace',
                     env=child_environment, timeout=60,
                 )
+            except UnicodeError:
+                # A non-UTF-8 doctl banner must not become an uncaught traceback.
+                # That traceback is multi-line, and the controller then hides the
+                # failure entirely (dry-run 44253156883).
+                raise TransportError(
+                    'read-only runner host export failed: doctl authentication failed'
+                ) from None
             except (OSError, subprocess.SubprocessError):
                 probe = None
             if probe is not None and probe.returncode != 0:
@@ -702,8 +709,8 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
                 ) from None
         try:
             completed = run(command, check=False, capture_output=True, text=True,
-                            env=child_environment, timeout=900)
-        except (OSError, subprocess.SubprocessError):
+                            errors='replace', env=child_environment, timeout=900)
+        except (OSError, subprocess.SubprocessError, UnicodeError):
             raise TransportError('read-only runner host export failed') from None
         if completed.returncode != 0:
             # CLI stderr is usually operator-facing; relay one short line only when
@@ -1175,6 +1182,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (TransportError, OSError, KeyError, TypeError) as failure:
+    except (TransportError, OSError, KeyError, TypeError, UnicodeError) as failure:
         # Never relay HTTP bodies, JWTs, headers, signed asset URLs, or subprocess stderr.
         raise SystemExit(str(failure) if isinstance(failure, TransportError) else 'deployment transport failed') from None

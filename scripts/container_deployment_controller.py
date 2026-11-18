@@ -1941,6 +1941,34 @@ def _build_host_export_request(
     }
 
 
+_TRANSPORT_STDERR_MARKERS = ("-----", "Bearer", "BEGIN ")
+
+
+def _public_transport_line(stderr: str | None) -> str | None:
+    """Pick one operator-safe diagnostic from transport stderr.
+
+    The whole blob used to have to be a single line. Dry-run 44253156883
+    dropped ``read-only runner host export failed: ...`` because a warning or
+    traceback shared stderr with that line. Secret-bearing lines and traceback
+    frames stay hidden; the last remaining diagnostic is the one operators see.
+    """
+    chosen = None
+    for raw in (stderr or "").splitlines():
+        line = raw.strip()
+        if (
+            not line
+            or len(line) > 200
+            or any(marker in line for marker in _TRANSPORT_STDERR_MARKERS)
+            or line.startswith("Traceback")
+            or line.startswith('File "')
+            or line.startswith("During handling")
+            or set(line) <= {"^"}
+        ):
+            continue
+        chosen = line
+    return chosen
+
+
 def _run_host_export_transport(
     request: dict[str, Any], timeout_seconds: int = ADMISSION_EVIDENCE_SECONDS
 ) -> dict[str, Any]:
@@ -1963,19 +1991,13 @@ def _run_host_export_transport(
                 timeout_seconds=timeout_seconds,
             )
         except subprocess.CalledProcessError as error:
-            # TransportExit messages are designed to omit secrets; relay a single
-            # short line so operators see "release fields differ" rather than the
-            # opaque wrapper that hid dry-run 44232618346's root cause.
-            detail = (error.stderr or "").strip()
-            if (
-                detail
-                and "\n" not in detail
-                and len(detail) <= 200
-                and "-----" not in detail
-                and "Bearer" not in detail
-            ):
+            # TransportExit messages are designed to omit secrets; relay one
+            # short line so operators see the doctl/CLI cause rather than the
+            # opaque wrapper (dry-runs 44232618346 and 44253156883).
+            line = _public_transport_line(error.stderr)
+            if line:
                 raise DeploymentError(
-                    f"canonical host evidence transport failed: {detail}"
+                    f"canonical host evidence transport failed: {line}"
                 ) from None
             raise DeploymentError("canonical host evidence transport failed") from None
         except (OSError, subprocess.SubprocessError, DeploymentError):

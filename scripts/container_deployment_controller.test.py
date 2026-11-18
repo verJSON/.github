@@ -704,6 +704,49 @@ class HostExportRequestTests(unittest.TestCase):
             ):
                 controller._run_host_export_transport(request)
 
+    def test_host_export_transport_relays_diagnostic_past_extra_stderr_lines(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        failure = subprocess.CalledProcessError(
+            1,
+            ["python3"],
+            stderr=(
+                "DeprecationWarning: url.parse\n"
+                "Traceback (most recent call last):\n"
+                '  File "scripts/container_deployment_transport.py", line 1, in <module>\n'
+                "    raise TransportError\n"
+                "read-only runner host export failed: doctl authentication failed\n"
+            ),
+        )
+        with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^canonical host evidence transport failed: "
+                r"read-only runner host export failed: doctl authentication failed$",
+            ):
+                controller._run_host_export_transport(request)
+
+    def test_host_export_transport_hides_secret_bearing_stderr(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        failure = subprocess.CalledProcessError(
+            1,
+            ["python3"],
+            stderr="Authorization: Bearer leaked-token\n-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        )
+        with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^canonical host evidence transport failed$",
+            ) as raised:
+                controller._run_host_export_transport(request)
+        self.assertNotIn("Bearer", str(raised.exception))
+        self.assertNotIn("BEGIN", str(raised.exception))
+
     def test_preview_rejects_deployment_authorization_and_missing_run_identity(self):
         candidate = evidence()
         environment = {

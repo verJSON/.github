@@ -587,6 +587,37 @@ class HostExportTests(unittest.TestCase):
                     self.assertNotIn('doctl-read-token-secret', message)
                     self.assertNotIn('installation-read-token', message)
 
+    def test_host_export_doctl_probe_decode_error_is_one_line(self):
+        value = host_request()
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(kwargs)
+            raise UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
+
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._host_export_cli_env(directory)
+            env['PATH'] = '/usr/bin:/bin'
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                t.shutil, 'which', return_value='/usr/bin/doctl'
+            ):
+                with self.assertRaisesRegex(
+                    t.TransportError,
+                    exactly('read-only runner host export failed: doctl authentication failed'),
+                ):
+                    t.host_export(
+                        value,
+                        'installation-read-token',
+                        {
+                            'manifestIdentity': value['release']['manifestDigest'],
+                            'manifestBytes': '{}',
+                        },
+                        run=run,
+                        clock=lambda: NOW,
+                    )
+        self.assertEqual(calls[0].get('errors'), 'replace')
+        self.assertNotIn('\n', str(calls))
+
 
 class HostExportJwtTests(unittest.TestCase):
     def test_host_export_jwt_fails_closed_without_runner_temp(self):
