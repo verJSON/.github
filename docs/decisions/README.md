@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0281](0281-runners-273-host-export-node-adopter-arb/README.md) | 2026-11-18 | Delivery ARB archive for runners#273 host-export Node adopter |
 | [0280](0280-host-export-node-cli-stderr-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for .github#2236 host-export Node + CLI stderr |
 | [0279](0279-runners-272-host-export-fields-adopter-arb/README.md) | 2026-11-18 | Delivery ARB archive for runners#272 host-export release-fields adopter |
 | [0278](0278-host-export-release-fields-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for .github#2232 host-export release fields |
