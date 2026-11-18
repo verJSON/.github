@@ -641,6 +641,33 @@ class HostExportRequestTests(unittest.TestCase):
         self.assertEqual(
             "Verjson/verjson-github-runner", request["release"]["repository"]
         )
+        self.assertEqual(
+            {
+                "repository",
+                "assetId",
+                "manifestDigest",
+                "variant",
+                "imageDigest",
+                "sourceCommit",
+                "sourceRef",
+                "signerWorkflow",
+                "signerCommit",
+            },
+            set(request["release"]),
+        )
+        # Cross-check the transport contract: the opaque "canonical host evidence
+        # transport failed" on dry-run 44232618346 was validate_request rejecting
+        # an extra releaseVersion key before attestation ran.
+        transport_spec = importlib.util.spec_from_file_location(
+            "container_deployment_transport",
+            Path(__file__).with_name("container_deployment_transport.py"),
+        )
+        assert transport_spec and transport_spec.loader
+        transport = importlib.util.module_from_spec(transport_spec)
+        transport_spec.loader.exec_module(transport)
+        transport.validate_request(
+            request, datetime.now(timezone.utc).timestamp()
+        )
 
         # Bind the built request into evidence the way collect-evidence would after
         # a successful transport that attested the historical signed source.
@@ -661,6 +688,21 @@ class HostExportRequestTests(unittest.TestCase):
             deployment_contract_ref="a" * 40,
         )
         self.assertEqual("9001.1", plan["attemptId"])
+
+    def test_host_export_transport_relays_single_line_transport_error(self):
+        request = {"schemaVersion": 1, "operation": "host-export"}
+        environment = {name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV}
+        failure = subprocess.CalledProcessError(
+            1, ["python3"], stderr="release fields differ\n"
+        )
+        with mock.patch.dict(controller.os.environ, environment, clear=True), mock.patch.object(
+            controller.ProcessAdapter, "_invoke", side_effect=failure
+        ):
+            with self.assertRaisesRegex(
+                controller.DeploymentError,
+                r"^canonical host evidence transport failed: release fields differ$",
+            ):
+                controller._run_host_export_transport(request)
 
     def test_preview_rejects_deployment_authorization_and_missing_run_identity(self):
         candidate = evidence()

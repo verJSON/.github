@@ -1,5 +1,16 @@
 # v5.0.0
 
+## Host-export release omits releaseVersion for transport validation
+
+`scripts/container_deployment_controller.py` now builds the host-export
+`release` object with the exact key set transport `validate_request` requires
+(no `releaseVersion`). The previous `_release()` + `update()` shape left that
+extra key, so canary dry-runs failed as opaque `canonical host evidence
+transport failed` before attestation. A single short TransportError line from
+the child is relayed when present (#2231).
+
+_Date: 2026-11-18; issue #2231_
+
 ## Merge admission sets aside its own producer's check and binds an expected head
 
 `scripts/assert-mergeable-head.sh` now sets aside, in Gates A and C, every
