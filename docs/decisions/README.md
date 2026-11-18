@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0275](0275-runners-270-host-obs-adopter-arb/README.md) | 2026-11-18 | Delivery ARB archive for runners#270 host-observation adopter regen |
 | [0274](0274-host-observation-repo-case-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for host observation repository case identity |
 | [0273](0273-runners-268-deployment-cli-2-1-delivery-arb/README.md) | 2026-11-17 | Delivery ARB archive for runners#268 deployment cli-cloud 2.1.0 repin |
 | [0272](0272-custody-credential-arb-ratification/README.md) | 2026-11-17 | Archive custody / credential ARB ratification for Gate R |
