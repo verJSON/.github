@@ -188,6 +188,62 @@ cutover failure, verify a subscriber's exact rollback install before revoking it
 gateway grant. Never repair a mismatch by overwriting a published version or
 restoring stale authorization into service.
 
+## Public adoption-package re-audit — 2026-11-19
+
+ADR 0152 named four public npm adoption packages. ADR 0160 and this decision
+keep them private until each package passes its license, secret, provenance, and
+complete runtime dependency audit, followed by package-specific human
+acknowledgement. Current source was checked at these immutable repository heads:
+
+- **`@verjson/identity-contracts`** — MIT; no runtime dependencies. Its locked
+  `@verjson/authz`, `@verjson/identity-contracts`, and `@verjson/tsconfig`
+  entries are development-only. The release target is GitHub Packages. Evidence:
+  [manifest](https://github.com/VerJSON/verjson-identity-contracts/blob/7fdad98e198503e21f151c9c6e41f4c32caa977a/package.json),
+  [lockfile](https://github.com/VerJSON/verjson-identity-contracts/blob/7fdad98e198503e21f151c9c6e41f4c32caa977a/package-lock.json),
+  [license](https://github.com/VerJSON/verjson-identity-contracts/blob/7fdad98e198503e21f151c9c6e41f4c32caa977a/LICENSE),
+  [release caller](https://github.com/VerJSON/verjson-identity-contracts/blob/7fdad98e198503e21f151c9c6e41f4c32caa977a/.github/workflows/release.yml).
+- **`@verjson/graphql-conventions`** — MIT; its runtime peers are external
+  NestJS/GraphQL packages. The locked `@verjson/tsconfig` entry is development-only.
+  The release target is GitHub Packages. Evidence:
+  [manifest](https://github.com/VerJSON/verjson-graphql-conventions/blob/eb34ff6386718c486a44570967a6e0ef7ce725ea/package.json),
+  [lockfile](https://github.com/VerJSON/verjson-graphql-conventions/blob/eb34ff6386718c486a44570967a6e0ef7ce725ea/package-lock.json),
+  [license](https://github.com/VerJSON/verjson-graphql-conventions/blob/eb34ff6386718c486a44570967a6e0ef7ce725ea/LICENSE),
+  [release caller](https://github.com/VerJSON/verjson-graphql-conventions/blob/eb34ff6386718c486a44570967a6e0ef7ce725ea/.github/workflows/release.yml).
+- **`@verjson/tsconfig`** — MIT; no runtime dependencies or locked `@verjson/*`
+  packages. The release target is GitHub Packages. Evidence:
+  [manifest](https://github.com/VerJSON/verjson-tsconfig/blob/65cfe7095100d4fc3348ac050d0670bb72c19ad3/package.json),
+  [lockfile](https://github.com/VerJSON/verjson-tsconfig/blob/65cfe7095100d4fc3348ac050d0670bb72c19ad3/package-lock.json),
+  [license](https://github.com/VerJSON/verjson-tsconfig/blob/65cfe7095100d4fc3348ac050d0670bb72c19ad3/LICENSE),
+  [release caller](https://github.com/VerJSON/verjson-tsconfig/blob/65cfe7095100d4fc3348ac050d0670bb72c19ad3/.github/workflows/release.yml).
+- **`@verjson/eslint-config`** — MIT; its runtime dependencies and ESLint peer
+  are external packages. The locked `@verjson/tsconfig` entry is development-only.
+  The release target is GitHub Packages. Evidence:
+  [manifest](https://github.com/VerJSON/verjson-eslint-config/blob/d6a215e82a2173f6460efa7380f78811738f47be/package.json),
+  [lockfile](https://github.com/VerJSON/verjson-eslint-config/blob/d6a215e82a2173f6460efa7380f78811738f47be/package-lock.json),
+  [license](https://github.com/VerJSON/verjson-eslint-config/blob/d6a215e82a2173f6460efa7380f78811738f47be/LICENSE),
+  [release caller](https://github.com/VerJSON/verjson-eslint-config/blob/d6a215e82a2173f6460efa7380f78811738f47be/.github/workflows/release.yml).
+
+At these pins, all four packages declare MIT and their locked runtime dependency
+closures contain no gated `@verjson/*` package. The package manifests and release
+callers still select `npm.pkg.github.com`; the pinned canonical Node publisher also
+publishes to GitHub Packages. No npmjs.org provenance publishing path is evidenced,
+so the provenance gate is not met. Unauthenticated registry lookups for the four
+names returned HTTP 404 at 2026-11-19T05:28Z; that is a point-in-time observation.
+
+The checked-in build outputs were not present in the package previews: a non-running
+`npm pack --dry-run --ignore-scripts` omitted generated `dist` files for the three
+compiled packages. A high-confidence credential-marker scan found no matching
+markers in the inspected source inputs, but it is not a full secret clearance of
+built tarballs. The exact release artifacts still need a build and secret review,
+and the packages need a reviewed npmjs provenance path before any publication
+request. Keep all four packages private. This amendment records a partial #1186
+re-audit; it does not authorize publication or satisfy the other subscriber,
+backup, recovery, Tequity, or live-operation gates. The task-local ARB approved
+this documentation-only disposition under ledger v2 at slate digest
+`dd0e75ddf236230931cfc78c8a8cc57be157858c8d1f747674dbbab258a8c213`; one model
+identity was verified and three unverified ballots were included. This is not
+package-publication approval.
+
 ## References
 
 - [Sonatype feature matrix](https://help.sonatype.com/en/nexus-repository-feature-matrix.html)
