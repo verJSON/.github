@@ -340,6 +340,33 @@ class AgentDeliveryClaimTest(unittest.TestCase):
             "eligible",
         )
 
+    def test_classify_unlabeled_title_major_forms_fail_closed(self):
+        # Renovate renders a major as the bare major ("to v2"); an x.0.0 target
+        # is a major too. Without labels the title is the only signal (#2210).
+        for title in (
+            "chore(deps): update dependency left-pad to v2",
+            "chore(deps): update dependency left-pad to v1",
+            "chore(deps): update dependency left-pad to v12",
+            "chore(deps): update dependency left-pad to v3.0.0",
+            "chore(deps): update node docker tag to 24",
+            "chore(deps): update dependency @types/digest to v2",
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(MODULE.classify_renovate_bump(title=title, labels=[]), "major")
+
+    def test_classify_minor_and_patch_of_v2_plus_packages_are_eligible(self):
+        # verJSON/.github#2222 (@verjson/cli-cloud 2.1.0 -> 2.2.0) failed closed
+        # as "major" because the title heuristic only looked at the major digit.
+        for title in (
+            "fix(deps): update dependency @verjson/cli-cloud to v2.2.0",
+            "chore(deps): update dependency eslint to v10.2.3",
+            "chore(deps): update dependency left-pad to v4.0.1",
+            "chore(deps): update actions/create-github-app-token digest to 1234567",
+            "chore(deps): pin actions/checkout action to 11bd719",
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(MODULE.classify_renovate_bump(title=title, labels=[]), "eligible")
+
     def test_classify_major_label_wins_over_breaking_title(self):
         # Label precedence: major label beats a "breaking" title heuristic (#2215).
         self.assertEqual(
