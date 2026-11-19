@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0288](0288-claim-bump-classifier-delivery-arb/README.md) | 2026-11-19 | Delivery ARB archive for .github#2255 Renovate bump classifier |
 | [0287](0287-next-fragment-consolidation-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for .github#2253 NEXT fragment consolidation |
 | [0286](0286-host-export-relay-allowlist-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for .github#2251 host-export diagnostic relay allowlist |
 | [0285](0285-runners-275-doctl-auth-probe-adopter-arb/README.md) | 2026-11-18 | Delivery ARB archive for runners#275 doctl auth probe adopter |
