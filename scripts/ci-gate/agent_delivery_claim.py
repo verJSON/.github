@@ -113,12 +113,26 @@ def classify_renovate_bump(*, title: str | None = None, labels: Collection[str] 
     text = title if isinstance(title, str) else ""
     if _BREAKING_TITLE.search(text):
         return "breaking"
-    # Renovate often encodes majors as "update X to v2" / "to v2.0.0".
-    if re.search(r"\bto\s+v?[2-9](?:\.\d+){0,2}\b", text, re.IGNORECASE):
-        return "major"
-    if re.search(r"\bto\s+v?\d{2,}(?:\.\d+){0,2}\b", text, re.IGNORECASE):
+    if any(_is_major_target(match) for match in _TITLE_TARGET.finditer(text)):
         return "major"
     return "eligible"
+
+
+# Renovate renders a major target as the bare major ("to v2"); minor and patch
+# targets carry the full version ("to v2.2.0"). A short commit digest
+# ("to 1234567", "to 11bd719") is never a major: the trailing boundary stops a
+# hex SHA's leading digits from parsing as a version, and an unprefixed run of
+# seven or more digits is treated as an all-digit digest.
+_TITLE_TARGET = re.compile(r"\bto\s+(?P<prefix>v?)(?P<version>\d+(?:\.\d+)*)(?!\w)", re.IGNORECASE)
+_SHORT_DIGEST_LENGTH = 7
+
+
+def _is_major_target(match: re.Match[str]) -> bool:
+    version = match.group("version")
+    if not match.group("prefix") and "." not in version and len(version) >= _SHORT_DIGEST_LENGTH:
+        return False
+    major, *rest = (int(part) for part in version.split("."))
+    return major >= 1 and all(part == 0 for part in rest)
 
 
 def format_worker_handoff(claim: Claim, *, status: str) -> str:
