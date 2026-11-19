@@ -5,5 +5,5 @@ impact: patch
 title: Archive the delivery ARB for verjson-vault pull request 7
 ---
 
-ADR 0289 archives the review board's approval of verjson-vault#7 at
+ADR 0290 archives the review board's approval of verjson-vault#7 at
 3995f0e, so Gate R can cite the chair record.
