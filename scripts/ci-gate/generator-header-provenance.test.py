@@ -57,18 +57,20 @@ CASES: dict[str, list[list[str]]] = {
     "pr-gate": [["--untrusted-runner", "self-hosted,linux"]],
     "release-node": [
         ["--scope", "@acme", "--node-version", "22.1", "--default-prefix", "cli-v",
-         "--default-component", "cli", "--package-dir", "packages/a", "--release-asset", "dist/a.tgz"],
+         "--default-component", "cli", "--package-dir", "packages/a", "--release-asset", "dist/a.tgz",
+         "--require-ci-context", "tests", "--require-ci-context", "lint"],
         ["--only-package-dir", "packages/a"],
     ],
     "release-artifact": [
         ["--build-runner", "ubuntu-24.04-arm", "--build-runner", MACOS_LANE,
          "--approved-internal-package", "@verjson/cli-cloud", "--scope", "@acme",
          "--node-version", "22", "--default-prefix", "cli-v", "--default-component", "cli",
-         "--package-dir", "packages/a"],
+         "--package-dir", "packages/a", "--require-ci-context", "tests"],
     ],
     "release-snapshot": [
         ["--scope", "@acme", "--node-version", "22", "--default-prefix", "cli-v",
-         "--default-component", "cli", "--only-package-dir", "packages/a"],
+         "--default-component", "cli", "--only-package-dir", "packages/a",
+         "--require-ci-context", "tests"],
     ],
     "release-propose": [["--autonomy", "propose"], ["--autonomy", "dispatch"]],
 }
