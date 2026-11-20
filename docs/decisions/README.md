@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0292](0292-release-trust-exact-head-ci-delivery-arb/README.md) | 2026-11-20 | Delivery ARB archive for .github#2261 release CI trust |
 | [0289](0289-fleet-dispatch-credential/README.md) | 2026-11-19 | Fleet dispatch credential: cli-cloud-only App, environment-only custody |
 | [0288](0288-claim-bump-classifier-delivery-arb/README.md) | 2026-11-19 | Delivery ARB archive for .github#2255 Renovate bump classifier |
 | [0287](0287-next-fragment-consolidation-delivery-arb/README.md) | 2026-11-18 | Delivery ARB archive for .github#2253 NEXT fragment consolidation |
