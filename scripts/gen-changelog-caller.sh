@@ -72,7 +72,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--codeowners-org <org> --codeowners-team <team>] [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
+  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--codeowners-org <org> --codeowners-team <team>] [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]] [--require-ci-context <check-name>]..." >&2
   echo "required check: changelog / validate" >&2
   exit 2
 }
@@ -97,6 +97,7 @@ release_caller_package_dir_specs=()
 release_assets=()
 release_build_runners=()
 release_approved_internal_packages=()
+release_require_ci_contexts=()
 release_autonomy=""
 pr_gate_untrusted_runner=""
 pr_gate_untrusted_runner_set=false
@@ -199,6 +200,11 @@ while [ "$#" -gt 0 ]; do
       release_approved_internal_packages+=("$2")
       shift 2
       ;;
+    --require-ci-context)
+      [ "$#" -ge 2 ] || usage
+      release_require_ci_contexts+=("$2")
+      shift 2
+      ;;
     --autonomy)
       [ "$#" -ge 2 ] && [ -z "$release_autonomy" ] || usage
       release_autonomy="$2"
@@ -246,6 +252,19 @@ if [ "${#release_approved_internal_packages[@]}" -gt 0 ] \
   && [ "$mode" != release-artifact ] && [ "$mode" != contract-test ]; then
   echo "$(basename "$0"): --approved-internal-package is accepted only by release-artifact and contract-test" >&2
   exit 2
+fi
+if [ "${#release_require_ci_contexts[@]}" -gt 0 ]; then
+  if [ "$mode" != release-node ] && [ "$mode" != release-artifact ] \
+    && [ "$mode" != release-snapshot ]; then
+    echo "$(basename "$0"): --require-ci-context is accepted only by release-node, release-artifact and release-snapshot" >&2
+    exit 2
+  fi
+  for release_ci_context in "${release_require_ci_contexts[@]}"; do
+    if ! [[ "$release_ci_context" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]{0,99}$ ]]; then
+      echo "$(basename "$0"): --require-ci-context must be a check name (letters, digits, . _ / -), got '$release_ci_context'" >&2
+      exit 2
+    fi
+  done
 fi
 if [ "${#release_assets[@]}" -gt 0 ] && [ "$mode" != release-node ] && [ "$mode" != contract-test ]; then
   echo "$(basename "$0"): --release-asset is accepted only by release-node and contract-test" >&2
@@ -436,6 +455,10 @@ generation_command() {
     || command="$command --autonomy $release_autonomy"
   [ "$pr_gate_untrusted_runner_set" = false ] \
     || command="$command --untrusted-runner $pr_gate_untrusted_runner"
+  local release_ci_context
+  for release_ci_context in "${release_require_ci_contexts[@]}"; do
+    command="$command --require-ci-context $release_ci_context"
+  done
   printf '%s' "$command"
 }
 
@@ -1397,6 +1420,88 @@ emit_verify_dependency_steps() {
 EOF
 }
 
+
+# ADR 0291: optional exact-head CI trust. Empty by default so existing digests
+# stay stable; --require-ci-context fills these before each release emitter.
+release_ci_permission_lines() {
+  if [ "${#release_require_ci_contexts[@]}" -eq 0 ]; then
+    printf '%s\n' '  contents: read'
+  else
+    printf '%s\n' '  contents: read' '  checks: read'
+  fi
+}
+
+release_ci_verify_permission_lines() {
+  if [ "${#release_require_ci_contexts[@]}" -eq 0 ]; then
+    printf '%s\n' '      contents: read'
+  else
+    printf '%s\n' '      contents: read' '      checks: read'
+  fi
+}
+
+emit_release_ci_assert_step() {
+  if [ "${#release_require_ci_contexts[@]}" -eq 0 ]; then
+    return 0
+  fi
+  local contexts_env=''
+  local context sep=$'\n'
+  for context in "${release_require_ci_contexts[@]}"; do
+    contexts_env+="${contexts_env:+$sep}$context"
+  done
+  # YAML block scalar for a newline-separated context list. Names are validated
+  # to a safe character set before this emitter runs.
+  cat <<EOF
+      - name: Assert required CI on the release head
+        if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        env:
+          GH_TOKEN: \${{ github.token }}
+          GITHUB_REPOSITORY: \${{ github.repository }}
+          GITHUB_SHA: \${{ github.sha }}
+          RELEASE_REQUIRED_CI_CONTEXTS: |
+$(printf '%s\n' "$contexts_env" | sed 's/^/            /')
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
+        run: |
+          mapfile -t _release_ci_contexts <<< "\$RELEASE_REQUIRED_CI_CONTEXTS"
+          contexts=()
+          for _release_ci_context in "\${_release_ci_contexts[@]}"; do
+            [ -n "\$_release_ci_context" ] || continue
+            contexts+=("\$_release_ci_context")
+          done
+          if [ "\${#contexts[@]}" -eq 0 ]; then
+            echo "::error::RELEASE_REQUIRED_CI_CONTEXTS is empty"
+            exit 1
+          fi
+          if [ ! -x .changelog-contract/scripts/assert-release-head-ci.sh ]; then
+            echo "::error::selection contract is missing scripts/assert-release-head-ci.sh; regenerate against a contract revision that includes ADR 0291."
+            exit 1
+          fi
+          .changelog-contract/scripts/assert-release-head-ci.sh \\
+            "\$GITHUB_REPOSITORY" "\$GITHUB_SHA" "\${contexts[@]}"
+          unset GH_TOKEN GITHUB_TOKEN
+EOF
+}
+
 emit_release_node() {
   local generation_command
   generation_command="$(generation_command)"
@@ -1418,6 +1523,12 @@ emit_release_node() {
   snapshot_job="$(release_snapshot_job "$ref")" || return
   local publish_job
   publish_job="$(release_node_publish_job "$ref" "$release_node_version" "$release_scope" "$package_dirs_json" "$release_assets_json")" || return
+  local release_workflow_permissions release_verify_permissions release_ci_assert_step
+  release_workflow_permissions="$(release_ci_permission_lines)"
+  release_verify_permissions="$(release_ci_verify_permission_lines)"
+  # $(...) strips trailing newlines; preserve them so the next YAML key stays on its own line.
+  release_ci_assert_step="$(emit_release_ci_assert_step; printf x)"
+  release_ci_assert_step="${release_ci_assert_step%x}"
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
@@ -1515,7 +1626,7 @@ on:
         default: ${release_default_component_yaml}
 
 permissions:
-  contents: read
+${release_workflow_permissions}
 
 jobs:
   verify:
@@ -1523,7 +1634,7 @@ jobs:
     runs-on: \${{ fromJSON(${release_runner_expr}) }}
     timeout-minutes: 30
     permissions:
-      contents: read
+${release_verify_permissions}
     outputs:
       selected: \${{ steps.release-version.outputs.selected }}
       version: \${{ steps.release-version.outputs.version }}
@@ -1732,6 +1843,7 @@ ${verify_dependency_steps}
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
           done
+${release_ci_assert_step}
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -2043,6 +2155,12 @@ EOF
   local publish_job
   publish_job="$(release_artifact_publish_job)" || return
   build_job="$(release_artifact_build_job_for "$private_dependencies" "${build_runners_yaml%$'\n'}")" || return
+  local release_workflow_permissions release_verify_permissions release_ci_assert_step
+  release_workflow_permissions="$(release_ci_permission_lines)"
+  release_verify_permissions="$(release_ci_verify_permission_lines)"
+  # $(...) strips trailing newlines; preserve them so the next YAML key stays on its own line.
+  release_ci_assert_step="$(emit_release_ci_assert_step; printf x)"
+  release_ci_assert_step="${release_ci_assert_step%x}"
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
@@ -2135,7 +2253,7 @@ on:
         default: ${release_default_component_yaml}
 
 permissions:
-  contents: read
+${release_workflow_permissions}
 
 jobs:
   verify:
@@ -2143,7 +2261,7 @@ jobs:
     runs-on: \${{ fromJSON(${release_runner_expr}) }}
     timeout-minutes: 30
     permissions:
-      contents: read
+${release_verify_permissions}
     outputs:
       selected: \${{ steps.release-version.outputs.selected }}
       version: \${{ steps.release-version.outputs.version }}
@@ -2332,6 +2450,7 @@ ${verify_dependency_steps}
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
           done
+${release_ci_assert_step}
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -2460,6 +2579,12 @@ emit_release_snapshot() {
   snapshot_job="$(release_snapshot_job "$ref")" || return
   local publish_job
   publish_job="$(release_snapshot_publish_job)" || return
+  local release_workflow_permissions release_verify_permissions release_ci_assert_step
+  release_workflow_permissions="$(release_ci_permission_lines)"
+  release_verify_permissions="$(release_ci_verify_permission_lines)"
+  # $(...) strips trailing newlines; preserve them so the next YAML key stays on its own line.
+  release_ci_assert_step="$(emit_release_ci_assert_step; printf x)"
+  release_ci_assert_step="${release_ci_assert_step%x}"
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
@@ -2550,7 +2675,7 @@ on:
         default: ${release_default_component_yaml}
 
 permissions:
-  contents: read
+${release_workflow_permissions}
 
 jobs:
   verify:
@@ -2558,7 +2683,7 @@ jobs:
     runs-on: \${{ fromJSON(${release_runner_expr}) }}
     timeout-minutes: 30
     permissions:
-      contents: read
+${release_verify_permissions}
     outputs:
       selected: \${{ steps.release-version.outputs.selected }}
       version: \${{ steps.release-version.outputs.version }}
@@ -2751,6 +2876,7 @@ ${verify_dependency_steps}
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
           done
+${release_ci_assert_step}
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -4893,7 +5019,7 @@ def step_mapping_values(step, name):
     return values
 
 
-# This is the only release step that receives github.token. Pin its whole script
+# Restart-safe release state (and ADR 0291 CI assert, when emitted) receive github.token. Pin their scripts
 # per mode so additional shell commands cannot forward or persist that token.
 APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "release-node": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
@@ -4904,6 +5030,11 @@ APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
     "release-node": "7bc1f813cefabb6c7a44dc1fb4ca272cbba54ce48b7657d9ed35ed9240509af8",
     "release-artifact": "c241e6f3adc300fbb4ef5223230058609244b65eb6666d7716a39f56cf2ee069",
     "release-snapshot": "1b412767dc178c65209a3679691a8a60777b937dd6c5d808077ac1d44bc7bb3d",
+}
+APPROVED_RELEASE_CI_ASSERT_SCRIPT_SHA256 = {
+    "release-node": "d4d7f677456f3aaec716743a766a6da6ff196c815f89d89d4065c61e42214a7d",
+    "release-artifact": "d4d7f677456f3aaec716743a766a6da6ff196c815f89d89d4065c61e42214a7d",
+    "release-snapshot": "d4d7f677456f3aaec716743a766a6da6ff196c815f89d89d4065c61e42214a7d",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-node": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
@@ -5527,6 +5658,7 @@ else:
             if entry.strip().startswith("- name: ")
         ]
         is_release_state = "- name: Resolve restart-safe release state" in step_names
+        is_release_ci_assert = "- name: Assert required CI on the release head" in step_names
         is_package_acquisition = (
             line.strip() == "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}"
             and any(
@@ -5535,6 +5667,8 @@ else:
             )
         )
         if is_release_state and line.strip() == "GITHUB_TOKEN: ${{ github.token }}":
+            continue
+        if is_release_ci_assert and line.strip() == "GH_TOKEN: ${{ github.token }}":
             continue
         if is_package_acquisition:
             continue
@@ -5777,12 +5911,26 @@ if acquisition_job_start is not None:
             )
             break
 
-if permission_values(0, jobs_index, 0) != {"contents": "read"}:
-    problems.append("requires workflow permissions to be exactly contents: read (#1712)")
+has_ci_assert = any(
+    line.strip() == "- name: Assert required CI on the release head" for line in lines
+)
+expected_read_permissions = (
+    {"contents": "read", "checks": "read"} if has_ci_assert else {"contents": "read"}
+)
+if permission_values(0, jobs_index, 0) != expected_read_permissions:
+    problems.append(
+        "requires workflow permissions to be exactly contents: read (#1712)"
+        if expected_read_permissions == {"contents": "read"}
+        else "requires workflow permissions to be exactly contents: read and checks: read (#1712/#2260)"
+    )
 if verify_job_start is not None and permission_values(
     verify_job_start, verify_job_end, verify_job_fields_indent
-) != {"contents": "read"}:
-    problems.append("requires verify-job permissions to be exactly contents: read (#1712)")
+) != expected_read_permissions:
+    problems.append(
+        "requires verify-job permissions to be exactly contents: read (#1712)"
+        if expected_read_permissions == {"contents": "read"}
+        else "requires verify-job permissions to be exactly contents: read and checks: read (#1712/#2260)"
+    )
 
 expected_install_condition = "steps.release-version.outputs.selected == 'true'"
 if release_mode == "release-snapshot":
@@ -6187,6 +6335,44 @@ if (
     != APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256.get(release_mode)
 ):
     problems.append("does not capture trusted release verification runtime inputs (#1717)")
+
+ci_assert_steps = [
+    step for step in workflow_steps
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("name", "")) == "Assert required CI on the release head"
+]
+if len(ci_assert_steps) > 1:
+    problems.append("must not emit more than one required-CI assert step (#2260)")
+elif len(ci_assert_steps) == 1:
+    ci_assert_step = ci_assert_steps[0]
+    ci_assert_fields = step_mapping_entries(ci_assert_step)
+    ci_assert_body = run_body(ci_assert_step)
+    ci_assert_sha256 = (
+        hashlib.sha256(ci_assert_body.encode()).hexdigest()
+        if ci_assert_body is not None else "unparseable"
+    )
+    if (
+        ci_assert_fields is None
+        or ci_assert_fields.get("shell") != "/bin/bash --noprofile --norc -e -o pipefail {0}"
+        or ci_assert_fields.get("if") != "steps.release-version.outputs.selected == 'true'"
+        or "continue-on-error" in ci_assert_fields
+        or release_mode not in APPROVED_RELEASE_CI_ASSERT_SCRIPT_SHA256
+        or ci_assert_body is None
+        or ci_assert_sha256 != APPROVED_RELEASE_CI_ASSERT_SCRIPT_SHA256.get(release_mode)
+    ):
+        problems.append(
+            "does not match the approved release CI assert script "
+            f"(#2260): {ci_assert_sha256}"
+        )
+    ci_assert_env = step_mapping_values(ci_assert_step, "env") or {}
+    if ci_assert_env.get("GH_TOKEN") != "${{ github.token }}":
+        problems.append("release CI assert must receive github.token as GH_TOKEN only (#2260)")
+    if "GITHUB_TOKEN" in ci_assert_env:
+        problems.append("release CI assert must not set GITHUB_TOKEN (#2260)")
+    if "RELEASE_REQUIRED_CI_CONTEXTS" not in ci_assert_env:
+        problems.append("release CI assert must declare RELEASE_REQUIRED_CI_CONTEXTS (#2260)")
+elif has_ci_assert:
+    problems.append("required-CI assert step name present but not parseable as a step (#2260)")
 
 verification_steps = [
     step for step in workflow_steps

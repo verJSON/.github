@@ -4,6 +4,7 @@ set -euo pipefail
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 script=$here/assert-release-head-ci.sh
+# Companion of scripts/assert-release-head-ci.sh (ADR 0291).
 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 pass=0
 fail=0
@@ -115,7 +116,7 @@ else
   fail "multiple contexts succeed"
 fi
 
-if GH_TOKEN= "$script" verJSON/example "$sha" tests >/dev/null 2>&1; then
+if env -u GH_TOKEN -u GITHUB_TOKEN "$script" verJSON/example "$sha" tests >/dev/null 2>&1; then
   fail "missing token should fail"
 else
   pass "missing token fails"

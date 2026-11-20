@@ -51,8 +51,8 @@ honestly skip the suite.
    - that step receives `GITHUB_TOKEN: ${{ github.token }}` only in its own
      step `env` (same scrubbing pattern as **Resolve restart-safe release
      state**), calls the pinned helper
-     `scripts/ci-gate/assert-release-head-ci.sh`, then unsets the token before
-     exit;
+     `scripts/assert-release-head-ci.sh` from the already-checked-out selection
+     contract path (`.changelog-contract`), then unsets the token before exit;
    - leaves the verification suite step's environment equal to today's
      `EXPECTED_RELEASE_VERIFICATION_ENV` (still no token; ADR 0220's hook
      boundary unchanged).
@@ -151,13 +151,16 @@ honestly skip the suite.
 
 ## Verification
 
-- Unit tests for `scripts/ci-gate/assert-release-head-ci.sh` cover success,
-  missing context, non-success conclusions, wrong app id, pending status, and
-  multiple runs of one name (latest id wins).
+- Unit tests for `scripts/assert-release-head-ci.sh` cover success, missing
+  context, non-success conclusions, wrong app id, pending status, and multiple
+  runs of one name (latest id wins).
 - `scripts/ci-gate/changelog-caller-contract.test.sh` accepts the dual
   permission map, requires the assert step iff contexts were requested, rejects
   `checks: write` / `contents: write`, and rejects an assert step that keeps
   `GITHUB_TOKEN` in the verification suite environment.
 - One disposable generation of `release-snapshot` with the three unrwly
   contexts shows the assert step and permission map; without flags, today's
-  bytes for permissions and step list (names) remain.
+  permissions and step list (names) remain.
+- `scripts/gen-changelog-caller.sh` accepts `--require-ci-context` and emits the
+  assert step plus `{contents: read, checks: read}` when at least one context is
+  named.
