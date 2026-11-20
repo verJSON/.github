@@ -1443,13 +1443,11 @@ emit_release_ci_assert_step() {
   if [ "${#release_require_ci_contexts[@]}" -eq 0 ]; then
     return 0
   fi
-  local contexts_env=''
-  local context sep=$'\n'
+  local contexts_csv=''
+  local context
   for context in "${release_require_ci_contexts[@]}"; do
-    contexts_env+="${contexts_env:+$sep}$context"
+    contexts_csv+="${contexts_csv:+,}$context"
   done
-  # YAML block scalar for a newline-separated context list. Names are validated
-  # to a safe character set before this emitter runs.
   cat <<EOF
       - name: Assert required CI on the release head
         if: steps.release-version.outputs.selected == 'true'
@@ -1458,8 +1456,7 @@ emit_release_ci_assert_step() {
           GH_TOKEN: \${{ github.token }}
           GITHUB_REPOSITORY: \${{ github.repository }}
           GITHUB_SHA: \${{ github.sha }}
-          RELEASE_REQUIRED_CI_CONTEXTS: |
-$(printf '%s\n' "$contexts_env" | sed 's/^/            /')
+          RELEASE_REQUIRED_CI_CONTEXTS: ${contexts_csv}
           BASH_ENV: ''
           ENV: ''
           SHELLOPTS: ''
@@ -1482,13 +1479,8 @@ $(printf '%s\n' "$contexts_env" | sed 's/^/            /')
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          mapfile -t _release_ci_contexts <<< "\$RELEASE_REQUIRED_CI_CONTEXTS"
-          contexts=()
-          for _release_ci_context in "\${_release_ci_contexts[@]}"; do
-            [ -n "\$_release_ci_context" ] || continue
-            contexts+=("\$_release_ci_context")
-          done
-          if [ "\${#contexts[@]}" -eq 0 ]; then
+          IFS=, read -r -a contexts <<< "\$RELEASE_REQUIRED_CI_CONTEXTS"
+          if [ "\${#contexts[@]}" -eq 0 ] || [ -z "\${contexts[0]-}" ]; then
             echo "::error::RELEASE_REQUIRED_CI_CONTEXTS is empty"
             exit 1
           fi
@@ -5032,9 +5024,9 @@ APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
     "release-snapshot": "1b412767dc178c65209a3679691a8a60777b937dd6c5d808077ac1d44bc7bb3d",
 }
 APPROVED_RELEASE_CI_ASSERT_SCRIPT_SHA256 = {
-    "release-node": "d4d7f677456f3aaec716743a766a6da6ff196c815f89d89d4065c61e42214a7d",
-    "release-artifact": "d4d7f677456f3aaec716743a766a6da6ff196c815f89d89d4065c61e42214a7d",
-    "release-snapshot": "d4d7f677456f3aaec716743a766a6da6ff196c815f89d89d4065c61e42214a7d",
+    "release-node": "44a628005533678f94afeadbd185208618b227e26e2b979bf6e41db7f22317d7",
+    "release-artifact": "44a628005533678f94afeadbd185208618b227e26e2b979bf6e41db7f22317d7",
+    "release-snapshot": "44a628005533678f94afeadbd185208618b227e26e2b979bf6e41db7f22317d7",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-node": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
@@ -5091,6 +5083,30 @@ EXPECTED_RELEASE_VERIFICATION_ENV = {
     "NODE_PATH": "''",
     "npm_config_script_shell": "/bin/sh",
     "npm_config_ignore_scripts": "'false'",
+    "GIT_TRACE_CURL": "''",
+    "GIT_TRACE_REDACT": "''",
+    "GIT_EXEC_PATH": "''",
+    "GIT_CURL_VERBOSE": "''",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_PARAMETERS": "''",
+    "GIT_TRACE2": "''",
+    "GIT_TRACE2_EVENT": "''",
+    "GIT_TRACE2_PERF": "''",
+    "GIT_TRACE2_ENV_VARS": "''",
+    "GIT_TRACE2_CONFIG_PARAMS": "''",
+}
+
+EXPECTED_RELEASE_CI_ASSERT_SCRUB_ENV = {
+    "BASH_ENV": "''",
+    "ENV": "''",
+    "SHELLOPTS": "''",
+    "BASHOPTS": "''",
+    "BASH_XTRACEFD": "''",
+    "PS4": "''",
+    "LD_PRELOAD": "''",
+    "LD_AUDIT": "''",
+    "LD_LIBRARY_PATH": "''",
     "GIT_TRACE_CURL": "''",
     "GIT_TRACE_REDACT": "''",
     "GIT_EXEC_PATH": "''",
@@ -5445,6 +5461,9 @@ if private_acquisition_steps:
             "does not match the approved private dependency acquisition job (#1712)"
         )
 
+has_ci_assert = any(
+    line.strip() == "- name: Assert required CI on the release head" for line in lines
+)
 release_state_step = named_step("Resolve restart-safe release state")
 if release_state_step is None or not any(
     entry.strip() == "GITHUB_TOKEN: ${{ github.token }}" for entry in release_state_step
@@ -5467,6 +5486,7 @@ elif any(
     != (
         (key in EXPECTED_RELEASE_STATE_ENV)
         + (key in EXPECTED_RELEASE_VERIFICATION_ENV)
+        + (key in EXPECTED_RELEASE_CI_ASSERT_SCRUB_ENV if has_ci_assert else 0)
         + (key in expected_private_acquisition_env)
         + (key in expected_private_install_env)
     )
@@ -5911,9 +5931,6 @@ if acquisition_job_start is not None:
             )
             break
 
-has_ci_assert = any(
-    line.strip() == "- name: Assert required CI on the release head" for line in lines
-)
 expected_read_permissions = (
     {"contents": "read", "checks": "read"} if has_ci_assert else {"contents": "read"}
 )
@@ -6102,8 +6119,14 @@ expected_verification_step_identities.extend((
     ("Run dependency lifecycle scripts without credentials", ""),
     ("Prepare release package metadata", ""),
     ("Stamp the dispatched package versions", ""),
-    ("Run the release verification suite", ""),
 ))
+if has_ci_assert:
+    expected_verification_step_identities.append(
+        ("Assert required CI on the release head", "")
+    )
+expected_verification_step_identities.append(
+    ("Run the release verification suite", "")
+)
 verification_step_identities = []
 for step in verification_job_steps:
     fields = step_mapping_entries(step)
