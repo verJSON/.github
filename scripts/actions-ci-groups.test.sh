@@ -1591,6 +1591,10 @@ NON_GATE_MODULES = {
     "scripts/ci-gate/conformance/yaml_documents.py": (
         "cached workflow loader imported by the conformance modules"
     ),
+    "scripts/ci-gate/assert-release-head-ci.sh": (
+        "release exact-head CI assert helper (ADR 0291); invoked by its "
+        "registered test and by generated release callers once --require-ci-context is wired"
+    ),
 }
 
 
