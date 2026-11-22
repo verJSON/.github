@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0295](0295-primary-environment-followup-arb/README.md) | 2026-11-22 | Archive the primary environment follow-up board |
 | [0294](0294-primary-environment-delivery-arb/README.md) | 2026-11-22 | Archive the primary environment delivery board |
 | [0293](0293-release-ci-trust-rebased-head-delivery-arb/README.md) | 2026-11-20 | Delivery ARB archive for the rebased .github#2261 head |
 | [0292](0292-release-trust-exact-head-ci-delivery-arb/README.md) | 2026-11-20 | Delivery ARB archive for .github#2261 release CI trust |
