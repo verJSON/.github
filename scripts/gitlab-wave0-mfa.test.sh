@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# Load the function directly from the Markdown runbook.
+# shellcheck source=/dev/null
 source <(sed -n '/^wave0_privileged_mfa() {$/,/^}$/p' \
   "$root/docs/infrastructure/gitlab-rehearsal-wave0.md")
 declare -F wave0_privileged_mfa >/dev/null

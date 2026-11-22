@@ -2,8 +2,12 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 runbook=$root/docs/infrastructure/gitlab-rehearsal-wave0.md
+# Load the probe functions directly from the Markdown runbook.
+# shellcheck source=/dev/null
 source <(sed -n '/^gitlab_probe_refmap() {$/,/^}$/p; /^assert_probe_refmap() {$/,/^}$/p; /^captured_id() {$/,/^}$/p; /^assert_target_fixture() {$/,/^}$/p; /^use_source_writer() {$/,/^}$/p' "$runbook")
+# shellcheck disable=SC2034 # Read by the sourced gitlab_probe_refmap function.
 GL_SSH=fixture
+# shellcheck disable=SC2034 # Read by the sourced gitlab_probe_refmap function.
 GL_GROUP=rehearsal
 ssh_with() { printf 'fixture-read-only'; }
 git() {
@@ -33,6 +37,7 @@ scratch=$(mktemp -d)
 trap 'rm -r "$scratch"' EXIT
 WORK=$scratch/work
 mkdir "$WORK"
+# shellcheck disable=SC2034 # Read by the sourced use_source_writer function.
 GH_ORG=fixture
 WAVE0_RUNBOOK_COMMIT=0123456789abcdef0123456789abcdef01234567
 mkdir "$scratch/writer" "$scratch/reader"
