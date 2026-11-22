@@ -46,16 +46,20 @@ ADR 0256 §7.
 | `<github-caller-workflow>`, `<envelope-artifact>`, `<envelope-path>` | Names the generated callers define (§9, §10) |
 | `<sha>`, `<run-id>`, `<job-id>` | The commit and the runs being compared (§9, §10) |
 
-`glab` must already be logged in to `<gitlab-host>` as an administrator. `gh` must be
-logged in to GitHub with one of these, on the three repositories only:
+`glab` must already be logged in to `<gitlab-host>` as an administrator. For read-only
+inventory and verification, `gh` must be logged in to GitHub with one of these:
 
-- a fine-grained token with *Metadata: read*, *Contents: write* (§8.2 probes, §9
-  branches), *Webhooks: read* and *Secrets: read* (§2.2), *Actions: write* (§2.2
-  environments, §9 workflow runs) and *Workflows: write* (§9 callers). Add
-  *Administration: write* only if the owner decides to toggle Actions on
-  `demo-repository` (§9);
+- a fine-grained token with *Metadata: read*, *Contents: read*, *Webhooks: read*,
+  *Secrets: read* and the read permissions named in §2.2, on the three repositories;
 - or a classic token with the `repo` scope, held by a user with the admin role on the
-  three repositories.
+  three repositories, used only for read operations.
+
+Source mutations in §8.2 and §9 require a separate fine-grained writer profile for the
+single approved fixture, using an owner-verified identity and a separate `GH_CONFIG_DIR`
+outside `<work>`. The three-repository profile and classic fallback cannot authorize
+those writes. Grant *Contents: write* for that fixture. For §9, grant *Workflows: write*
+only for the reviewed caller and *Actions: write* only for the approved dispatch.
+Any change to repository Actions settings stays with the source owner.
 
 §2.2 stops with the missing permission named when a listing is refused. Neither token is
 ever printed, written into `<work>`, or passed on a command line.
@@ -70,6 +74,9 @@ sourcing `<work>/env.sh` (§1).
 - [ ] ARB has approved ADR 0258 and this plan.
 - [ ] The owner's go-ahead is recorded on #1264. It names the operator and the window,
       and says whether the CI leg (§9) is in scope.
+- [ ] Run every block from the same immutable runbook commit that both forge owners
+      reviewed for this window. Record the commit and verify the checkout before
+      extracting or running any block.
 - [ ] The window does not overlap ADR 0256's nightly quiesce window.
 - [ ] The instance runs GitLab 18.11 or later (ADR 0258 §2). §2.1 checks it and stops
       otherwise.
@@ -77,8 +84,9 @@ sourcing `<work>/env.sh` (§1).
       a replacement and ADR 0258 §3 and this plan are amended first (§8.2 needs its
       default branch and a second branch at a different commit).
 
-No fresh backup is needed. The rehearsal writes only to a new group and a new service
-account, and §11 removes both. It does not touch any existing project, runner or data.
+No fresh backup is needed for the isolated rehearsal. GitLab writes stay inside its
+new group and resources. GitHub writes, if approved, are limited to the named source
+refs in §8.2 and §9, within the owner-approved window.
 
 ## 1. Operator environment (read-only)
 
@@ -102,6 +110,7 @@ GL_GROUP='<rehearsal-group>'
 GH_ORG='verJSON'
 WORK='<work>'
 REPOS='agile-ai-manifesto demo-repository required-reviewers-rehearsal'
+WAVE0_RUNBOOK_COMMIT='<reviewed-immutable-runbook-commit>'
 # ssh reads UserKnownHostsFile as a space-separated list, so no quoting makes a
 # whitespace path safe there.
 case $WORK in *[[:space:]]*) echo 'STOP: <work> must not contain whitespace' >&2; exit 1 ;; esac
@@ -118,7 +127,11 @@ gl_get() {
   cat "$WORK/gl_get.err" >&2; return 1
 }
 # snapshot_ok <name>: §2.1 wrote <work>/pre-<name>.json as a JSON array of ids.
-snapshot_ok() { jq -e 'type == "array" and all(.[]; type == "number")' "$WORK/pre-$1.json" >/dev/null 2>&1; }
+snapshot_ok() {
+  jq -se 'length == 1 and (.[0] | type == "array"
+    and all(.[]; type == "number" and . > 0 and . == floor)
+    and length == (unique | length))' "$WORK/pre-$1.json" >/dev/null 2>&1
+}
 # rehearsal_group_lookup: the group by §3's id when the file holds one and it answers,
 # else by path. Same exit codes as gl_get.
 rehearsal_group_lookup() {
@@ -130,17 +143,106 @@ rehearsal_group_lookup() {
   fi
   gl_get "groups/$(jq -rn --arg g "$GL_GROUP" '$g | @uri')"
 }
-# rehearsal_group: print the group only if it is provably the one §3 created: exact path,
-# §3's marker, and an id absent from §2.1's snapshot. Exit 0 ours, 4 absent, 1 otherwise.
+# Reserve before POST. An empty receipt records an ambiguous attempt.
+reserve_receipt() {
+  (set -o noclobber; : > "$1") 2>/dev/null || {
+    echo 'STOP: existing or unwritable create receipt; reconcile with the owner' >&2
+    return 1
+  }
+}
+# Validate the response and exclude IDs already in the preflight snapshot.
+capture_create_id() {
+  local kind=$1 check=$2; shift 2
+  jq -ser --slurpfile pre "$WORK/pre-$kind.json" "$@" '
+    if length == 1 and (.[0] | type == "object"
+      and (.id | type == "number" and . > 0 and . == floor))
+      and (.[0].id as $id | $pre[0] | index($id) == null)
+      and (.[0] | '"$check"')
+    then .[0].id else error("unverified create response") end' 2>/dev/null
+}
+# A create receipt must contain one positive numeric ID. Exit 4 only if absent.
+captured_id() {
+  local id
+  [ -e "$1" ] || return 4
+  [ -f "$1" ] || return 1
+  id=$(cat "$1") || return 1
+  [[ $id =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "$id"
+}
+# Path and marker corroborate the create receipt. Neither replaces it.
 rehearsal_group() {
-  local g rc=0
-  snapshot_ok groups || { echo "REFUSE: no valid pre-groups.json from §2.1" >&2; return 1; }
+  local g rc=0 id capture_rc=0
+  snapshot_ok groups || return 1
+  id=$(captured_id "$WORK/group.id") || capture_rc=$?
+  [ "$capture_rc" != 1 ] || return 1
   g=$(rehearsal_group_lookup) || rc=$?
   [ "$rc" = 0 ] || return "$rc"
-  jq -e --arg p "$GL_GROUP" --arg m "$GL_GROUP_MARKER" --slurpfile pre "$WORK/pre-groups.json" \
-    '.full_path == $p and .description == $m and (.id as $i | $pre[0] | index($i) | not)' \
-    <<<"$g" >/dev/null || { echo "REFUSE: $GL_GROUP is not the group §3 created" >&2; return 1; }
+  [ "$capture_rc" = 0 ] || return 1
+  jq -se --argjson id "$id" --arg p "$GL_GROUP" --arg m "$GL_GROUP_MARKER" \
+    --slurpfile pre "$WORK/pre-groups.json" \
+    'length == 1 and (.[0] | .id == $id and .full_path == $p and .description == $m)
+     and ($pre[0] | index($id) == null)' <<<"$g" >/dev/null || return 1
   printf '%s\n' "$g"
+}
+gitlab_probe_refmap() {
+  GIT_SSH_COMMAND=$(ssh_with "$1.ro.key") git ls-remote --heads --tags "$GL_SSH/$GL_GROUP/$1.git" \
+    | LC_ALL=C sort -k2,2
+}
+assert_probe_refmap() {
+  local current
+  current=$(gitlab_probe_refmap "$1") || {
+    echo 'FAIL: cannot read GitLab branch/tag map after probe' >&2; return 1;
+  }
+  [ "$current" = "$2" ] || {
+    echo 'FAIL: GitLab branch/tag map changed during a refused probe' >&2; return 1;
+  }
+}
+# Require one valid OID for the exact ref, excluding any peeled companion.
+probe_ref_oid() {
+  local oid
+  oid=$(awk -v ref="$2" '$2 == ref { print $1 }' <<<"$1") || return 1
+  [[ $oid =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || return 1
+  printf '%s\n' "$oid"
+}
+assert_target_fixture() {
+  local repo=$1 project_id group group_id
+  project_id=$(captured_id "$WORK/$repo.project.id") || return 1
+  group=$(rehearsal_group) || return 1
+  group_id=$(jq -er .id <<<"$group") || return 1
+  gl_get "projects/$project_id" | jq -se --argjson id "$project_id" --argjson gid "$group_id" \
+    --arg path "$GL_GROUP/$repo" \
+    --arg marker "One-way mirror of GitHub verJSON/$repo. ADR 0258 wave 0. Read-only." '
+    length == 1 and (.[0] | .id == $id and .namespace.id == $gid
+      and .path_with_namespace == $path and .visibility == "private" and .description == $marker)' >/dev/null
+}
+# Switch only a source mutation script to the separate owner-approved writer.
+use_source_writer() {
+  local repo=$1 source_id project_id record config reader login
+  [[ $WAVE0_RUNBOOK_COMMIT =~ ^[0-9a-f]{40}$ ]] || return 1
+  source_id=$(captured_id "$WORK/$repo.github.id") || return 1
+  project_id=$(captured_id "$WORK/$repo.project.id") || return 1
+  record="$WORK/$repo.source-writer.json"
+  jq -se --arg repo "$GH_ORG/$repo" --arg pin "$WAVE0_RUNBOOK_COMMIT" \
+    --argjson github "$source_id" --argjson gitlab "$project_id" '
+    length == 1 and (.[0] | .repository == $repo and .runbook_commit == $pin
+      and .github_id == $github and .gitlab_id == $gitlab
+      and (.login | type == "string" and length > 0)
+      and (.gh_config_dir | type == "string" and startswith("/")))' "$record" >/dev/null \
+    || { echo 'STOP: source writer record does not match approved fixture and runbook' >&2; return 1; }
+  config=$(realpath -e -- "$(jq -r .gh_config_dir "$record")") || return 1
+  reader=$(realpath -m -- "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}") || return 1
+  [ -d "$config" ] && [ "$config" != "$reader" ] || return 1
+  case "$config/" in "$WORK/"*) return 1 ;; esac
+  login=$(jq -r .login "$record") || return 1
+  unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+  export GH_CONFIG_DIR="$config"
+  gh api user | jq -se --arg login "$login" 'length == 1 and .[0].login == $login' >/dev/null \
+    || { echo 'STOP: source writer login does not match owner record' >&2; return 1; }
+  gh api "repos/$GH_ORG/$repo" | jq -se --argjson id "$source_id" \
+    'length == 1 and (.[0] | .id == $id and .private == true)' >/dev/null \
+    || { echo 'STOP: source fixture identity changed' >&2; return 1; }
+  assert_target_fixture "$repo" \
+    || { echo 'STOP: target fixture identity changed' >&2; return 1; }
 }
 ssh_with() {
   printf 'ssh -F none -i %q -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile=%q -o StrictHostKeyChecking=yes' \
@@ -276,6 +378,8 @@ none() {
 for r in $REPOS; do
   gh api "repos/$GH_ORG/$r" --jq '[.full_name, .visibility, .archived, .default_branch] | @tsv'
   gh api "repos/$GH_ORG/$r" --jq .default_branch > "$WORK/$r.default"
+  gh api "repos/$GH_ORG/$r" | jq -er '.id | select(type == "number" and . > 0 and . == floor)' \
+    > "$WORK/$r.github.id"
   [ "$(gh api "repos/$GH_ORG/$r" --jq .archived)" = false ] || { echo "STOP: $r archived"; fail=1; }
   none 'webhooks' 'Webhooks: read' "repos/$GH_ORG/$r/hooks" length || fail=1
   none 'Actions secrets' 'Secrets: read' "repos/$GH_ORG/$r/actions/secrets" .total_count || fail=1
@@ -289,7 +393,7 @@ done
 exit "$fail"
 ```
 
-**Check:** exit status 0. Keep `<repo>.pre.refs`: §11 restores the GitHub side to it.
+**Check:** exit status 0. Keep `<repo>.pre.refs`: §11 uses it for readback.
 
 ## 3. Create the rehearsal group
 
@@ -297,12 +401,18 @@ exit "$fail"
 
 ```sh
 . '<work>/env.sh'
-jq -n --arg g "$GL_GROUP" --arg m "$GL_GROUP_MARKER" '{name: $g, path: $g, visibility: "private",
+snapshot_ok groups || { echo 'STOP: invalid group snapshot'; exit 1; }
+reserve_receipt "$WORK/group.id"
+group_id=$(jq -n --arg g "$GL_GROUP" --arg m "$GL_GROUP_MARKER" '{name: $g, path: $g, visibility: "private",
   description: $m,
   project_creation_level: "maintainer", subgroup_creation_level: "owner",
   request_access_enabled: false}' \
-| gl -X POST groups -H 'Content-Type: application/json' --input - | jq -r .id > "$WORK/group.id"
-gl "groups/$(cat "$WORK/group.id")" | jq -e '.visibility == "private"' >/dev/null
+  | gl -X POST groups -H 'Content-Type: application/json' --input - \
+  | capture_create_id groups '.full_path == $path and .description == $marker and .visibility == "private"' \
+      --arg path "$GL_GROUP" --arg marker "$GL_GROUP_MARKER") \
+  || { echo 'STOP: group creation outcome unverified; preserve the empty receipt'; exit 1; }
+printf '%s\n' "$group_id" > "$WORK/group.id"
+rehearsal_group >/dev/null
 ```
 
 ## 4. Create the mirror projects
@@ -311,8 +421,12 @@ gl "groups/$(cat "$WORK/group.id")" | jq -e '.visibility == "private"' >/dev/nul
 
 ```sh
 . '<work>/env.sh'
+snapshot_ok projects || { echo 'STOP: invalid project snapshot'; exit 1; }
+g=$(rehearsal_group) || { echo 'STOP: cannot prove rehearsal group ownership'; exit 1; }
+gid=$(jq -er .id <<<"$g")
 for r in $REPOS; do
-  jq -n --arg r "$r" --argjson ns "$(cat "$WORK/group.id")" '{
+  reserve_receipt "$WORK/$r.project.id"
+  project_id=$(jq -n --arg r "$r" --argjson ns "$gid" '{
     name: $r, path: $r, namespace_id: $ns, visibility: "private",
     description: "One-way mirror of GitHub verJSON/\($r). ADR 0258 wave 0. Read-only.",
     initialize_with_readme: false, lfs_enabled: false, shared_runners_enabled: false,
@@ -321,12 +435,20 @@ for r in $REPOS; do
     builds_access_level: "disabled", container_registry_access_level: "disabled",
     package_registry_access_level: "disabled", pages_access_level: "disabled",
     releases_access_level: "disabled", environments_access_level: "disabled"}' \
-  | gl -X POST projects -H 'Content-Type: application/json' --input - | jq -r .id > "$WORK/$r.project.id"
-  gl "projects/$(pid "$r")" | jq -e '
-    .visibility == "private" and .lfs_enabled == false and .shared_runners_enabled == false
+  | gl -X POST projects -H 'Content-Type: application/json' --input - \
+  | capture_create_id projects '.namespace.id == $gid and .path_with_namespace == $path
+      and .description == $marker and .visibility == "private"' --argjson gid "$gid" \
+      --arg path "$GL_GROUP/$r" --arg marker "One-way mirror of GitHub verJSON/$r. ADR 0258 wave 0. Read-only.") \
+    || { echo 'STOP: project creation outcome unverified; preserve the empty receipt'; exit 1; }
+  printf '%s\n' "$project_id" > "$WORK/$r.project.id"
+  gl "projects/$project_id" | jq -se --argjson id "$project_id" --argjson gid "$gid" \
+    --arg path "$GL_GROUP/$r" --arg marker "One-way mirror of GitHub verJSON/$r. ADR 0258 wave 0. Read-only." '
+    length == 1 and (.[0] | .id == $id and .namespace.id == $gid
+    and .path_with_namespace == $path and .description == $marker
+    and .visibility == "private" and .lfs_enabled == false and .shared_runners_enabled == false
     and ([.issues_access_level, .merge_requests_access_level, .wiki_access_level,
           .snippets_access_level, .builds_access_level, .container_registry_access_level,
-          .package_registry_access_level] | all(. == "disabled"))' >/dev/null \
+          .package_registry_access_level] | all(. == "disabled")))' >/dev/null \
     || { echo "STOP: $r settings did not read back as requested"; exit 1; }
   [ "$(gl "projects/$(pid "$r")/hooks" | jq length)" = 0 ] || { echo "STOP: $r has hooks"; exit 1; }
 done
@@ -552,6 +674,13 @@ line in the receipt (§12).
 
 ## 8. Negative tests and incremental sync
 
+Before any probe, both forge owners must approve one attended writer window and record
+the exact isolated source repository and target project IDs in the private rehearsal
+record. Keep other writers and automation out of both repositories for that window.
+Confirm that source ref changes cannot run an unintended workflow, integration or webhook,
+or publish artifacts or notifications. If either owner cannot establish isolation, skip
+the probes and record the hold. Verify and reconcile all residue before ending the window.
+
 ### 8.1 Writes that must be rejected
 
 **Requires owner-approved rehearsal.** These attempt writes, and each must fail for the
@@ -561,14 +690,27 @@ stated reason.
 . '<work>/env.sh'
 for r in $REPOS; do
   bare="$WORK/$r.git"; def=$(cat "$WORK/$r.default"); gl_url="$GL_SSH/$GL_GROUP/$r.git"
+  assert_target_fixture "$r" || { echo 'STOP: target fixture identity changed'; exit 1; }
+  before=$(gitlab_probe_refmap "$r")
+  default_ref="refs/heads/$def"
+  default_oid=$(probe_ref_oid "$before" "$default_ref") \
+    || { echo 'STOP: target default branch OID is missing or invalid'; exit 1; }
+  if awk '$2 == "refs/heads/wave0-negative" { found = 1 } END { exit !found }' <<<"$before"; then
+    echo 'STOP: target negative-test ref already exists'; exit 1
+  fi
   # A root commit is never a fast-forward of the default branch.
   stray=$(git -C "$bare" commit-tree -m 'wave0 negative test' "refs/incoming/heads/$def^{tree}")
-  out=$(GIT_SSH_COMMAND=$(ssh_with "$r.key") git -C "$bare" push "$gl_url" "+$stray:refs/heads/$def" 2>&1) \
+  out=$(GIT_SSH_COMMAND=$(ssh_with "$r.key") git -C "$bare" push \
+    --force-with-lease="$default_ref:$default_oid" "$gl_url" "$stray:$default_ref" 2>&1) \
     && { echo "FAIL $r: non-fast-forward push to $def was accepted"; exit 1; }
   grep -qi 'protected branch' <<<"$out" || { echo "FAIL $r: rejected for another reason: $out"; exit 1; }
-  out=$(GIT_SSH_COMMAND=$(ssh_with "$r.ro.key") git -C "$bare" push "$gl_url" "$stray:refs/heads/wave0-negative" 2>&1) \
+  assert_probe_refmap "$r" "$before"
+  assert_target_fixture "$r" || { echo 'STOP: target fixture identity changed'; exit 1; }
+  out=$(GIT_SSH_COMMAND=$(ssh_with "$r.ro.key") git -C "$bare" push \
+    --force-with-lease=refs/heads/wave0-negative: "$gl_url" "$stray:refs/heads/wave0-negative" 2>&1) \
     && { echo "FAIL $r: read-only key pushed"; exit 1; }
   grep -qi 'write access' <<<"$out" || { echo "FAIL $r: rejected for another reason: $out"; exit 1; }
+  assert_probe_refmap "$r" "$before"
   echo "PASS $r: both writes rejected for the expected reason"
 done
 ```
@@ -578,44 +720,76 @@ runs there.
 
 ### 8.2 Incremental sync probes in `required-reviewers-rehearsal`
 
-**Requires owner-approved rehearsal.** These write to GitHub, but only in the throwaway
-repository.
+**Requires explicit source-owner and target-owner approval.** The source operator needs
+repository-scoped GitHub Contents write permission for exactly the approved private
+throwaway fixture. The allowed source mutations are create and delete of
+`refs/heads/wave0-probe` and create, move and delete of `refs/tags/wave0-probe`.
+Use the fixture's approved operator identity, not a broader automation credential.
+Record the owner-authorized writer after verifying both fixture identities. The private
+`$WORK/<repository>.source-writer.json` holds `repository` (owner/name), `github_id`
+and `gitlab_id` (numbers), `runbook_commit`, `login` and the absolute `gh_config_dir`
+of the separate writer profile. The owner records the profile's exact allowed scopes
+and confirms its authentication independently. The file carries no credential values.
+Creation refuses an occupied name. Subsequent Git pushes use the exact previous OID
+as a lease. A missing response or failed lease stops the probe for owner reconciliation.
 
 ```sh
 . '<work>/env.sh'
 # The probe repository and its two branches. Change these only together with ADR 0258 §3.
 R=required-reviewers-rehearsal
+use_source_writer "$R" || { echo 'STOP: approved source writer unavailable'; exit 1; }
 base_branch=$(cat "$WORK/$R.default")   # the default branch, from §2.2
 second_branch=t5-readme                 # any other branch whose head differs
-api="repos/$GH_ORG/$R/git"
+source="repos/$GH_ORG/$R"
+api="$source/git"
 base=$(gh api "$api/ref/heads/$base_branch" --jq .object.sha)
 other=$(git ls-remote "https://github.com/$GH_ORG/$R.git" "refs/heads/$second_branch" | cut -f1)
 [ -n "$other" ] && [ "$other" != "$base" ] || { echo 'STOP: no second commit to probe with'; exit 1; }
 
 # Each sync and each verification is its own command, so set -e stops on either.
 # a. A branch is created on GitHub, then deleted. GitLab follows both.
-gh api -X POST "$api/refs" -f ref=refs/heads/wave0-probe -f sha="$base" >/dev/null
+gh api -X POST "$api/refs" -f ref=refs/heads/wave0-probe -f sha="$base" \
+  | jq -er --arg oid "$base" 'select(.ref == "refs/heads/wave0-probe" and .object.sha == $oid) | .object.sha' \
+  > "$WORK/wave0-probe.branch.oid"
 bash "$WORK/sync.sh" "$R"
 bash "$WORK/verify.sh" "$R"
-gh api -X DELETE "$api/refs/heads/wave0-probe"
+git -C "$WORK/$R.git" push --force-with-lease="refs/heads/wave0-probe:$base" \
+  "https://github.com/$GH_ORG/$R.git" :refs/heads/wave0-probe
 bash "$WORK/sync.sh" "$R"
 bash "$WORK/verify.sh" "$R"
 
 # b. A tag is created on GitHub. GitLab gets it, and it is protected there.
-gh api -X POST "$api/refs" -f ref=refs/tags/wave0-probe -f sha="$base" >/dev/null
+gh api -X POST "$api/refs" -f ref=refs/tags/wave0-probe -f sha="$base" \
+  | jq -er --arg oid "$base" 'select(.ref == "refs/tags/wave0-probe" and .object.sha == $oid) | .object.sha' \
+  > "$WORK/wave0-probe.tag.oid"
 bash "$WORK/sync.sh" "$R"
 bash "$WORK/verify.sh" "$R"
-out=$(GIT_SSH_COMMAND=$(ssh_with "$R.key") git -C "$WORK/$R.git" push "$GL_SSH/$GL_GROUP/$R.git" :refs/tags/wave0-probe 2>&1) \
+before=$(gitlab_probe_refmap "$R")
+target_tag_oid=$(probe_ref_oid "$before" refs/tags/wave0-probe) \
+  || { echo 'STOP: target probe tag OID is missing or invalid'; exit 1; }
+[ "$target_tag_oid" = "$base" ] || { echo 'STOP: target probe tag OID changed'; exit 1; }
+assert_target_fixture "$R" || { echo 'STOP: target fixture identity changed'; exit 1; }
+out=$(GIT_SSH_COMMAND=$(ssh_with "$R.key") git -C "$WORK/$R.git" push \
+  --force-with-lease="refs/tags/wave0-probe:$target_tag_oid" "$GL_SSH/$GL_GROUP/$R.git" :refs/tags/wave0-probe 2>&1) \
   && { echo 'FAIL: the deploy key deleted a protected tag'; exit 1; }
 grep -qi 'protected' <<<"$out" || { echo "FAIL: rejected for another reason: $out"; exit 1; }
 
-# c. The tag moves on GitHub. The sync must refuse, and GitLab must keep the old tag.
-gh api -X PATCH "$api/refs/tags/wave0-probe" -f sha="$other" -F force=true >/dev/null
+assert_probe_refmap "$R" "$before"
+
+# c. Move, then delete the source tag. Each attempt must leave every target ref intact.
+git -C "$WORK/$R.git" push --force-with-lease="refs/tags/wave0-probe:$base" \
+  "https://github.com/$GH_ORG/$R.git" "$other:refs/tags/wave0-probe"
+printf '%s\n' "$other" > "$WORK/wave0-probe.tag.oid"
 rc=0; bash "$WORK/sync.sh" "$R" || rc=$?
-[ "$rc" = 3 ] || { echo "FAIL: expected the policy refusal (exit 3), got exit $rc"; exit 1; }
-GIT_SSH_COMMAND=$(ssh_with "$R.ro.key") git ls-remote "$GL_SSH/$GL_GROUP/$R.git" refs/tags/wave0-probe \
-  | grep -q "^$base" || { echo 'FAIL: the GitLab tag changed'; exit 1; }
-echo 'PASS: branch create/delete followed; tag protected; moved tag refused'
+[ "$rc" = 3 ] || { echo "FAIL: expected moved-tag refusal (exit 3), got exit $rc"; exit 1; }
+assert_probe_refmap "$R" "$before"
+
+git -C "$WORK/$R.git" push --force-with-lease="refs/tags/wave0-probe:$other" \
+  "https://github.com/$GH_ORG/$R.git" :refs/tags/wave0-probe
+rc=0; bash "$WORK/sync.sh" "$R" || rc=$?
+[ "$rc" = 3 ] || { echo "FAIL: expected missing-tag refusal (exit 3), got exit $rc"; exit 1; }
+assert_probe_refmap "$R" "$before"
+echo 'PASS: branch create/delete followed; tag protected; moved and missing tags refused'
 ```
 
 The wave 0 sync is attended, so it measures how long a sync takes, not mirror lag. Lag
@@ -634,18 +808,45 @@ is first measured in wave 1, against the scheduled worker.
       written by hand.
 - [ ] The owner has decided whether Actions is enabled on `demo-repository` for the
       comparison window (#1869).
+- [ ] Both forge owners approved the optional leg, its exact fixture IDs, isolated
+      writer profile, branch names and intended workflow effects under §8. The
+      approvals name the reviewed runbook commit and apply to this window.
 - [ ] The runner owner (verjson-git-runners) has registered a runner for
       `<rehearsal-group>` only. It runs protected refs only, carries the tag
       `<rehearsal-runner-tag>`, is unprivileged with narrow egress, and is the runner whose admission evidence the
       first box accepted. Registration goes
-      through `POST /user/runners`, never a legacy registration token.
+      through `POST /user/runners`, never a legacy registration token. Before calling it,
+      the rehearsal operator runs `reserve_receipt "$WORK/runner.id"`. The runner owner
+      records the exact validated ID from the response, bound to the approved group and
+      manager deployment in the private record. An ambiguous response leaves the receipt
+      empty and blocks teardown until the owner reconciles the attempt.
+
+Save this source push block as `<work>/ci-source-push.sh`. Pass the exact branch name
+and the approved local checkout of the prepared commit. Do not bypass this block
+with a direct push. The private source-writer record follows §8.2 for
+`demo-repository`.
+
+```sh
+#!/usr/bin/env bash
+. '<work>/env.sh'
+branch=$1
+case $branch in rehearsal/ci-parity|rehearsal/ci-inject-failure) ;; *) exit 1 ;; esac
+R=demo-repository
+use_source_writer "$R" || { echo 'STOP: approved source writer unavailable'; exit 1; }
+ref="refs/heads/$branch"
+oid=$(git -C "$2" rev-parse --verify 'HEAD^{commit}')
+receipt="$WORK/${branch##*/}.source.oid"
+reserve_receipt "$receipt"
+git -C "$2" push --force-with-lease="$ref:" "https://github.com/$GH_ORG/$R.git" "$oid:$ref"
+printf '%s\n' "$oid" > "$receipt"
+```
 
 **Steps:**
 
 1. **Generate the callers.** On a new GitHub branch `rehearsal/ci-parity` of
    `demo-repository`, run `<verjson-ci-generator-command>` from that pinned release for
    the GitHub and GitLab callers of the repository's portable, credentialless workload
-   (`proof-html`). Push the branch to GitHub. Do not merge it.
+   (`proof-html`). Push with the block above. Do not merge it.
 2. **Admit the branch on GitLab.** Protect `rehearsal/*` on the GitLab project, pushable
    only by the deploy key, as in §5.5, so the protected-only runner admits it. Set
    `builds_access_level` to `enabled`. If the generator writes the caller somewhere other
@@ -653,11 +854,13 @@ is first measured in wave 1, against the scheduled worker.
 3. **Run the GitLab leg.** Run `sync.sh demo-repository`. The mirror push creates the
    pipeline. Record it with
    `gl "projects/$(pid demo-repository)/pipelines?sha=<sha>"`.
-4. **Run the GitHub leg.** Run
+4. **Run the GitHub leg.** In a dedicated script that sources `env.sh` and successfully
+   calls `use_source_writer demo-repository`, run
    `gh workflow run <github-caller-workflow> --repo verJSON/demo-repository --ref rehearsal/ci-parity`,
    then `gh run watch`.
-5. **Inject a failure.** Push a second branch, `rehearsal/ci-inject-failure`, with one
-   commit that breaks the declared workload, such as a broken link in `index.html`.
+5. **Inject a failure.** Use the same source push block for
+   `rehearsal/ci-inject-failure`, with one commit that breaks the declared workload,
+   such as a broken link in `index.html`.
    Repeat steps 3 and 4 for it.
 
 ## 10. Compare GitLab with GitHub Actions (read-only)
@@ -684,138 +887,195 @@ ADR 0161 phase 2 owns that.
 
 ## 11. Teardown
 
-**Requires owner-approved rehearsal.** Run this only after §3 or later has started; a
-failure in §0 to §2 needs no teardown. GitLab goes first: the projects and their deploy
-keys, then the service account, then the group. The GitHub probe refs go last.
+**Requires owner-approved rehearsal.** Run only after §3 has started and keep the group
+quiescent under the owner's control. Every deletion requires the exact ID captured from
+§3, §4 or §5 and matching current metadata. Snapshots exclude pre-existing IDs. An empty
+or malformed receipt, an unrecognized occupant or an unreadable inventory stops teardown.
+Do not repair a missing receipt by copying an ID from the current inventory.
 
-Teardown deletes only what it can prove the rehearsal created:
+Teardown reports GitHub probe refs without deleting them. Reconcile residue with the
+owner using the successful operation's expected OID and an explicit Git lease. Leave a
+ref alone if either ownership or the expected OID is uncertain.
 
-- The group must have the exact path, §3's description marker, and an id absent from
-  §2.1's `pre-groups.json`.
-- Projects, deploy keys and service accounts in §2.1's snapshots are never touched, nor
-  are probe refs that existed in §2.2's `pre.refs`. Each one skipped is a `WARN` and a
-  non-zero exit.
-- The group itself is deleted last, and only when every listing succeeded, it has no
-  descendant group, and no project left in it, at any depth, is in `pre-projects.json`.
-  Deleting a group deletes everything in it, so anything that was moved in is a reason
-  to stop, not to skip.
-- Without the snapshots it deletes nothing.
-
-One race remains. Someone with Owner or administrator rights could move a project or
-group into the rehearsal group between the final listings and the group `DELETE`. Group
-deletion is delayed, so the group stays restorable until the instance's retention ends,
-and the readback below checks again that the group is empty. **If the readback finds the
-scheduled group holding any project or descendant group, restore the group
-(`POST /groups/:id/restore`) and investigate before retention ends.**
+Group deletion is delayed. A writer outside this rehearsal could add an object after
+the final inventory. If readback finds that the scheduled group contains any project,
+service account, group runner or descendant, restore it (`POST /groups/:id/restore`)
+and investigate.
 
 ```sh
 . '<work>/env.sh'
-# Every step runs even if an earlier one failed, and work comes from what GitLab holds,
-# filtered by §2.1's snapshots, not from id files a failed run may never have written.
-fail=0
-step() { "$@" >/dev/null || { echo "WARN: failed: $*" >&2; fail=1; }; }
-# keep_new <snapshot> <what> <ids...>: KEPT gets the ids absent from §2.1's snapshot.
-# Runs in this shell, never in $(...), so that a skip reaches $fail.
-keep_new() {
-  local snap=$1 what=$2 i; shift 2; KEPT=''
-  for i in "$@"; do
-    if jq -e --argjson i "$i" 'any(.[]; . == $i)' "$WORK/pre-$snap.json" >/dev/null; then
-      echo "WARN: $what $i existed before the rehearsal; left alone" >&2; fail=1
-    else
-      KEPT="$KEPT $i"
-    fi
+stop() { echo "STOP: $*" >&2; exit 1; }
+# Accept a genuine empty page. Reject missing pages, malformed or duplicate IDs, and
+# failing requests (env.sh enables pipefail).
+teardown_list() {
+  gl --paginate "$1" 2>/dev/null | jq -sc '
+    if length > 0 and all(.[]; type == "array")
+      and (add | all(.[]; type == "object" and (.id | type == "number" and . > 0 and . == floor))
+        and (map(.id) | length == (unique | length)))
+    then add else error("unreadable inventory") end' 2>/dev/null
+}
+receipt() {
+  local id rc=0
+  id=$(captured_id "$WORK/$1") || rc=$?
+  case $rc in
+    0) jq -e --argjson id "$id" 'index($id) == null' "$WORK/pre-$2.json" >/dev/null \
+         || stop 'create receipt conflicts with preflight'
+       printf '%s\n' "$id" ;;
+    4) ;;
+    *) stop 'create receipt is empty or invalid' ;;
+  esac
+}
+# A group listing can omit a moved or pending-deletion project. Confirm absent
+# captured projects by ID rather than assuming the parent listing was sufficient.
+confirm_omitted_projects() {
+  local repo id rc
+  for repo in $REPOS; do
+    id=$(receipt "$repo.project.id" projects) || exit 1
+    [ -n "$id" ] || continue
+    if jq -e --argjson id "$id" 'any(.[]; .id == $id)' <<<"$1" >/dev/null; then continue; fi
+    rc=0; gl_get "projects/$id" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 4 ] || stop 'captured project omitted from inventory is not confirmed absent'
   done
 }
-# ids <path>: every id of a paginated listing, one per line; none for an empty listing.
-# Fails only when glab or jq fails (pipefail), never because the listing is empty.
-ids() { gl --paginate "$1" | jq -s '[(add // [])[] | .id | numbers] | .[]'; }
-gl user | jq -e '.is_admin == true' >/dev/null \
-  || { echo 'STOP: glab is not signed in as a GitLab administrator; nothing deleted'; exit 1; }
-for snap in groups projects users deploy_keys; do
-  snapshot_ok "$snap" || { echo "STOP: pre-$snap.json from §2.1 is missing or invalid; nothing deleted"; exit 1; }
+project_matches() {
+  jq -se --argjson p "$2" --argjson g "$gid" --arg path "$GL_GROUP/$1" \
+    --arg marker "One-way mirror of GitHub verJSON/$1. ADR 0258 wave 0. Read-only." '
+    length == 1 and (.[0] | .id == $p and .namespace.id == $g
+      and .path_with_namespace == $path and .description == $marker)' >/dev/null
+}
+confirm_captured_account_absent() {
+  local rc=0
+  [ -n "$sa" ] || return 0
+  gl_get "users/$sa" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 4 ] || stop 'captured service account is not confirmed absent'
+}
+gl user | jq -e '.is_admin == true' >/dev/null || stop 'GitLab administrator required'
+for snap in groups projects users deploy_keys runners; do
+  snapshot_ok "$snap" || stop "missing or invalid pre-$snap.json"
 done
+for r in $REPOS; do
+  receipt "$r.project.id" projects >/dev/null || exit 1
+  receipt "$r.key.id" deploy_keys >/dev/null || exit 1
+  receipt "$r.ro.key.id" deploy_keys >/dev/null || exit 1
+done
+sa=$(receipt sa.id users) || exit 1
+runner_id=$(receipt runner.id runners) || exit 1
+if [ -n "$runner_id" ]; then
+  removed_id=$(captured_id "$WORK/runner.removed.id") \
+    || stop 'recorded runner requires attested owner cleanup before teardown'
+  [ "$removed_id" = "$runner_id" ] || stop 'owner cleanup receipt names a different runner'
+  rc=0; gl_get "runners/$runner_id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 4 ] || stop 'recorded runner requires attested owner cleanup before teardown'
+fi
 rc=0; g=$(rehearsal_group) || rc=$?
 case $rc in
   0) gid=$(jq -r .id <<<"$g") ;;
-  4) gid=''; echo "NOTE: no group $GL_GROUP on GitLab; nothing to remove there" ;;
-  *) gid=''; fail=1; echo "STOP: cannot prove $GL_GROUP is the rehearsal group; nothing deleted on GitLab" ;;
+  4) gid=''; confirm_captured_account_absent; echo 'NOTE: no GitLab rehearsal group to remove' ;;
+  *) stop 'cannot prove the group matches its create receipt and marker' ;;
 esac
 if [ -n "$gid" ]; then
-  listed=1
-  # 1. The group's own projects, never shared ones or any in §2.1's snapshot: remove their
-  #    new deploy keys (a key no other project uses is deleted with it), then the project.
-  found=$(gl --paginate "groups/$gid/projects?with_shared=false&include_subgroups=false&per_page=100" \
-    | jq -s --argjson g "$gid" '(add // [])[] | select(.namespace.id == $g) | .id | numbers') \
-    || { echo 'WARN: cannot list the rehearsal projects' >&2; fail=1; listed=0; found=''; }
-  keep_new projects project $found; projects=$KEPT
-  for p in $projects; do
-    found=$(ids "projects/$p/deploy_keys?per_page=100") \
-      || { echo "WARN: cannot list the deploy keys of project $p" >&2; fail=1; listed=0; found=''; }
-    keep_new deploy_keys 'deploy key' $found
-    for k in $KEPT; do step gl -X DELETE "projects/$p/deploy_keys/$k"; done
-    step gl -X DELETE "projects/$p"
-    # Gone (HTTP 404): done. Still answering and marked: delayed deletion, so remove it
-    # now (Free since GitLab 18.0). Still answering, unmarked: an immediate deletion still
-    # running in the background, which the readback catches. Anything else: unknown.
+  projects_path="groups/$gid/projects?with_shared=true&include_subgroups=true&per_page=100"
+  descendants_path="groups/$gid/descendant_groups?all_available=true&per_page=100"
+  accounts_path="groups/$gid/service_accounts?per_page=100"
+  runners_path="groups/$gid/runners?type=group_type&per_page=100"
+  runners=$(teardown_list "$runners_path") || stop 'cannot enumerate group runners'
+  [ "$runners" = '[]' ] || stop 'group runner requires owner cleanup'
+  projects=$(teardown_list "$projects_path") || stop 'cannot enumerate projects'
+  descendants=$(teardown_list "$descendants_path") || stop 'cannot enumerate descendants'
+  accounts=$(teardown_list "$accounts_path") || stop 'cannot enumerate service accounts'
+  [ "$descendants" = '[]' ] || stop 'rehearsal group has descendants'
+  confirm_omitted_projects "$projects"
+  jq -e --arg sa "$sa" 'all(.[]; (.id | tostring) == $sa
+    and .name == "verJSON mirror (wave 0 rehearsal)")' <<<"$accounts" >/dev/null \
+    || stop 'unrecognized service account'
+  if [ "$accounts" = '[]' ]; then confirm_captured_account_absent; fi
+  project_ids=() key_routes=() project_names=()
+  for p in $(jq -r '.[].id' <<<"$projects"); do
+    repo=''
+    for r in $REPOS; do
+      [ "$(receipt "$r.project.id" projects)" != "$p" ] || { repo=$r; break; }
+    done
+    [ -n "$repo" ] || stop 'project has no matching create receipt'
+    jq -c --argjson p "$p" '.[] | select(.id == $p)' <<<"$projects" \
+      | project_matches "$repo" "$p" || stop 'project path, namespace or marker changed'
+    project_runners=$(teardown_list "projects/$p/runners?type=project_type&per_page=100") \
+      || stop 'cannot enumerate project runners'
+    [ "$project_runners" = '[]' ] || stop 'project runner requires owner cleanup'
+    project_accounts=$(teardown_list "projects/$p/service_accounts?per_page=100") \
+      || stop 'cannot enumerate project service accounts'
+    [ "$project_accounts" = '[]' ] || stop 'project has unrecognized service accounts'
+    keys=$(teardown_list "projects/$p/deploy_keys?per_page=100") || stop 'cannot enumerate deploy keys'
+    for k in $(jq -r '.[].id' <<<"$keys"); do
+      if [ "$(receipt "$repo.key.id" deploy_keys)" = "$k" ]; then
+        key_file=$repo.key.pub; title=wave0-mirror-$repo; push=true
+      elif [ "$(receipt "$repo.ro.key.id" deploy_keys)" = "$k" ]; then
+        key_file=$repo.ro.key.pub; title=wave0-readonly-$repo; push=false
+      else
+        stop 'deploy key has no matching create receipt'
+      fi
+      material=$(awk 'NR == 1 && NF >= 2 { print $1 " " $2 }' "$WORK/$key_file") \
+        || stop 'cannot read the recorded public deploy key'
+      [ -n "$material" ] || stop 'missing recorded public deploy key'
+      jq -e --argjson k "$k" --arg t "$title" --arg m "$material" --argjson push "$push" '
+        any(.[]; .id == $k and .title == $t and .can_push == $push
+          and (.key | split(" ") | .[:2] | join(" ")) == $m)' <<<"$keys" >/dev/null \
+        || stop 'deploy key metadata or public key changed'
+      key_routes+=("projects/$p/deploy_keys/$k")
+    done
+    project_ids+=("$p"); project_names+=("$repo")
+  done
+
+  # Authorize the complete inventory before the first write.
+  for route in "${key_routes[@]}"; do gl -X DELETE "$route" >/dev/null || stop 'deploy key removal failed'; done
+  for i in "${!project_ids[@]}"; do
+    p=${project_ids[i]}; r=${project_names[i]}
+    gl -X DELETE "projects/$p" >/dev/null || stop 'project removal failed'
     rc=0; info=$(gl_get "projects/$p" 2>/dev/null) || rc=$?
     case $rc in
       4) ;;
-      0) if jq -e '(.marked_for_deletion_on // .marked_for_deletion_at) != null' <<<"$info" >/dev/null; then
-           path=$(jq -r '.path_with_namespace | @uri' <<<"$info")
-           step gl -X DELETE "projects/$p?permanently_remove=true&full_path=$path"
+      0) project_matches "$r" "$p" <<<"$info" || stop 'project identity changed during removal'
+         if jq -e '(.marked_for_deletion_on // .marked_for_deletion_at) != null' <<<"$info" >/dev/null; then
+           path=$(jq -er '.path_with_namespace | @uri' <<<"$info") || stop 'project path is unreadable'
+           gl -X DELETE "projects/$p?permanently_remove=true&full_path=$path" >/dev/null \
+             || stop 'permanent project removal failed'
          fi ;;
-      *) echo "WARN: cannot read whether project $p is deleted" >&2; fail=1 ;;
+      *) stop 'cannot determine project deletion outcome' ;;
     esac
   done
-  # 2. The group's service accounts, except any in §2.1's user snapshot. Tokens go with them.
-  found=$(ids "groups/$gid/service_accounts?per_page=100") \
-    || { echo 'WARN: cannot list the service accounts' >&2; fail=1; listed=0; found=''; }
-  keep_new users 'service account' $found
-  for a in $KEPT; do step gl -X DELETE "groups/$gid/service_accounts/$a?hard_delete=true"; done
-  # 3. The group, which takes everything still in it. Refuse unless every listing
-  #    succeeded, nothing is nested under it, and nothing left in it predates §2.1.
-  #    A top-level group cannot be removed permanently: it stays scheduled, and empty,
-  #    until the instance's retention ends.
-  remaining=$(gl --paginate "groups/$gid/projects?with_shared=false&include_subgroups=true&per_page=100" \
-    | jq -s '[(add // [])[] | .id | numbers]') || remaining=''
-  descendants=$(gl --paginate "groups/$gid/descendant_groups?all_available=true&per_page=100" \
-    | jq -s '[(add // [])[] | .id | numbers]') || descendants=''
-  if [ "$listed" != 1 ] || [ -z "$remaining" ] || [ -z "$descendants" ]; then
-    echo "WARN: a listing failed; group $GL_GROUP NOT deleted" >&2; fail=1
-  elif jq -e 'length > 0' <<<"$descendants" >/dev/null; then
-    echo "WARN: $GL_GROUP has descendant groups $(jq -c . <<<"$descendants"); group NOT deleted" >&2; fail=1
-  elif jq -e --slurpfile pre "$WORK/pre-projects.json" 'any(.[]; . as $i | $pre[0] | any(.[]; . == $i))' \
-      <<<"$remaining" >/dev/null; then
-    echo "WARN: $GL_GROUP holds projects that predate the rehearsal; group NOT deleted" >&2; fail=1
-  else
-    step gl -X DELETE "groups/$gid"
+  if [ "$accounts" != '[]' ]; then
+    gl -X DELETE "groups/$gid/service_accounts/$sa?hard_delete=true" >/dev/null \
+      || stop 'service account removal failed'
   fi
-fi
-# 4. GitHub probe residue in the throwaway repository: the §8.2 tag and branch, if present
-#    and absent before the rehearsal. Only an HTTP 404 means a ref is absent.
-R=required-reviewers-rehearsal
-if [ -s "$WORK/$R.pre.refs" ]; then
-  for ref in tags/wave0-probe heads/wave0-probe; do
-    if awk -v r="refs/$ref" '$2 == r { found = 1 } END { exit !found }' "$WORK/$R.pre.refs"; then
-      echo "NOTE: refs/$ref existed before the rehearsal; left alone"
-    elif gh api "repos/$GH_ORG/$R/git/ref/$ref" >/dev/null 2>"$WORK/gh.err"; then
-      step gh api -X DELETE "repos/$GH_ORG/$R/git/refs/$ref"
-    elif ! grep -q '(HTTP 404)' "$WORK/gh.err"; then
-      echo "WARN: cannot read refs/$ref on GitHub" >&2; fail=1
-    fi
+  rehearsal_group >/dev/null || stop 'group ownership changed during cleanup'
+  for endpoint in "$projects_path" "$descendants_path" "$accounts_path" "$runners_path"; do
+    remaining=$(teardown_list "$endpoint") || stop 'cannot verify the group is empty'
+    [ "$remaining" = '[]' ] || stop 'the group is not empty and was not deleted'
   done
-else
-  echo "WARN: no $R.pre.refs from §2.2; GitHub probe refs left alone" >&2; fail=1
+  confirm_omitted_projects '[]'
+  confirm_captured_account_absent
+  gl -X DELETE "groups/$gid" >/dev/null || stop 'group removal failed'
 fi
-exit "$fail"
+
+refs=$(git ls-remote --refs "https://github.com/$GH_ORG/required-reviewers-rehearsal.git" \
+  refs/heads/wave0-probe refs/tags/wave0-probe) || stop 'cannot inspect GitHub probe refs'
+[ -z "$refs" ] || stop 'GitHub probe refs left untouched for attended reconciliation'
 ```
 
-Then, by hand:
+Before automated teardown, if a runner was registered, the runner owner removes only
+the attested runner and manager deployment after checking the recorded ID, scope and
+identity against the approved receipt. Confirm the ID was absent from
+`$WORK/pre-runners.json`. Confirm absence through the runner API and the
+host manager readback. The owner records the result privately and the operator puts
+that exact ID in `$WORK/runner.removed.id` only after both checks succeed. An unknown
+runner or missing receipt needs owner reconciliation. Teardown never deletes a runner.
+
+After teardown, by hand:
 
 - If §9 ran:
-  - the runner owner deletes the rehearsal runner (`DELETE /runners/<id>`) and its
-    deployment;
-  - delete the `rehearsal/*` branches from `demo-repository`;
+  - reconcile only the exact source branches created by §9, using each recorded
+    `<branch-basename>.source.oid` as an explicit deletion lease and the same
+    approved writer profile and fixture ID. Leave unrecorded, empty or changed
+    refs alone and report their state;
   - put `demo-repository`'s Actions setting back to its preflight state.
 - Remove the local material:
   `find '<work>' -type f -name '*.key' -exec shred -u {} +`, then `rm -rf '<work>'`.
@@ -838,13 +1098,13 @@ for kind in users runners/all projects deploy_keys; do
     || { echo "FAIL: $kind differ from preflight"; fail=1; }
 done
 # The group, looked up as teardown does, must be gone (HTTP 404 only), or be scheduled
-# for deletion and empty: no project at any depth and no descendant group. GitLab
+# for deletion and empty: no project, service account, group runner or descendant group. GitLab
 # documents `marked_for_deletion_on` on groups for Premium and Ultimate only, so a group
 # that the `active=true` listing ("not archived and not marked for deletion") omits, and
 # that is not archived, also counts as scheduled. Unverified on CE: which signal it
 # returns. A non-empty scheduled group means the §11 race happened: restore and
 # investigate.
-rc=0; g=$(rehearsal_group_lookup) || rc=$?
+rc=0; g=$(rehearsal_group) || rc=$?
 case $rc in
   4) ;;
   0) gid=$(jq -r .id <<<"$g")
@@ -857,11 +1117,19 @@ case $rc in
        or (.archived != true and (.id as $i | ($a | index($i) | not) and ($z | index($i) | not)))' \
        <<<"$g" >/dev/null \
        || { echo "FAIL: $GL_GROUP exists and is not scheduled for deletion (or is only archived)"; fail=1; }
-     n=$(gl --paginate "groups/$gid/projects?with_shared=false&include_subgroups=true&per_page=100" \
-       | jq -s '[(add // [])[]] | length') && [ "$n" = 0 ] \
+     n=$(gl --paginate "groups/$gid/projects?with_shared=true&include_subgroups=true&per_page=100" \
+       | jq -se 'if length > 0 and all(.[]; type == "array") then add | length else error("missing pages") end') && [ "$n" = 0 ] \
        || { echo "FAIL: $GL_GROUP still holds projects, or they cannot be listed"; fail=1; }
+     n=$(gl --paginate "groups/$gid/runners?type=group_type&per_page=100" \
+       | jq -se 'if length > 0 and all(.[]; type == "array") then add | length else error("missing pages") end') \
+       && [ "$n" = 0 ] \
+       || { echo "FAIL: $GL_GROUP still holds runners, or they cannot be listed"; fail=1; }
+     n=$(gl --paginate "groups/$gid/service_accounts?per_page=100" \
+       | jq -se 'if length > 0 and all(.[]; type == "array") then add | length else error("missing pages") end') \
+       && [ "$n" = 0 ] \
+       || { echo "FAIL: $GL_GROUP still holds service accounts, or they cannot be listed"; fail=1; }
      n=$(gl --paginate "groups/$gid/descendant_groups?all_available=true&per_page=100" \
-       | jq -s '[(add // [])[]] | length') && [ "$n" = 0 ] \
+       | jq -se 'if length > 0 and all(.[]; type == "array") then add | length else error("missing pages") end') && [ "$n" = 0 ] \
        || { echo "FAIL: $GL_GROUP has descendant groups, or they cannot be listed"; fail=1; } ;;
   *) echo "FAIL: cannot read whether $GL_GROUP is gone"; fail=1 ;;
 esac
@@ -884,7 +1152,7 @@ Date (UTC): <date>   Operator: <github-login>   ADR 0258 commit: <sha>
 Owner approval: <link>   CI leg: <ran | blocked: #208 | blocked: generator>
 Per repository (from §7): <repo> refs=<n> objects=<n> objects-sha256=<hash> fsck=<pass|fail>
 Negative tests (§8.1): <pass | fail with reason>
-Probes (§8.2): branch create/delete <pass>; tag protected <pass>; moved tag refused <pass>
+Probes (§8.2): branch create/delete <pass>; tag protected <pass>; moved and missing tags refused <pass>
 CI comparison (§10): <same commit, digest and normalized outcome; injected failure | n/a>
 Teardown readback (§11): <pass | fail>
 Deviations from this plan: <none | list>
