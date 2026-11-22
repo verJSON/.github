@@ -187,8 +187,50 @@ gl application/settings | jq -e '
   (.signup_enabled == false or .require_admin_approval_after_user_signup == true)
   and (.allow_runner_registration_token == false)' >/dev/null \
   || { echo 'STOP: self-registration open or legacy runner registration tokens on'; fail=1; }
-gl 'users?admins=true&per_page=100' | jq -e 'all(.[]; .bot or .two_factor_enabled)' >/dev/null \
-  || { echo 'STOP: an administrator lacks two-factor authentication'; fail=1; }
+# Compare effective Owner access (50) with the administrator-filtered user list.
+# Only print generic diagnostics. User records can include personal data.
+wave0_privileged_mfa() {
+  local admin_id admins groups group owners privileged id
+  local id_check='def valid_id: type == "number" and . > 0 and . == floor;'
+  local pages="$id_check"'
+    def valid_pages:
+      length > 0 and all(.[]; type == "array")
+      and (add | all(.[]; type == "object" and (.id | valid_id))
+        and (map(.id) | length == (unique | length)));'
+  admin_id=$(gl user 2>/dev/null | jq -ser "$id_check"'
+    if length == 1 and .[0].is_admin == true and (.[0].id | valid_id)
+    then .[0].id else error("unconfirmed administrator") end' 2>/dev/null) \
+    || { echo 'STOP: preflight requires a confirmed GitLab administrator' >&2; return 1; }
+  admins=$(gl --paginate 'users?admins=true&per_page=100' 2>/dev/null \
+    | jq -ser --argjson admin "$admin_id" "$pages"'
+      if valid_pages and (add | any(.[]; .id == $admin))
+      then add[].id else error("invalid administrator list") end' 2>/dev/null) \
+    || { echo 'STOP: cannot verify the complete GitLab administrator list' >&2; return 1; }
+  groups=$(gl --paginate 'groups?per_page=100&all_available=true' 2>/dev/null \
+    | jq -sr "$pages"'
+      if valid_pages then add[].id else error("invalid group list") end' 2>/dev/null) \
+    || { echo 'STOP: cannot verify the complete GitLab group list' >&2; return 1; }
+  privileged=$admins
+  for group in $groups; do
+    owners=$(gl --paginate "groups/$group/members/all?per_page=100" 2>/dev/null \
+      | jq -sr "$pages"'
+        if valid_pages and (add | all(.[]; .access_level as $access
+          | [0, 5, 10, 15, 20, 25, 30, 40, 50] | index($access) != null))
+        then add[] | select(.access_level == 50) | .id
+        else error("invalid group membership list") end' 2>/dev/null) \
+      || { echo 'STOP: cannot verify the complete GitLab group membership list' >&2; return 1; }
+    privileged="$privileged $owners"
+  done
+  privileged=$(printf '%s\n' $privileged | sort -nu) || return 1
+  for id in $privileged; do
+    gl "users/$id" 2>/dev/null | jq -se --argjson id "$id" '
+      length == 1 and (.[0] | .id == $id
+        and (.bot == true or (.bot == false and .two_factor_enabled == true)))
+    ' >/dev/null 2>&1 \
+      || { echo 'STOP: missing or unverified two-factor authentication for a GitLab administrator or group Owner' >&2; return 1; }
+  done
+}
+wave0_privileged_mfa || fail=1
 gl --paginate 'groups?per_page=100&all_available=true' | jq -s -e --arg g "$GL_GROUP" \
   'add | all(.[]; .full_path != $g)' >/dev/null || { echo "STOP: $GL_GROUP already exists"; fail=1; }
 # Visibility: no GitLab project may be more visible than its GitHub repository.
