@@ -739,3 +739,35 @@ may use the job token; `NODE_AUTH_TOKEN` and OIDC minting stay unset. The candid
 manifest waits for smoke success or skip, so a configured smoke failure blocks the
 manifest. Pull-request validation stays credential-free and never receives the input.
 Adopters regenerate the generated caller at a contract pin that includes the input.
+
+## Amendment (2026-11-23) — verify public Alpine inputs before the CLI candidate build
+
+The pinned candidate publisher supplies the acquired Node dependency context.
+The CLI image also needs two versioned Alpine packages as local BuildKit inputs.
+The portable builder already stages them, and the candidate workflow needs the
+same reviewed pins. The architecture review approved a narrowly scoped upstream
+stager while redistribution provenance for vendoring was unresolved.
+[Canonical issue #1264](https://github.com/VerJSON/.github/issues/1264)
+[Consumer issue #30 and decision receipt](https://github.com/verJSON/verjson-ci/issues/30#issuecomment-7090520701)
+
+Adopt the optional per-image `alpine-bubblewrap-amd64` input for the standalone
+Linux amd64 CLI build. The publisher reads its helper from the exact executing
+workflow commit and invokes it with an empty environment. The consumer provides
+only the two-package JSON manifest, shared with the portable builder. The helper
+accepts the fixed official Alpine package namespace and validates the complete
+manifest and both byte lengths and SHA-256 digests before creating the reserved
+stage. Each build uses its own checkout and the existing named dependency
+context. The opted-in Dockerfile executes with networking disabled. The workflow
+removes its staged inputs after the build and keeps the credential-separated
+private dependency acquisition and exact-SHA retry rules.
+The Linux helper defers SIGINT and SIGTERM during the local write and ownership
+updates. Cancellation then rolls back the paths this invocation created. The
+disposable runner reclaims the checkout after an uncatchable termination.
+
+Changes to package revisions remain reviewable in one consumer manifest. A
+missing upstream revision or mismatched integrity stops the build. The adopter
+regenerates its caller and contract artifacts at a shared immutable commit.
+Before changing an adopter's publication-triggering branch, the source owner
+must supply the applicable notice and corresponding-source evidence for the
+repository and image, and authorize publication under the existing admission
+rules. Disposable no-publish build evidence verifies the staging contract.

@@ -156,6 +156,24 @@ changelog contract; continue using
 renderer, and contract test at one immutable SHA. Do not replace or hand-edit
 generated artifacts.
 
+### Verified Alpine build input
+
+The standalone Linux amd64 `cli` image using the repository root and
+`container/Dockerfile` can opt into `"publicBuildInput": "alpine-bubblewrap-amd64"`
+in its image configuration. Commit `container/bubblewrap-apks.json` with integer
+`schemaVersion: 1` and an `artifacts` array containing exactly two records. Each
+record supplies `file`, `url`, `size` in bytes, and a lowercase `sha256` digest.
+Use the file names `bubblewrap.apk` and `libcap2.apk` and versioned URLs for the
+matching packages under `https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/`.
+Use the same manifest for the portable and reusable candidate builders.
+
+Keep `container/.bubblewrap-apks` absent from the checkout. The reusable workflow
+downloads and verifies both inputs before making them available at that path.
+Dockerfile `RUN` steps on the opted-in image execute with networking disabled.
+Regenerate the existing four adopter artifacts together at a contract commit with
+this support. The publication and source obligations for the resulting image
+apply when the source owner approves adoption and publication.
+
 ### Post-publish OCI smoke
 
 To smoke a published candidate digest after credential-separated publication, declare
