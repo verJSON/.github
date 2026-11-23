@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0298](0298-native-cli-onboarding-delivery/README.md) | 2026-11-22 | Record the native CLI onboarding delivery review |
 | [0297](0297-cli-security-release-admission/README.md) | 2026-11-22 | Record the CLI security release admission review |
 | [0296](0296-fleet-admission-bootstrap/README.md) | 2026-11-22 | Record the fleet admission caller bootstrap decision |
 | [0295](0295-primary-environment-followup-arb/README.md) | 2026-11-22 | Archive the primary environment follow-up board |
