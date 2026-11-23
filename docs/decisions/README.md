@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0301](0301-effective-permissions-digest-source-review/README.md) | 2026-11-23 | Archive the effective permissions digest source review |
 | [0300](0300-gitlab-namespace-source-admission-arb/README.md) | 2026-11-23 | Record the GitLab namespace source admission review |
 | [0299](0299-exact-head-alpine-publisher-delivery-arb/README.md) | 2026-11-23 | Record the Alpine candidate publisher delivery review |
 | [0298](0298-native-cli-onboarding-delivery/README.md) | 2026-11-22 | Record the native CLI onboarding delivery review |
