@@ -1484,10 +1484,11 @@ emit_release_ci_assert_step() {
             echo "::error::RELEASE_REQUIRED_CI_CONTEXTS is empty"
             exit 1
           fi
-          if [ ! -x .changelog-contract/scripts/assert-release-head-ci.sh ]; then
+          if [ ! -f .changelog-contract/scripts/assert-release-head-ci.sh ]; then
             echo "::error::selection contract is missing scripts/assert-release-head-ci.sh; regenerate against a contract revision that includes ADR 0291."
             exit 1
           fi
+          chmod +x .changelog-contract/scripts/assert-release-head-ci.sh
           .changelog-contract/scripts/assert-release-head-ci.sh \\
             "\$GITHUB_REPOSITORY" "\$GITHUB_SHA" "\${contexts[@]}"
           unset GH_TOKEN GITHUB_TOKEN
