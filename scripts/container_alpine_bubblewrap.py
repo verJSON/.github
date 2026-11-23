@@ -2,7 +2,7 @@
 """Stage the two pinned Alpine packages for the root-context amd64 CLI image."""
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from http.client import HTTPException, HTTPSConnection
@@ -114,6 +114,16 @@ def fetch_package(package: Package) -> bytes:
     return contents
 
 
+@contextmanager
+def defer_cancellation():
+    # The Linux stager is single-threaded. Record ownership before a pending signal can raise.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
 def stage(context: Path) -> None:
     container = context / "container"
     dockerfile = container / "Dockerfile"
@@ -128,22 +138,27 @@ def stage(context: Path) -> None:
     # Verify both downloads before exposing a stage that the Docker build could consume.
     packages = read_packages(container / "bubblewrap-apks.json")
     verified = [(package, fetch_package(package)) for package in packages]
-    try:
-        destination.mkdir(mode=0o700)
-    except FileExistsError as error:
-        raise InputError("reserved package stage already exists") from error
+    owns_stage = False
     created = []
     try:
-        for package, contents in verified:
-            output = destination / package.file
-            fd = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            created.append(output)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(contents)
+        with defer_cancellation():
+            try:
+                destination.mkdir(mode=0o700)
+            except FileExistsError as error:
+                raise InputError("reserved package stage already exists") from error
+            owns_stage = True
+            for package, contents in verified:
+                output = destination / package.file
+                fd = os.open(output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                created.append(output)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(contents)
     except BaseException:
-        for output in created:
-            output.unlink()
-        destination.rmdir()
+        if owns_stage:
+            with defer_cancellation():
+                for output in created:
+                    output.unlink()
+                destination.rmdir()
         raise
 
 

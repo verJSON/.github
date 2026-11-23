@@ -3,6 +3,7 @@ from http.client import HTTPException
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -154,6 +155,68 @@ class AlpineBuildInputTests(unittest.TestCase):
 
                 self.assertFalse(self.stage.exists())
                 self.assertTrue(self.manifest.is_file())
+
+    def test_interrupt_after_mkdir_rolls_back_the_owned_stage(self):
+        original_mkdir = Path.mkdir
+
+        def cancel_after_mkdir(path, *args, **kwargs):
+            original_mkdir(path, *args, **kwargs)
+            if path == self.stage:
+                signal.raise_signal(signal.SIGINT)
+
+        with patch.object(
+            alpine, "fetch_package", side_effect=self.packages.values(),
+        ), patch.object(Path, "mkdir", cancel_after_mkdir):
+            with self.assertRaises(KeyboardInterrupt):
+                alpine.stage(self.context)
+
+        self.assertFalse(self.stage.exists())
+        self.assertTrue(self.manifest.is_file())
+
+    def test_stage_created_by_another_writer_is_preserved(self):
+        original_mkdir = Path.mkdir
+        marker = self.stage / "existing.txt"
+
+        def create_competing_stage(path, *args, **kwargs):
+            if path == self.stage:
+                original_mkdir(path, mode=0o700)
+                marker.write_text("original contents")
+            original_mkdir(path, *args, **kwargs)
+
+        with patch.object(
+            alpine, "fetch_package", side_effect=self.packages.values(),
+        ), patch.object(Path, "mkdir", create_competing_stage):
+            with self.assertRaisesRegex(alpine.InputError, "reserved package stage already exists"):
+                alpine.stage(self.context)
+
+        self.assertEqual("original contents", marker.read_text())
+        self.assertEqual([marker], list(self.stage.iterdir()))
+
+    def test_termination_after_open_rolls_back_the_owned_stage(self):
+        original_open = os.open
+
+        def cancel_after_open(path, flags, mode=0o777):
+            fd = original_open(path, flags, mode)
+            if path == self.stage / "libcap2.apk":
+                try:
+                    signal.raise_signal(signal.SIGTERM)
+                except KeyboardInterrupt:
+                    os.close(fd)
+                    raise
+            return fd
+
+        original_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
+        try:
+            with patch.object(
+                alpine, "fetch_package", side_effect=self.packages.values(),
+            ), patch.object(alpine.os, "open", side_effect=cancel_after_open):
+                with self.assertRaises(KeyboardInterrupt):
+                    alpine.stage(self.context)
+        finally:
+            signal.signal(signal.SIGTERM, original_handler)
+
+        self.assertFalse(self.stage.exists())
+        self.assertTrue(self.manifest.is_file())
 
     def test_download_uses_a_direct_unauthenticated_bounded_get(self):
         package, _ = alpine.read_packages(self.manifest)

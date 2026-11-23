@@ -760,6 +760,9 @@ stage. Each build uses its own checkout and the existing named dependency
 context. The opted-in Dockerfile executes with networking disabled. The workflow
 removes its staged inputs after the build and keeps the credential-separated
 private dependency acquisition and exact-SHA retry rules.
+The Linux helper defers SIGINT and SIGTERM during the local write and ownership
+updates. Cancellation then rolls back the paths this invocation created. The
+disposable runner reclaims the checkout after an uncatchable termination.
 
 Changes to package revisions remain reviewable in one consumer manifest. A
 missing upstream revision or mismatched integrity stops the build. The adopter
