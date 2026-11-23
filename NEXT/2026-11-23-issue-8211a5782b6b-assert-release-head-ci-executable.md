@@ -1,6 +1,6 @@
 ---
 date: 2026-11-23
-id: assert-ci-xbit
+id: 8211a5782b6b
 title: "Release CI assert script is executable in the selection contract"
 impact: patch
 ---
