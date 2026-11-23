@@ -245,6 +245,7 @@ changelog-release-2	bash scripts/container-candidate-contract.test.sh
 changelog-release-3	python3 scripts/container_dependency_transfer.test.py
 changelog-release-4	bash scripts/container_candidate_disk_usage.test.sh
 changelog-release-1	python3 scripts/container_candidate_config.test.py
+changelog-release-1	python3 scripts/container_alpine_bubblewrap.test.py
 changelog-release-2	bash scripts/container-release-contract.test.sh
 changelog-release-3	python3 scripts/container-release-app-token.test.py
 changelog-release-4	python3 scripts/container_release_changelog_engine.test.py

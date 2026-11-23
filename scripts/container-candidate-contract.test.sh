@@ -638,6 +638,37 @@ def validate_authority(read_only, publication):
     docker_build = next(step for step in build_steps if step.get("uses", "").startswith("docker/build-push-action@"))
     assert docker_build["with"]["context"] == "${{ steps.build-paths.outputs.context }}"
     assert docker_build["with"]["file"] == "${{ steps.build-paths.outputs.file }}"
+    publish_base = publication["jobs"]["publish-base"]
+    assert "prepare" in publish_base["needs"] and "needs.prepare.result == 'success'" in publish_base["if"]
+    for workflow, steps, context in (
+        (read_only, build_steps, "${{ steps.build-paths.outputs.context }}"),
+        (publication, publish_base["steps"], "${{ github.workspace }}"),
+    ):
+        stage = next((step for step in steps if step.get("id") == "public-build-input"), None)
+        image_build = next(step for step in steps if step.get("uses", "").startswith("docker/build-push-action@"))
+        assert stage is not None and steps.index(stage) < steps.index(image_build), (
+            "candidate build must stage the opted-in public input before Docker reads its context"
+        )
+        assert image_build["with"].get("network") == (
+            "${{ matrix.publicBuildInput == 'alpine-bubblewrap-amd64' && 'none' || '' }}"
+        ), "opted-in Alpine builds must run Dockerfile instructions offline"
+        prepare_config = next(step for step in workflow["jobs"]["prepare"]["steps"] if step.get("id") == "config")
+        assert '"$CONTRACT_REF" = "$JOB_WORKFLOW_SHA"' in prepare_config["run"]
+        assert prepare_config["env"]["JOB_WORKFLOW_SHA"] == "${{ fromJSON(toJSON(job)).workflow_sha }}"
+        assert stage["env"] == {"CONTRACT_REF": "${{ inputs.contract-ref }}", "BUILD_CONTEXT": context}
+        assert (
+            "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_alpine_bubblewrap.py"
+            in stage["run"]
+        ), "stage helper must come from the executing contract commit"
+        assert "/usr/bin/env -i /usr/bin/curl --disable" in stage["run"]
+        assert '/usr/bin/env -i /usr/bin/python3 -I "$helper" --context "$BUILD_CONTEXT"' in stage["run"]
+        assert stage["if"].endswith("matrix.publicBuildInput == 'alpine-bubblewrap-amd64'")
+    publish_stage = next(step for step in publish_base["steps"] if step.get("id") == "public-build-input")
+    assert "matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'" in publish_stage["if"]
+    stage_cleanup = next(step for step in publish_base["steps"] if step.get("name") == "Remove staged public Alpine build input")
+    assert stage_cleanup["if"] == "always() && steps.public-build-input.outcome == 'success'"
+    assert 'rmdir -- "$stage"' in stage_cleanup["run"] and "rm -rf" not in stage_cleanup["run"]
+    assert not any(step.get("id") == "public-build-input" for step in publication["jobs"]["publish-derived"]["steps"])
     build_cleanup = next(step for step in build_steps if step.get("name") == "Remove isolated candidate build source")
     assert build_cleanup["if"] == "always()"
     assert build_cleanup["run"] == 'rm -rf "$SOURCE_PATH"'
@@ -1129,6 +1160,7 @@ run_publish_prepare() {
   local source_commit=$4
   local cleanup=$5
   local smoke=${6:-false}
+  local prepare=${7:-$publish_prepare_script}
 
   (
     cd "$consumer"
@@ -1149,7 +1181,7 @@ run_publish_prepare() {
       RUNNER_TEMP="$runner_temp" \
       PATH="$mock_bin:$PATH" \
       SOURCE_PATH=. \
-      bash "$publish_prepare_script"
+      bash "$prepare"
   )
 }
 
@@ -1159,6 +1191,44 @@ run_publish_prepare "$first_adoption" "$adopter_publish_output" Verjson/example 
   "$(git -C "$first_adoption" rev-parse HEAD)" false
 grep -qx "publisher-workflow-ref=Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref" "$adopter_publish_output" \
   || { echo "adopter publication did not authorize the pinned cross-repository publisher" >&2; exit 1; }
+
+public_input_consumer="$tmp/public-input-consumer"
+mkdir -p "$public_input_consumer"
+jq '.images[1] |= (del(.baseVariant) + {
+  variant: "cli", context: ".", file: "container/Dockerfile",
+  platforms: [{os: "linux", architecture: "amd64"}],
+  publicBuildInput: "alpine-bubblewrap-amd64"
+})' "$root/scripts/fixtures/container-candidate/multi.json" >"$public_input_consumer/container-candidate.json"
+for prepare in "$prepare_script" "$publish_prepare_script"; do
+  public_input_output="$tmp/public-input-$(basename "$prepare").out"
+  run_publish_prepare "$public_input_consumer" "$public_input_output" Verjson/example "$ref" false false "$prepare"
+  sed -n 's/^matrix=//p' "$public_input_output" | jq -e '
+    [.[] | select((.publicBuildInput // "") != "") | [.variant, .publicBuildInput]]
+    == [["cli", "alpine-bubblewrap-amd64"]]
+  ' >/dev/null || { echo "$(basename "$prepare") did not pass the public build input only to the opted-in CLI matrix row" >&2; exit 1; }
+done
+invalid_public_input_consumer="$tmp/invalid-public-input-consumer"
+mkdir -p "$invalid_public_input_consumer"
+for mutation in \
+  '.publicBuildInput = "arbitrary-command"' \
+  '.publicBuildInput = null' \
+  '.variant = "debug"' \
+  '.context = "container"' \
+  '.file = "Dockerfile"' \
+  '.target = "build"' \
+  '.baseVariant = "base"' \
+  '.baseVariant = ""' \
+  '.platforms[0].architecture = "arm64"' \
+  '.platforms[0].variant = "v2"'; do
+  jq ".images[1] |= ($mutation)" "$public_input_consumer/container-candidate.json" \
+    >"$invalid_public_input_consumer/container-candidate.json"
+  for prepare in "$prepare_script" "$publish_prepare_script"; do
+    refuses "$(basename "$prepare") accepted public build input mutation $mutation" 1 \
+      'publicBuildInput requires the Linux amd64 CLI build' \
+      run_publish_prepare "$invalid_public_input_consumer" "$tmp/invalid-public-input-output" \
+      Verjson/example "$ref" false false "$prepare"
+  done
+done
 
 # The contract canary calls the publisher with `uses: ./` at contract-ref == github.sha,
 # so GitHub's OIDC job_workflow_ref names the canonical repository at the caller's ref.

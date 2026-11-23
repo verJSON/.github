@@ -177,6 +177,15 @@ jobs:
                 and (.architecture | safe_component)
                 and ((.variant // "") == "" or (.variant | safe_component)))))
           ' "$CONFIG_PATH" >/dev/null || { echo "::error::invalid or unauthorized candidate configuration"; exit 1; }
+          jq -e 'all(.images[] | select(has("publicBuildInput"));
+            .publicBuildInput == "alpine-bubblewrap-amd64"
+            and .variant == "cli" and .file == "container/Dockerfile"
+            and (.context == "." or (has("context") | not))
+            and (has("baseVariant") | not)
+            and (.target == "" or (has("target") | not))
+            and (.platforms | length == 1 and .[0].os == "linux" and .[0].architecture == "amd64"
+              and (.[0] | .variant == "" or (has("variant") | not))))
+          ' "$CONFIG_PATH" >/dev/null || { echo "::error::publicBuildInput requires the Linux amd64 CLI build"; exit 1; }
           jq -e '
             ([.images[].variant] | length == (unique | length))
             and (all(.images[]; ([.platforms[] | [.os,.architecture,(.variant // "")]] | length == (unique | length))))
@@ -192,6 +201,7 @@ jobs:
             platforms: ([$image.platforms[] | ((.os + "/" + .architecture) + (if (.variant // "") == "" then "" else "/" + .variant end))] | join(",")),
             context: ($image.context // "."), file: ($image.file // "Dockerfile"), target: ($image.target // ""),
             baseVariant: ($image.baseVariant // ""),
+            publicBuildInput: ($image.publicBuildInput // ""),
             artifact: ("candidate-image-" + ($image.variant | gsub("[^A-Za-z0-9._-]"; "-"))),
             destinations: ([$destination_contract.images[] | select(.variant == $image.variant) | .destinations[]]),
             gar: ([$destination_contract.images[] | select(.variant == $image.variant) | .destinations[] | select(.provider == "gar")] | if length == 0 then {} else .[0] end)
@@ -723,6 +733,22 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-image-build
+      - name: Stage public Alpine build input
+        id: public-build-input
+        if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true' && matrix.publicBuildInput == 'alpine-bubblewrap-amd64'
+        timeout-minutes: 1
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          BUILD_CONTEXT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          helper="$(mktemp "$RUNNER_TEMP/container-alpine-bubblewrap.XXXXXXXX")"
+          trap 'rm -f -- "$helper"' EXIT
+          status="$(/usr/bin/env -i /usr/bin/curl --disable --fail --silent --show-error \
+            --proto '=https' --noproxy '*' --max-time 15 --output "$helper" --write-out '%{http_code}' \
+            "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_alpine_bubblewrap.py")"
+          [ "$status" = 200 ] || { echo "::error::could not read canonical Alpine build input helper"; exit 1; }
+          /usr/bin/env -i /usr/bin/python3 -I "$helper" --context "$BUILD_CONTEXT"
       - name: Require free disk for the image build
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
         env:
@@ -741,12 +767,22 @@ jobs:
           file: ${{ matrix.file }}
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platforms }}
+          network: ${{ matrix.publicBuildInput == 'alpine-bubblewrap-amd64' && 'none' || '' }}
           push: true
           tags: |
             ${{ matrix.repository }}:${{ needs.prepare.outputs.candidate }}
           provenance: mode=max
           sbom: true
           build-contexts: verjson_node_modules=${{ runner.temp }}/container-node-modules-context
+      - name: Remove staged public Alpine build input
+        if: always() && steps.public-build-input.outcome == 'success'
+        run: |
+          set -euo pipefail
+          container="$GITHUB_WORKSPACE/container"
+          stage="$container/.bubblewrap-apks"
+          [ ! -L "$container" ] && [ ! -L "$stage" ] || exit 1
+          rm -f -- "$stage/bubblewrap.apk" "$stage/libcap2.apk"
+          rmdir -- "$stage"
       - name: Measure runner usage after base image build
         if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
         continue-on-error: true

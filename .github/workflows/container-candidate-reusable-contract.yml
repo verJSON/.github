@@ -22,6 +22,8 @@ on:
       - 'scripts/container_candidate_disk_usage.sh'
       - 'scripts/container_candidate_disk_usage.test.sh'
       - 'scripts/container_candidate_config.test.py'
+      - 'scripts/container_alpine_bubblewrap.py'
+      - 'scripts/container_alpine_bubblewrap.test.py'
       - 'scripts/container-candidate-contract.test.sh'
       - 'docs/decisions/0078-container-release-and-runner-deployment-contract/candidate-config.schema.json'
       - 'scripts/gen-container-candidate.sh'
