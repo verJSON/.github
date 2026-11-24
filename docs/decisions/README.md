@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0304](0304-wave-zero-runner-source-adjudication/README.md) | 2026-11-24 | Record the Wave 0 runner and rehearsal source review |
 | [0302](0302-identity-contracts-archive-admission/README.md) | 2026-11-23 | Admit the Identity Contracts decision archive through ordinary protection |
 | [0301](0301-effective-permissions-digest-source-review/README.md) | 2026-11-23 | Archive the effective permissions digest source review |
 | [0300](0300-gitlab-namespace-source-admission-arb/README.md) | 2026-11-23 | Record the GitLab namespace source admission review |
