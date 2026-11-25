@@ -337,6 +337,17 @@ run
 expect "an archive PR whose ADR directory lacks its README still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/ must add both README.md and arb-record.md"
 
+# Falling back is not refusing: a verJSON/.github pull request outside the lane cites.
+reset_lane_env
+REVIEWS_FIXTURE="[$citation,$receipt]"
+FILES_FIXTURE="[$(pr_file modified scripts/example.sh)]"
+run
+if [ "$RC" -eq 0 ] && [ "$OUT" = true ]; then
+  pass "a verJSON/.github pull request outside the archive-only lane passes Gate R with a citation"
+else
+  fail "a verJSON/.github pull request outside the archive-only lane passes Gate R with a citation (rc=$RC, output: $OUT)"
+fi
+
 # The lane belongs to the archive repository alone: elsewhere the files are never read.
 reset_env
 REVIEWS_FIXTURE="[$receipt]"
