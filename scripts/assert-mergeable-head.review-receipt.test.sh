@@ -318,6 +318,14 @@ run
 expect "an archive PR that also changes another path still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED scripts/example.sh (added) is outside the archive-only shape"
 
+# Archived records are immutable: editing one is never an archive.
+reset_lane_env
+archived=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
+FILES_FIXTURE="$(jq -c --argjson edit "$(pr_file modified "$archived")" '. + [$edit]' <<<"$archive_only_files")"
+run
+expect "an archive PR that modifies an existing record still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $archived (modified) is outside the archive-only shape"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
