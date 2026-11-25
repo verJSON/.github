@@ -389,6 +389,16 @@ run
 expect "an archive PR whose file list reaches GitHub's 3000-file limit still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED the file list reached GitHub's 3000-file limit and may be truncated"
 
+# The list GitHub serves belongs to whatever the head is now. A list of another head says
+# nothing about the one being merged: a push that drops a non-archive path must not
+# vouch for the head that still carries it.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" \
+  'map(.contents_url |= sub("ref=" + $head; "ref=" + $other))' <<<"$archive_only_files")"
+run
+expect "a file list that describes another head leaves Gate R unevaluated, never admitted" 1 \
+  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.

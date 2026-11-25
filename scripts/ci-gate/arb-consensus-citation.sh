@@ -198,6 +198,13 @@ archive_only_lane() {
     | group_by(.dir) | map(select((map(.file) | sort) != ["README.md", "arb-record.md"]) | .[0].dir)
     | first(.[]) // empty' <<<"$files")" || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -z "$unpaired" ] || { printf '%s must add both README.md and arb-record.md' "$unpaired"; return 1; }
+  # The list is the current head's. Each added or modified entry names its commit, so a
+  # list of any other head cannot vouch for the one being merged.
+  jq -e --arg head "$EXPECTED_HEAD_SHA" 'all(.[]; .contents_url | type == "string"
+      and test("[?&]ref=" + $head + "(&|$)"))' <<<"$files" >/dev/null || {
+    printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
+    return 3
+  }
   records="$(jq -r '.[] | select(.status == "added")
     | .filename | select(test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/arb-record[.]md$"))' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }
