@@ -445,6 +445,21 @@ run
 expect "an archive PR whose added record is a symlink still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/arb-record.md is not a regular file at head $HEAD_SHA (blob 120000)"
 
+# The same holds for the README and fragments the archive adds beside its records.
+reset_lane_env
+TREE_FIXTURE="$(lane_tree_with_mode NEXT/2026-11-25-issue-1-example-archive.md 120000)"
+export TREE_FIXTURE
+run
+expect "an archive PR whose NEXT fragment is a symlink still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED NEXT/2026-11-25-issue-1-example-archive.md is not a regular file at head $HEAD_SHA (blob 120000)"
+
+# Without the head's tree nothing shows the archive's paths are regular files.
+reset_lane_env
+export FAIL_TREE=1
+run
+expect "an unreadable head tree leaves Gate R unevaluated, never admitted" 1 \
+  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not read the tree of $LANE_REPO@$HEAD_SHA"
+
 # Nor can an added record that cannot be read be shown to parse.
 reset_lane_env
 export FAIL_ARCHIVE=1
