@@ -309,6 +309,15 @@ else
   fail "an archive-only verJSON/.github pull request passes Gate R without a citation and names the lane (rc=$RC, output: $OUT)"
 fi
 
+CITATION_REQUIRED="an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge"
+LANE_SKIPPED="the archive-only admission lane does not apply:"
+
+reset_lane_env
+FILES_FIXTURE="$(jq -c --argjson extra "$(pr_file added scripts/example.sh)" '. + [$extra]' <<<"$archive_only_files")"
+run
+expect "an archive PR that also changes another path still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED scripts/example.sh (added) is outside the archive-only shape"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.

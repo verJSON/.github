@@ -169,7 +169,17 @@ select_preceding_citation() {
 # circular. Prints the reason the lane does not apply and returns 1, or returns 0.
 archive_only_lane() {
   local files records record text
+  local outside
   files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs 'add // []')"
+  # Every changed file is an added record, an added ADR README, the regenerated
+  # decision index, or an added release-note fragment; anything else needs a citation.
+  outside="$(jq -r 'first(.[] | select(
+      (.status == "added" and (.filename | test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/(arb-record|README)[.]md$")))
+      or (.status == "modified" and .filename == "docs/decisions/README.md")
+      or (.status == "added" and (.filename | test("^NEXT/[^/]+[.]md$")))
+      | not)
+    | "\(.filename | gsub("[[:cntrl:]]"; " ")) (\(.status))") // empty' <<<"$files")"
+  [ -z "$outside" ] || { printf '%s is outside the archive-only shape' "$outside"; return 1; }
   records="$(jq -r '.[] | select(.status == "added")
     | .filename | select(test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/arb-record[.]md$"))' <<<"$files")"
   [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
@@ -181,17 +191,21 @@ archive_only_lane() {
   done <<<"$records"
 }
 
+# Fall back to the citation requirement when the lane does not apply, keeping its reason.
+lane_reason=""
 target_repo_cf="$(printf '%s' "$TARGET_REPO" | tr '[:upper:]' '[:lower:]')"
-if [ "$target_repo_cf" = "verjson/.github" ] && archive_only_lane >/dev/null; then
-  echo "::notice::archive-only admission lane: $TARGET_REPO#$PR_NUMBER head $EXPECTED_HEAD_SHA only archives ARB chair records; no arb-consensus citation is required (ADR 0309)"
-  exit 0
+if [ "$target_repo_cf" = "verjson/.github" ]; then
+  lane_reason="$(archive_only_lane)" && {
+    echo "::notice::archive-only admission lane: $TARGET_REPO#$PR_NUMBER head $EXPECTED_HEAD_SHA only archives ARB chair records; no arb-consensus citation is required (ADR 0309)"
+    exit 0
+  }
 fi
 
 reviews="$(cat "$REVIEWS_FILE")"
 selected="$(select_preceding_citation "$reviews")" || {
   status=$?
   [ "$status" -eq 3 ] && exit 3
-  echo "::error::an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge"
+  echo "::error::an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge${lane_reason:+; the archive-only admission lane does not apply: $lane_reason}"
   exit 1
 }
 
