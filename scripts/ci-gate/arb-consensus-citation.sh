@@ -170,7 +170,13 @@ select_preceding_citation() {
 archive_only_lane() {
   local files records record text
   local outside unpaired
-  files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs 'add // []')"
+  files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs '
+      if all(.[]; type == "array") then add // [] else error("not a file list") end
+      | if all(.[]; type == "object" and (.filename | type == "string") and (.status | type == "string"))
+        then . else error("not a file list") end')" || {
+    printf 'could not list the files of %s#%s' "$TARGET_REPO" "$PR_NUMBER"
+    return 3
+  }
   # Every changed file is an added record, an added ADR README, the regenerated
   # decision index, or an added release-note fragment; anything else needs a citation.
   outside="$(jq -r 'first(.[] | select(
@@ -202,10 +208,16 @@ archive_only_lane() {
 lane_reason=""
 target_repo_cf="$(printf '%s' "$TARGET_REPO" | tr '[:upper:]' '[:lower:]')"
 if [ "$target_repo_cf" = "verjson/.github" ]; then
-  lane_reason="$(archive_only_lane)" && {
-    echo "::notice::archive-only admission lane: $TARGET_REPO#$PR_NUMBER head $EXPECTED_HEAD_SHA only archives ARB chair records; no arb-consensus citation is required (ADR 0309)"
-    exit 0
-  }
+  lane_status=0
+  lane_reason="$(archive_only_lane)" || lane_status=$?
+  case "$lane_status" in
+    0)
+      echo "::notice::archive-only admission lane: $TARGET_REPO#$PR_NUMBER head $EXPECTED_HEAD_SHA only archives ARB chair records; no arb-consensus citation is required (ADR 0309)"
+      exit 0
+      ;;
+    1) ;;
+    *) echo "::error::$lane_reason"; exit 3 ;;
+  esac
 fi
 
 reviews="$(cat "$REVIEWS_FILE")"

@@ -69,7 +69,9 @@ case "$args" in
   *"/contents/"*)
     jq -nc --arg c "$ARCHIVE_B64" '{content: $c, encoding: "base64"}' ;;
   # The archive-only admission lane (#2285) reads the pull request's changed files.
-  *"/pulls/$PR/files?per_page=100"*) printf '%s\n' "$FILES_FIXTURE" ;;
+  *"/pulls/$PR/files?per_page=100"*)
+    [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
+    printf '%s\n' "$FILES_FIXTURE" ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
   # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
@@ -133,7 +135,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -361,6 +363,13 @@ expect "an archive PR whose added record has no canonical-slate-json fence still
   "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/arb-record.md: arb-consensus archive has no canonical-slate-json fence"
 ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
 export ARCHIVE_B64
+
+# Without the file list nothing shows the pull request is an archive: unanswered.
+reset_lane_env
+export FAIL_FILES=1
+run
+expect "an unreadable file list leaves Gate R unevaluated, never admitted" 1 \
+  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not list the files of $LANE_REPO#$PR"
 
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
