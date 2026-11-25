@@ -453,6 +453,14 @@ run
 expect "an archive PR whose NEXT fragment is a symlink still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED NEXT/2026-11-25-issue-1-example-archive.md is not a regular file at head $HEAD_SHA (blob 120000)"
 
+# A tree GitHub truncated may omit a listed path's entry, so it cannot show them regular.
+reset_lane_env
+TREE_FIXTURE="$(lane_tree_with_mode NEXT/2026-11-25-issue-1-example-archive.md 100644 | jq -c '.truncated = true')"
+export TREE_FIXTURE
+run
+expect "an archive PR whose head tree is truncated still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED the tree of head $HEAD_SHA is truncated"
+
 # Without the head's tree nothing shows the archive's paths are regular files.
 reset_lane_env
 export FAIL_TREE=1

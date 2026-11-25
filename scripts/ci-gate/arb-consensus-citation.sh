@@ -238,6 +238,10 @@ archive_only_lane() {
     printf 'could not read the tree of %s@%s' "$TARGET_REPO" "$EXPECTED_HEAD_SHA"
     return 3
   }
+  [ "$(jq -r .truncated <<<"$tree")" = false ] || {
+    printf 'the tree of head %s is truncated' "$EXPECTED_HEAD_SHA"
+    return 1
+  }
   irregular="$(printf '%s\n%s\n' "$tree" "$files" | jq -rs --arg head "$EXPECTED_HEAD_SHA" '
       .[0].tree as $entries | .[1] as $files
       | ($entries | map({key: (.path | tostring), value: "\(.type) \(.mode)"}) | from_entries) as $at
