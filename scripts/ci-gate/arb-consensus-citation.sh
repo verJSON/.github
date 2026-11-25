@@ -51,7 +51,7 @@ citation_re='^<!-- arb-consensus:v1 run:(arb-[A-Za-z0-9][A-Za-z0-9._-]{1,62}) sl
 # Parse .content locally so test stubs that return the Contents JSON object work
 # without implementing gh's --jq filter.
 read_record_text() { # repo ref path
-  local repo="$1" ref="$2" path="$3" json served b64 text
+  local repo="$1" ref="$2" path="$3" json served_type served b64 text
   # gh api ?ref= must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
   [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
     printf 'arb-consensus archive ref %s is not a 40-hex object name' "$ref"
@@ -63,6 +63,11 @@ read_record_text() { # repo ref path
   }
   # The Contents API follows a symlink to its target file and answers with the
   # target's path, so only a file served at the requested path is that file.
+  served_type="$(jq -r '.type // empty' <<<"$json")"
+  [ "$served_type" = file ] || {
+    printf 'arb-consensus archive %s@%s:%s is a %s, not a file' "$repo" "$ref" "$path" "${served_type//[[:cntrl:]]/ }"
+    return 1
+  }
   served="$(jq -r '.path // empty' <<<"$json")"
   [ "$served" = "$path" ] || {
     printf 'arb-consensus archive %s@%s:%s is served as %s' "$repo" "$ref" "$path" "${served//[[:cntrl:]]/ }"

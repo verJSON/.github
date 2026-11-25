@@ -283,6 +283,13 @@ expect "an unreadable arb-consensus archive leaves Gate R unevaluated" 1 \
   "could not fetch arb-consensus archive"
 unset FAIL_ARCHIVE
 
+# A cited archive is a file: any other object the Contents API serves is not a record.
+reset_env
+export CONTENTS_TYPE=symlink
+run
+expect "a citation whose archive is served as a symlink fails Gate R" 6 \
+  "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is a symlink, not a file"
+
 # Foreign archive repos are refused even when they contain the digest strings.
 reset_env
 bad_citation_body="<!-- arb-consensus:v1 run:$ARB_RUN slate:$ARB_SLATE archive:$REPO@$ARB_ARCHIVE_SHA:docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md -->"
