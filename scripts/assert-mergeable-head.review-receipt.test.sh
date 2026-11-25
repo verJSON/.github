@@ -294,10 +294,12 @@ expect "a citation whose archive locator is not $ARB_ARCHIVE_REPO fails Gate R" 
 # PR with a receipt and no citation, and changes the one fact under test.
 LANE_REPO=verJSON/.github
 LANE_ADR=docs/decisions/0309-example-delivery-arb
+LANE_BASE_SHA=cccccccccccccccccccccccccccccccccccccccc
+# Like GitHub, a removed file's contents_url names the base, every other file's the head.
 pr_file() { # status filename
-  jq -nc --arg status "$1" --arg name "$2" --arg repo "$LANE_REPO" --arg head "$HEAD_SHA" \
+  jq -nc --arg status "$1" --arg name "$2" --arg repo "$LANE_REPO" --arg head "$HEAD_SHA" --arg base "$LANE_BASE_SHA" \
     '{filename: $name, status: $status,
-      contents_url: "https://api.github.com/repos/\($repo)/contents/\($name | @uri)?ref=\($head)"}'
+      contents_url: "https://api.github.com/repos/\($repo)/contents/\($name | @uri)?ref=\(if $status == "removed" then $base else $head end)"}'
 }
 archive_only_files="[$(pr_file added "$LANE_ADR/arb-record.md"),$(pr_file added "$LANE_ADR/README.md"),$(pr_file modified docs/decisions/README.md),$(pr_file added NEXT/2026-11-25-issue-1-example-archive.md)]"
 reset_lane_env() {
@@ -425,6 +427,15 @@ FILES_FIXTURE="$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" \
   'map(.contents_url |= sub("ref=" + $head; "ref=" + $other))' <<<"$archive_only_files")"
 run
 expect "a file list that describes another head leaves Gate R unevaluated, never admitted" 1 \
+  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
+
+# Whether a list is an archive is only meaningful for the head being merged: a list of
+# another head is unanswered even when it also falls outside the archive shape.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" --argjson extra "$(pr_file added scripts/example.sh)" \
+  '. + [$extra] | map(.contents_url |= sub("ref=" + $head; "ref=" + $other))' <<<"$archive_only_files")"
+run
+expect "a non-archive file list that describes another head leaves Gate R unevaluated" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
 
 # A push during pagination can serve later pages from a newer head; every page must

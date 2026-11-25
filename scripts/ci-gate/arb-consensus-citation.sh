@@ -184,6 +184,14 @@ archive_only_lane() {
     printf 'could not list the files of %s#%s' "$TARGET_REPO" "$PR_NUMBER"
     return 3
   }
+  # The list is the current head's, which can move after the receipt. Each entry's
+  # contents_url names its commit: the head, or the base for a removed file. A list of
+  # any other head cannot vouch for the one being merged, archive-shaped or not.
+  jq -e --arg head "$EXPECTED_HEAD_SHA" 'all(.[] | select(.status != "removed");
+      .contents_url | type == "string" and test("[?&]ref=" + $head + "(&|\\z)"))' <<<"$files" >/dev/null || {
+    printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
+    return 3
+  }
   # GitHub lists at most 3000 files; a list that long may hide a path outside the shape.
   [ "$(jq length <<<"$files")" -lt "$PR_FILES_LIST_LIMIT" ] || {
     printf "the file list reached GitHub's %s-file limit and may be truncated" "$PR_FILES_LIST_LIMIT"
@@ -205,13 +213,6 @@ archive_only_lane() {
     | group_by(.dir) | map(select((map(.file) | sort) != ["README.md", "arb-record.md"]) | .[0].dir)
     | first(.[]) // empty' <<<"$files")" || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -z "$unpaired" ] || { printf '%s must add both README.md and arb-record.md' "$unpaired"; return 1; }
-  # The list is the current head's. Each added or modified entry names its commit, so a
-  # list of any other head cannot vouch for the one being merged.
-  jq -e --arg head "$EXPECTED_HEAD_SHA" 'all(.[]; .contents_url | type == "string"
-      and test("[?&]ref=" + $head + "(&|\\z)"))' <<<"$files" >/dev/null || {
-    printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
-    return 3
-  }
   records="$(jq -r --arg adr "$ADR_DIRECTORY_RE" '.[] | select(.status == "added")
     | .filename | select(test($adr + "arb-record[.]md\\z"))' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }
