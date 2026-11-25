@@ -393,7 +393,7 @@ fi
 reset_lane_env
 run
 if [ "$RC" -eq 0 ] && grep -q "/pulls/$PR/files?per_page=100" "$CALLS" \
-  && ! grep "/pulls/$PR/files" "$CALLS" | grep -q -- '--paginate'; then
+  && [ "$(grep "/pulls/$PR/files" "$CALLS" | grep -c -- '--paginate')" -eq 0 ]; then
   pass "the archive-only lane reads its file list in one unpaginated request"
 else
   fail "the archive-only lane reads its file list in one unpaginated request (rc=$RC, calls: $(grep '/files' "$CALLS"))"
