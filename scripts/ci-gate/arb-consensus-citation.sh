@@ -47,41 +47,65 @@ REVIEWS_FILE="$5"
 citation_re='^<!-- arb-consensus:v1 run:(arb-[A-Za-z0-9][A-Za-z0-9._-]{1,62}) slate:([0-9a-f]{64}) archive:([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)@([0-9a-f]{40}):([A-Za-z0-9._/-]+[A-Za-z0-9._-]) -->$'
 
 # Print the decoded content of <path> at <ref> in <repo>. On failure print the reason
-# and return 3 when the read failed (unanswered) or 1 when the content is unusable.
-# Parse .content locally so test stubs that return the Contents JSON object work
-# without implementing gh's --jq filter.
+# and return 3 when the read failed or its response is malformed (unanswered), or 1
+# when the record is refused. Parse .content locally so test stubs that return the
+# Contents JSON object work without implementing gh's --jq filter.
 read_record_text() { # repo ref path
-  local repo="$1" ref="$2" path="$3" json served_type served b64 text
+  local repo="$1" ref="$2" path="$3" json verdict err_file text err
+  local locator="arb-consensus archive $repo@$ref:$path"
   # gh api ?ref= must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
   [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
     printf 'arb-consensus archive ref %s is not a 40-hex object name' "$ref"
     return 1
   }
   json="$(gh api "repos/$repo/contents/$path?ref=$ref")" || {
-    printf 'could not fetch arb-consensus archive %s@%s:%s' "$repo" "$ref" "$path"
+    printf 'could not fetch %s' "$locator"
     return 3
   }
-  # The Contents API follows a symlink to its target file and answers with the
-  # target's path, so only a file served at the requested path is that file.
-  served_type="$(jq -r '.type // empty' <<<"$json")"
-  [ "$served_type" = file ] || {
-    printf 'arb-consensus archive %s@%s:%s is a %s, not a file' "$repo" "$ref" "$path" "${served_type//[[:cntrl:]]/ }"
+  # One parse. The Contents API follows a symlink to its target file and answers with
+  # the target's path, so only a file served at the requested path is that file, and
+  # only base64 carries its bytes.
+  verdict="$(jq -er --arg path "$path" '
+      def shown: gsub("[[:cntrl:]]"; " ");
+      if type == "object" and (.type | type) == "string" and (.path | type) == "string"
+        and (.encoding | type) == "string" and (.content | type) == "string" then
+        if .type != "file" then "refuse\tis a \(.type | shown), not a file"
+        elif .path != $path then "refuse\tis served as \(.path | shown)"
+        elif .encoding != "base64" then "refuse\tis encoded as \(.encoding | shown), not base64"
+        else "content\t\(.content)" end
+      else error("malformed contents response") end' <<<"$json" 2>/dev/null)" || {
+    printf '%s returned a malformed contents response' "$locator"
+    return 3
+  }
+  [[ "$verdict" == content$'\t'* ]] || {
+    printf '%s %s' "$locator" "${verdict#refuse$'\t'}"
     return 1
   }
-  served="$(jq -r '.path // empty' <<<"$json")"
-  [ "$served" = "$path" ] || {
-    printf 'arb-consensus archive %s@%s:%s is served as %s' "$repo" "$ref" "$path" "${served//[[:cntrl:]]/ }"
+  # Decode and check the bytes in Python: Bash drops NUL bytes before anything hashes them.
+  err_file="$(mktemp)"
+  text="$(python3 -c '
+import base64, binascii, re, sys
+try:
+    data = base64.b64decode(re.sub(r"\s", "", sys.stdin.read()), validate=True)
+except (binascii.Error, ValueError):
+    sys.exit("is not decodable")
+if not data:
+    sys.exit("has no content")
+if b"\0" in data:
+    sys.exit("contains a NUL byte")
+try:
+    data.decode("utf-8")
+except UnicodeDecodeError:
+    sys.exit("is not valid UTF-8")
+sys.stdout.buffer.write(data)
+' <<<"${verdict#content$'\t'}" 2>"$err_file")" || {
+    err="$(tr -d '\r' <"$err_file")"
+    err="${err%%$'\n'*}"
+    rm -f "$err_file"
+    printf '%s %s' "$locator" "${err:-could not be decoded}"
     return 1
   }
-  b64="$(jq -r '.content // empty' <<<"$json")"
-  [ -n "$b64" ] || {
-    printf 'arb-consensus archive %s@%s:%s has no content' "$repo" "$ref" "$path"
-    return 1
-  }
-  text="$(printf '%s' "$b64" | tr -d '\n\r ' | base64 -d 2>/dev/null)" || {
-    printf 'arb-consensus archive %s@%s:%s is not decodable' "$repo" "$ref" "$path"
-    return 1
-  }
+  rm -f "$err_file"
   printf '%s' "$text"
 }
 

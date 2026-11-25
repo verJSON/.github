@@ -80,7 +80,8 @@ case "$args" in
   *"/contents/"*)
     path="${args#*/contents/}"; path="${path%%\?*}"
     jq -nc --arg c "$ARCHIVE_B64" --arg type "${CONTENTS_TYPE:-file}" --arg path "${CONTENTS_SERVED_PATH:-$path}" \
-      '{type: $type, path: $path, content: $c, encoding: "base64"}' ;;
+      --arg encoding "${CONTENTS_ENCODING:-base64}" '{type: $type, path: $path, content: $c, encoding: $encoding}
+        | if env.CONTENTS_MALFORMED == "1" then del(.type) else . end' ;;
   # The archive-only admission lane (#2285) reads the pull request's changed files.
   *"/pulls/$PR/files?per_page=100"*)
     [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
@@ -148,7 +149,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES CONTENTS_SERVED_PATH CONTENTS_TYPE FAIL_TREE TREE_FIXTURE
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES CONTENTS_SERVED_PATH CONTENTS_TYPE CONTENTS_ENCODING CONTENTS_MALFORMED FAIL_TREE TREE_FIXTURE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -293,6 +294,42 @@ export CONTENTS_TYPE=symlink
 run
 expect "a citation whose archive is served as a symlink fails Gate R" 6 \
   "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is a symlink, not a file"
+
+# Bash drops NUL bytes from a decoded record, so a record must be checked as bytes: a
+# NUL after the slate would otherwise vanish and leave the digest matching.
+reset_env
+ARCHIVE_B64="$(printf '# chair\n```canonical-slate-json\n%s\0\n```\n' "$ARB_SLATE_JSON" | base64 -w0)"
+export ARCHIVE_B64
+run
+expect "a citation whose archive contains a NUL byte fails Gate R" 6 \
+  "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH contains a NUL byte"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
+# The slate encoding is UTF-8, so a record that is not UTF-8 is not a record.
+reset_env
+ARCHIVE_B64="$( { printf '# chair \377\n'; printf '%s' "$ARCHIVE_TEXT"; } | base64 -w0)"
+export ARCHIVE_B64
+run
+expect "a citation whose archive is not valid UTF-8 fails Gate R" 6 \
+  "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is not valid UTF-8"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
+# GitHub serves a file too large to inline with another encoding: its bytes are unknown.
+reset_env
+export CONTENTS_ENCODING=none
+run
+expect "a citation whose archive is not served base64-encoded fails Gate R" 6 \
+  "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is encoded as none, not base64"
+
+# A response without the fields every Contents API file answer carries says nothing
+# about the record: unanswered, not refused.
+reset_env
+export CONTENTS_MALFORMED=1
+run
+expect "a malformed archive contents response leaves Gate R unevaluated" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH returned a malformed contents response"
 
 # Foreign archive repos are refused even when they contain the digest strings.
 reset_env
