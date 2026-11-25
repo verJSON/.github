@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0307](0307-verjson-agents-558-arb-ledger-v3-delivery-arb/README.md) | 2026-11-25 | Delivery ARB archive for verjson-agents#558 ARB ledger v3 |
 | [0306](0306-verjson-cli-411-vaultwarden-lifecycle-delivery-arb/README.md) | 2026-11-25 | Delivery ARB archive for verjson-cli#411 Vaultwarden member lifecycle |
 | [0305](0305-wave-zero-runner-archive-admission/README.md) | 2026-11-24 | Admit the Wave 0 runner decision archive through ordinary protection |
 | [0304](0304-wave-zero-runner-source-adjudication/README.md) | 2026-11-24 | Record the Wave 0 runner and rehearsal source review |
