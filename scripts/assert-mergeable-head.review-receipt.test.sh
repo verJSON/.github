@@ -326,6 +326,13 @@ run
 expect "an archive PR that modifies an existing record still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $archived (modified) is outside the archive-only shape"
 
+# Each archived record arrives with the ADR that explains it, and vice versa.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --arg readme "$LANE_ADR/README.md" 'map(select(.filename != $readme))' <<<"$archive_only_files")"
+run
+expect "an archive PR whose ADR directory lacks its README still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/ must add both README.md and arb-record.md"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.

@@ -169,7 +169,7 @@ select_preceding_citation() {
 # circular. Prints the reason the lane does not apply and returns 1, or returns 0.
 archive_only_lane() {
   local files records record text
-  local outside
+  local outside unpaired
   files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs 'add // []')"
   # Every changed file is an added record, an added ADR README, the regenerated
   # decision index, or an added release-note fragment; anything else needs a citation.
@@ -178,10 +178,17 @@ archive_only_lane() {
       or (.status == "modified" and .filename == "docs/decisions/README.md")
       or (.status == "added" and (.filename | test("^NEXT/[^/]+[.]md$")))
       | not)
-    | "\(.filename | gsub("[[:cntrl:]]"; " ")) (\(.status))") // empty' <<<"$files")"
+    | "\(.filename | gsub("[[:cntrl:]]"; " ")) (\(.status))") // empty' <<<"$files")" \
+    || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -z "$outside" ] || { printf '%s is outside the archive-only shape' "$outside"; return 1; }
+  unpaired="$(jq -r '[.[] | .filename | select(startswith("docs/decisions/") and . != "docs/decisions/README.md")
+      | capture("^(?<dir>docs/decisions/[^/]+/)(?<file>.+)$")]
+    | group_by(.dir) | map(select((map(.file) | sort) != ["README.md", "arb-record.md"]) | .[0].dir)
+    | first(.[]) // empty' <<<"$files")" || { printf 'could not evaluate the archive-only shape'; return 3; }
+  [ -z "$unpaired" ] || { printf '%s must add both README.md and arb-record.md' "$unpaired"; return 1; }
   records="$(jq -r '.[] | select(.status == "added")
-    | .filename | select(test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/arb-record[.]md$"))' <<<"$files")"
+    | .filename | select(test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/arb-record[.]md$"))' <<<"$files")" \
+    || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
   while IFS= read -r record; do
     text="$(read_record_text "$TARGET_REPO" "$EXPECTED_HEAD_SHA" "$record")" || {
