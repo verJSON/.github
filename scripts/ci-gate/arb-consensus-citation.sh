@@ -62,15 +62,18 @@ read_record_text() { # repo ref path
     printf 'could not fetch %s' "$locator"
     return 3
   }
-  # One parse. The Contents API follows a symlink to its target file and answers with
-  # the target's path, so only a file served at the requested path is that file, and
-  # only base64 carries its bytes.
+  # One parse. A directory answers with an array, and a symlink to a non-file or a
+  # submodule with an object of its own type and no content: definite answers, refused.
+  # A symlink to a file answers as the target file at the target's path, so only a file
+  # served at the requested path is that file, and only base64 carries its bytes.
   verdict="$(jq -er --arg path "$path" '
       def shown: gsub("[[:cntrl:]]"; " ");
-      if type == "object" and (.type | type) == "string" and (.path | type) == "string"
+      if type == "array" then "refuse\tis a directory"
+      elif type == "object" and (.type | type) == "string" and .type != "file" then
+        "refuse\tis a \(.type | shown), not a file"
+      elif type == "object" and .type == "file" and (.path | type) == "string"
         and (.encoding | type) == "string" and (.content | type) == "string" then
-        if .type != "file" then "refuse\tis a \(.type | shown), not a file"
-        elif .path != $path then "refuse\tis served as \(.path | shown)"
+        if .path != $path then "refuse\tis served as \(.path | shown)"
         elif .encoding != "base64" then "refuse\tis encoded as \(.encoding | shown), not base64"
         else "content\t\(.content)" end
       else error("malformed contents response") end' <<<"$json" 2>/dev/null)" || {

@@ -81,9 +81,14 @@ case "$args" in
     path="${args#*/contents/}"; path="${path%%\?*}"
     # BAD_RECORD_PATH serves BAD_RECORD_B64 instead, so one record of several can differ.
     content="$ARCHIVE_B64"; [ "$path" != "${BAD_RECORD_PATH:-}" ] || content="$BAD_RECORD_B64"
+    # Like GitHub, only a file carries content and encoding; a directory is an array.
     jq -nc --arg c "$content" --arg type "${CONTENTS_TYPE:-file}" --arg path "${CONTENTS_SERVED_PATH:-$path}" \
-      --arg encoding "${CONTENTS_ENCODING:-base64}" '{type: $type, path: $path, content: $c, encoding: $encoding}
-        | if env.CONTENTS_MALFORMED == "1" then del(.type) else . end' ;;
+      --arg encoding "${CONTENTS_ENCODING:-base64}" '
+      if $type == "dir" then [{type: "file", path: ($path + "/README.md")}]
+      else {type: $type, path: $path}
+        + (if $type == "file" then {content: $c, encoding: $encoding} else {} end)
+        | if env.CONTENTS_MALFORMED == "1" then del(.type) else . end
+      end' ;;
   # The archive-only admission lane (#2285) reads the pull request's changed files.
   *"/pulls/$PR/files?per_page=100"*)
     [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
@@ -296,6 +301,18 @@ export CONTENTS_TYPE=symlink
 run
 expect "a citation whose archive is served as a symlink fails Gate R" 6 \
   "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is a symlink, not a file"
+
+reset_env
+export CONTENTS_TYPE=submodule
+run
+expect "a citation whose archive is served as a submodule fails Gate R" 6 \
+  "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is a submodule, not a file"
+
+reset_env
+export CONTENTS_TYPE=dir
+run
+expect "a citation whose archive is served as a directory fails Gate R" 6 \
+  "arb-consensus archive $ARB_ARCHIVE_REPO@$ARB_ARCHIVE_SHA:$ARB_ARCHIVE_PATH is a directory"
 
 # Bash drops NUL bytes from a decoded record, so a record must be checked as bytes: a
 # NUL after the slate would otherwise vanish and leave the digest matching.
