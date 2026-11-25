@@ -66,7 +66,9 @@ case "$*" in
   *"contents/.github/workflows/actions-ci.yml?ref=main"*) printf '%s\n' "$WORKFLOW_BLOB_TRUSTED" ;;
   *"repos/"*"/contents/"*)
     # ARB chair/ledger archive for Gate R citation verification (#2184).
-    jq -nc --arg c "$ARCHIVE_B64" '{content:$c,encoding:"base64"}' ;;
+    # Like GitHub, the file answers with its own type and path.
+    path="$*"; path="${path#*/contents/}"; path="${path%%\?*}"
+    jq -nc --arg c "$ARCHIVE_B64" --arg path "$path" '{type: "file", path: $path, content: $c, encoding: "base64"}' ;;
   *"repos/Verjson/.github/commits/main"*) printf '%s\n' "$EXECUTING_WORKFLOW_SHA" ;;
   *"check-runs/$AUTHORIZATION_CHECK_ID"*) cat "$CHECK_FILE" ;;
   *"pulls/$PR_NUMBER/reviews/"[0-9]*)
