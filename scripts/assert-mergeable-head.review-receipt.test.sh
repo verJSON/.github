@@ -71,9 +71,12 @@ case "$args" in
   # The archive-only admission lane (#2285) reads the pull request's changed files.
   *"/pulls/$PR/files?per_page=100"*)
     [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
-    # A list too large for one environment variable is served from a file.
-    if [ -n "${FILES_FIXTURE_FILE:-}" ]; then cat "$FILES_FIXTURE_FILE"
-    else printf '%s\n' "$FILES_FIXTURE"; fi ;;
+    # A list too large for one environment variable is served from a file. A fixture
+    # holds one JSON array per page; like gh, only --paginate reads past the first.
+    if [ -n "${FILES_FIXTURE_FILE:-}" ]; then pages="$(cat "$FILES_FIXTURE_FILE")"
+    else pages="$FILES_FIXTURE"; fi
+    if [[ "$args" == *"--paginate"* ]]; then printf '%s\n' "$pages"
+    else jq -cn 'input' <<<"$pages"; fi ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
   # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
@@ -423,6 +426,22 @@ FILES_FIXTURE="$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" \
 run
 expect "a file list that describes another head leaves Gate R unevaluated, never admitted" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
+
+# A push during pagination can serve later pages from a newer head; every page must
+# describe the head being merged, not just one of them.
+reset_lane_env
+FILES_FIXTURE="$archive_only_files"$'\n'"$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" \
+  '[.[] | .contents_url |= sub("ref=" + $head; "ref=" + $other)]' <<<"[$(pr_file added NEXT/2026-11-25-issue-1-later.md)]")"
+run
+expect "a file list whose later page describes another head leaves Gate R unevaluated, never admitted" 1 \
+  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
+
+# GitHub serves 100 files per page: a non-archive path on a later page must be seen.
+reset_lane_env
+FILES_FIXTURE="$archive_only_files"$'\n'"[$(pr_file added scripts/example.sh)]"
+run
+expect "an archive PR with a non-archive path on a later file-list page still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED scripts/example.sh (added) is outside the archive-only shape"
 
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
