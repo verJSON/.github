@@ -568,15 +568,21 @@ run
 expect "an archive PR whose ADR number is not four digits still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED docs/decisions/310-second-delivery-arb/arb-record.md (added) is outside the archive-only shape"
 
-# KNOWN DEFECT (failing repro for GREEN): Git paths may contain a newline, and jq's
-# `$` also matches before a trailing one, so "README.md<LF>" passes the shape and
-# pairs as README.md: an ADR directory without a README is admitted.
+# Git paths may contain a newline, and jq's `$` also matches before a trailing one, so
+# "README.md<LF>" must not pass the shape and pair as README.md.
 reset_lane_env
 FILES_FIXTURE="$(jq -c --argjson record "$(pr_file added "$SECOND_ADR/arb-record.md")" \
   --argjson readme "$(pr_file added "$SECOND_ADR/README.md"$'\n')" '. + [$record, $readme]' <<<"$archive_only_files")"
 run
 expect "an archive PR whose README path ends in a newline still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $SECOND_ADR/README.md  (added) is outside the archive-only shape"
+
+# A fragment name is a plain file name: a control character makes it something else.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --argjson odd "$(pr_file added NEXT/2026-11-25-issue-1-ex$'\t'ample.md)" '. + [$odd]' <<<"$archive_only_files")"
+run
+expect "an archive PR whose NEXT fragment name has a control character still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED NEXT/2026-11-25-issue-1-ex ample.md (added) is outside the archive-only shape"
 
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R

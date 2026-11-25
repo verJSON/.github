@@ -215,7 +215,7 @@ archive_only_lane() {
   outside="$(jq -r --arg adr "$ADR_DIRECTORY_RE" 'first(.[] | select(
       (.status == "added" and (.filename | test($adr + "(arb-record|README)[.]md\\z")))
       or (.status == "modified" and .filename == "docs/decisions/README.md")
-      or (.status == "added" and (.filename | test("^NEXT/[^/]+[.]md\\z")))
+      or (.status == "added" and (.filename | test("^NEXT/[A-Za-z0-9][A-Za-z0-9._-]*[.]md\\z")))
       | not)
     | "\(.filename | gsub("[[:cntrl:]]"; " ")) (\(.status))") // empty' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }
