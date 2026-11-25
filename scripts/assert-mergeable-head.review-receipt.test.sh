@@ -66,8 +66,12 @@ case "$args" in
   *"/commits/"*"/status"*) printf '{"total_count":0,"statuses":[]}\n' ;;
   *"/actions/runs?head_sha="*) printf '%s\n' "$RUNS_FIXTURE" ;;
   *"/annotations?per_page"*) printf '[]\n' ;;
+  # Like GitHub, a file answers with its own type and path. A symlink to a file answers
+  # with the target's content and path, which CONTENTS_SERVED_PATH stands in for.
   *"/contents/"*)
-    jq -nc --arg c "$ARCHIVE_B64" '{content: $c, encoding: "base64"}' ;;
+    path="${args#*/contents/}"; path="${path%%\?*}"
+    jq -nc --arg c "$ARCHIVE_B64" --arg type "${CONTENTS_TYPE:-file}" --arg path "${CONTENTS_SERVED_PATH:-$path}" \
+      '{type: $type, path: $path, content: $c, encoding: "base64"}' ;;
   # The archive-only admission lane (#2285) reads the pull request's changed files.
   *"/pulls/$PR/files?per_page=100"*)
     [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
@@ -140,7 +144,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES FILES_FIXTURE_FILE
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES FILES_FIXTURE_FILE CONTENTS_SERVED_PATH CONTENTS_TYPE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -402,6 +406,14 @@ export FAIL_FILES=1
 run
 expect "an unreadable file list leaves Gate R unevaluated, never admitted" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not list the files of $LANE_REPO#$PR"
+
+# A record that is a symlink to an existing archive is served as that archive: it parses,
+# but it is not the file the pull request adds.
+reset_lane_env
+export CONTENTS_SERVED_PATH="$archived"
+run
+expect "an archive PR whose added record resolves to another path still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED arb-consensus archive $LANE_REPO@$HEAD_SHA:$LANE_ADR/arb-record.md is served as $archived"
 
 # Nor can an added record that cannot be read be shown to parse.
 reset_lane_env
