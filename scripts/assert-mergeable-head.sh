@@ -1090,7 +1090,12 @@ if [ "$promotion_enabled" = true ]; then
     || receipt_status=$?
   receipt_reason="$(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
   case "$receipt_status" in
-    0) ;;
+    0)
+      # Re-emit the verifier's notices, such as the archive-only lane's (ADR 0309).
+      while IFS= read -r receipt_notice; do
+        annotate notice "${receipt_notice#::notice::}"
+      done < <(grep '^::notice::' "$scratch/receipt.out" || true)
+      ;;
     1) fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $receipt_reason" ;;
     3) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: $receipt_reason" ;;
     *) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: its receipt verifier exited with unexpected status $receipt_status" ;;

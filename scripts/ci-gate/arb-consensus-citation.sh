@@ -40,6 +40,89 @@ REVIEWS_FILE="$5"
 # archive locator: owner/repo@40-hex:relative/path (no .., no absolute path).
 citation_re='^<!-- arb-consensus:v1 run:(arb-[A-Za-z0-9][A-Za-z0-9._-]{1,62}) slate:([0-9a-f]{64}) archive:([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)@([0-9a-f]{40}):([A-Za-z0-9._/-]+[A-Za-z0-9._-]) -->$'
 
+# Print the decoded content of <path> at <ref> in <repo>. On failure print the reason
+# and return 3 when the read failed (unanswered) or 1 when the content is unusable.
+# Parse .content locally so test stubs that return the Contents JSON object work
+# without implementing gh's --jq filter.
+read_record_text() { # repo ref path
+  local repo="$1" ref="$2" path="$3" json b64 text
+  # gh api ?ref= must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
+  [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'arb-consensus archive ref %s is not a 40-hex object name' "$ref"
+    return 1
+  }
+  json="$(gh api "repos/$repo/contents/$path?ref=$ref")" || {
+    printf 'could not fetch arb-consensus archive %s@%s:%s' "$repo" "$ref" "$path"
+    return 3
+  }
+  b64="$(jq -r '.content // empty' <<<"$json")"
+  [ -n "$b64" ] || {
+    printf 'arb-consensus archive %s@%s:%s has no content' "$repo" "$ref" "$path"
+    return 1
+  }
+  text="$(printf '%s' "$b64" | tr -d '\n\r ' | base64 -d 2>/dev/null)" || {
+    printf 'arb-consensus archive %s@%s:%s is not decodable' "$repo" "$ref" "$path"
+    return 1
+  }
+  printf '%s' "$text"
+}
+
+# Encoding (ADR 0271): UTF-8 bytes of the single-line JSON object inside the first
+# ```canonical-slate-json fence, with one trailing newline removed if present.
+# Schema: JSON object whose string run_id is non-empty. Prints "<digest>\t<run_id>",
+# or the specific reason and returns 1.
+parse_slate_fence() { # record-text
+  local err_file out err
+  err_file="$(mktemp)"
+  out="$(python3 -c '
+import hashlib, json, re, sys
+text = sys.stdin.read()
+match = re.search(
+    r"^[ \t]*```canonical-slate-json\r?\n(.*?)^[ \t]*```",
+    text,
+    re.M | re.S,
+)
+if match is None:
+    sys.stderr.write("arb-consensus archive has no canonical-slate-json fence\n")
+    sys.exit(1)
+body = match.group(1)
+if body.endswith("\n"):
+    body = body[:-1]
+if body.endswith("\r"):
+    body = body[:-1]
+if "\n" in body or "\r" in body:
+    sys.stderr.write("canonical-slate-json fence must contain a single JSON line\n")
+    sys.exit(1)
+if not body:
+    sys.stderr.write("canonical-slate-json fence is empty\n")
+    sys.exit(1)
+try:
+    obj = json.loads(body)
+except json.JSONDecodeError as exc:
+    sys.stderr.write(f"canonical-slate-json fence is not valid JSON: {exc}\n")
+    sys.exit(1)
+if not isinstance(obj, dict):
+    sys.stderr.write("canonical-slate-json fence must be a JSON object\n")
+    sys.exit(1)
+archived_run = obj.get("run_id")
+if not isinstance(archived_run, str) or not archived_run:
+    sys.stderr.write("canonical-slate-json fence is missing string run_id\n")
+    sys.exit(1)
+digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+sys.stdout.write(f"{digest}\t{archived_run}\n")
+' <<<"$1" 2>"$err_file")" || {
+    # Read the whole stderr file, then take the first line — do not pipe into
+    # head (pipefail-sigpipe / #1430).
+    err="$(tr -d '\r' <"$err_file")"
+    err="${err%%$'\n'*}"
+    rm -f "$err_file"
+    printf '%s' "${err:-arb-consensus archive slate verification failed}"
+    return 1
+  }
+  rm -f "$err_file"
+  printf '%s' "$out"
+}
+
 MAX_CANDIDATE_LOOKUPS=20
 select_preceding_citation() {
   # Walk privileged COMMENTED reviews from highest id down; skip junk comments
@@ -81,6 +164,29 @@ select_preceding_citation() {
   return 1
 }
 
+# Archive-only admission lane (ADR 0309 / #2285). A verJSON/.github pull request that
+# only archives ARB chair records needs no citation of its own: requiring one is
+# circular. Prints the reason the lane does not apply and returns 1, or returns 0.
+archive_only_lane() {
+  local files records record text
+  files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs 'add // []')"
+  records="$(jq -r '.[] | select(.status == "added")
+    | .filename | select(test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/arb-record[.]md$"))' <<<"$files")"
+  [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
+  while IFS= read -r record; do
+    text="$(read_record_text "$TARGET_REPO" "$EXPECTED_HEAD_SHA" "$record")" || {
+      printf '%s' "$text"; return 1
+    }
+    text="$(parse_slate_fence "$text")" || { printf '%s: %s' "$record" "$text"; return 1; }
+  done <<<"$records"
+}
+
+target_repo_cf="$(printf '%s' "$TARGET_REPO" | tr '[:upper:]' '[:lower:]')"
+if [ "$target_repo_cf" = "verjson/.github" ] && archive_only_lane >/dev/null; then
+  echo "::notice::archive-only admission lane: $TARGET_REPO#$PR_NUMBER head $EXPECTED_HEAD_SHA only archives ARB chair records; no arb-consensus citation is required (ADR 0309)"
+  exit 0
+fi
+
 reviews="$(cat "$REVIEWS_FILE")"
 selected="$(select_preceding_citation "$reviews")" || {
   status=$?
@@ -114,76 +220,15 @@ archive_repo_cf="$(printf '%s' "$archive_repo" | tr '[:upper:]' '[:lower:]')"
 
 # Fail closed: recompute SHA-256 over the archive's canonical-slate-json fence
 # (ADR 0271 / #2189). Substring presence of the digest string is not enough.
-# Parse .content locally so test stubs that return the Contents JSON object work
-# without implementing gh's --jq filter.
-# Re-assert 40-hex in this block: citation_re already matched, but gh api ?ref=
-# must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
-[[ "$archive_sha" =~ ^[0-9a-f]{40}$ ]]   || { echo "::error::arb-consensus archive sha is not a 40-hex object name"; exit 1; }
-archive_json="$(gh api "repos/$archive_repo/contents/$archive_path?ref=$archive_sha")" || {
-  echo "::error::could not fetch arb-consensus archive $archive_repo@$archive_sha:$archive_path"
-  exit 3
+archive_text="$(read_record_text "$archive_repo" "$archive_sha" "$archive_path")" || {
+  status=$?
+  echo "::error::$archive_text"
+  exit "$status"
 }
-archive_b64="$(jq -r '.content // empty' <<<"$archive_json")"
-[ -n "$archive_b64" ] || {
-  echo "::error::arb-consensus archive $archive_repo@$archive_sha:$archive_path has no content"
+slate_verify_out="$(parse_slate_fence "$archive_text")" || {
+  echo "::error::$slate_verify_out"
   exit 1
 }
-archive_text="$(printf '%s' "$archive_b64" | tr -d '\n\r ' | base64 -d 2>/dev/null)" || {
-  echo "::error::arb-consensus archive $archive_repo@$archive_sha:$archive_path is not decodable"
-  exit 1
-}
-
-# Encoding (ADR 0271): UTF-8 bytes of the single-line JSON object inside the first
-# ```canonical-slate-json fence, with one trailing newline removed if present.
-# Schema: JSON object whose string run_id equals the citation run id.
-slate_verify_err="$(mktemp)"
-slate_verify_out="$(python3 -c '
-import hashlib, json, re, sys
-text = sys.stdin.read()
-match = re.search(
-    r"^[ \t]*```canonical-slate-json\r?\n(.*?)^[ \t]*```",
-    text,
-    re.M | re.S,
-)
-if match is None:
-    sys.stderr.write("arb-consensus archive has no canonical-slate-json fence\n")
-    sys.exit(1)
-body = match.group(1)
-if body.endswith("\n"):
-    body = body[:-1]
-if body.endswith("\r"):
-    body = body[:-1]
-if "\n" in body or "\r" in body:
-    sys.stderr.write("canonical-slate-json fence must contain a single JSON line\n")
-    sys.exit(1)
-if not body:
-    sys.stderr.write("canonical-slate-json fence is empty\n")
-    sys.exit(1)
-try:
-    obj = json.loads(body)
-except json.JSONDecodeError as exc:
-    sys.stderr.write(f"canonical-slate-json fence is not valid JSON: {exc}\n")
-    sys.exit(1)
-if not isinstance(obj, dict):
-    sys.stderr.write("canonical-slate-json fence must be a JSON object\n")
-    sys.exit(1)
-archived_run = obj.get("run_id")
-if not isinstance(archived_run, str) or not archived_run:
-    sys.stderr.write("canonical-slate-json fence is missing string run_id\n")
-    sys.exit(1)
-digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-sys.stdout.write(f"{digest}\t{archived_run}\n")
-' <<<"$archive_text" 2>"$slate_verify_err")" || {
-  # Read the whole stderr file, then take the first line — do not pipe into
-  # head (pipefail-sigpipe / #1430).
-  err="$(tr -d '\r' <"$slate_verify_err")"
-  err="${err%%$'\n'*}"
-  rm -f "$slate_verify_err"
-  [ -n "$err" ] || err="arb-consensus archive slate verification failed"
-  echo "::error::$err"
-  exit 1
-}
-rm -f "$slate_verify_err"
 IFS=$'\t' read -r computed_digest archived_run_id <<<"$slate_verify_out"
 [[ "$computed_digest" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "::error::arb-consensus archive slate digest computation failed"; exit 1; }

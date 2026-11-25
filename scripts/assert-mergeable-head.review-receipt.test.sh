@@ -68,6 +68,8 @@ case "$args" in
   *"/annotations?per_page"*) printf '[]\n' ;;
   *"/contents/"*)
     jq -nc --arg c "$ARCHIVE_B64" '{content: $c, encoding: "base64"}' ;;
+  # The archive-only admission lane (#2285) reads the pull request's changed files.
+  *"/pulls/$PR/files?per_page=100"*) printf '%s\n' "$FILES_FIXTURE" ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
   # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
@@ -105,7 +107,8 @@ status_rule="{\"type\":\"required_status_checks\",\"parameters\":{\"required_sta
 arm_rule="{\"type\":\"workflows\",\"parameters\":{\"do_not_enforce_on_create\":true,\"workflows\":[$workflow_entry]},\"ruleset_source_type\":\"Organization\",\"ruleset_source\":\"verJSON\",\"ruleset_id\":$ARM_RULESET_ID}"
 arm_ruleset="{\"id\":$ARM_RULESET_ID,\"name\":\"ai-authorization-arm-required\",\"source_type\":\"Organization\",\"source\":\"verJSON\",\"enforcement\":\"active\",\"updated_at\":\"2026-11-03T11:39:01.138-05:00\",\"rules\":[{\"type\":\"workflows\",\"parameters\":{\"do_not_enforce_on_create\":true,\"workflows\":[$workflow_entry]}}]}"
 # The org-required arm succeeded on the head, after the ruleset last changed.
-required_run="$(jq -nc --arg head "$HEAD_SHA" --arg branch "$HEAD_BRANCH" --arg repo "$REPO" --arg path "$GATE_PATH" \
+required_run() { # target-repo
+  jq -nc --arg head "$HEAD_SHA" --arg branch "$HEAD_BRANCH" --arg repo "$1" --arg path "$GATE_PATH" \
   --argjson wf "$WF_REQUIRED" '
   { id: 41711448295, check_suite_id: 703, workflow_id: $wf, run_number: 211,
     event: "pull_request_target", status: "completed", conclusion: "success",
@@ -113,7 +116,8 @@ required_run="$(jq -nc --arg head "$HEAD_SHA" --arg branch "$HEAD_BRANCH" --arg 
     created_at: "2026-11-03T20:19:05Z", run_started_at: "2026-11-03T20:19:05Z",
     head_branch: $branch, head_repository: { full_name: $repo }, pull_requests: [],
     workflow_url: "https://api.github.com/repos/\($repo)/actions/required_workflows/\($wf)",
-    referenced_workflows: [] }')"
+    referenced_workflows: [] }'
+}
 # review id state commit login type body
 review() {
   jq -nc --argjson id "$1" --arg state "$2" --arg commit "$3" --arg login "$4" --arg type "$5" --arg body "$6" \
@@ -124,7 +128,9 @@ receipt="$(review 82 COMMENTED "$HEAD_SHA" independent-reviewer User "$MARKER")"
 default_check_runs="$(printf '{"total_count":3,"check_runs":[%s,%s,%s]}' \
   "$(check_run 1 'CI / test' 500)" "$(check_run 31 'event-policy' 703)" "$(check_run 32 'arm' 703)")"
 
-reset_env() {
+DEFAULT_REPO="$REPO"
+reset_env() { # [target-repo]
+  REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
   unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE
@@ -133,8 +139,10 @@ reset_env() {
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
   export RULESET_FIXTURE="$arm_ruleset"
   export CHECK_RUNS_FIXTURE="$default_check_runs"
-  export RUNS_FIXTURE="{\"total_count\":1,\"workflow_runs\":[$required_run]}"
+  RUNS_FIXTURE="$(required_run "$REPO" | jq -c '{total_count: 1, workflow_runs: [.]}')"
+  export RUNS_FIXTURE
   export REVIEWS_FIXTURE="[$citation,$receipt]"
+  export FILES_FIXTURE='[]'
 }
 
 run() {
@@ -272,6 +280,34 @@ REVIEWS_FIXTURE="[$bad_citation,$receipt]"
 run
 expect "a citation whose archive locator is not $ARB_ARCHIVE_REPO fails Gate R" 6 \
   "arb-consensus archive locator must name $ARB_ARCHIVE_REPO"
+
+# --- archive-only admission lane (#2285) ------------------------------------------
+# A verJSON/.github pull request that only archives chair records needs no citation:
+# the exact-head receipt remains required. Each case starts from a conforming archive
+# PR with a receipt and no citation, and changes the one fact under test.
+LANE_REPO=verJSON/.github
+LANE_ADR=docs/decisions/0309-example-delivery-arb
+pr_file() { # status filename
+  jq -nc --arg status "$1" --arg name "$2" --arg repo "$LANE_REPO" --arg head "$HEAD_SHA" \
+    '{filename: $name, status: $status,
+      contents_url: "https://api.github.com/repos/\($repo)/contents/\($name | @uri)?ref=\($head)"}'
+}
+archive_only_files="[$(pr_file added "$LANE_ADR/arb-record.md"),$(pr_file added "$LANE_ADR/README.md"),$(pr_file modified docs/decisions/README.md),$(pr_file added NEXT/2026-11-25-issue-1-example-archive.md)]"
+reset_lane_env() {
+  reset_env "$LANE_REPO"
+  export REVIEWS_FIXTURE="[$receipt]"
+  export FILES_FIXTURE="$archive_only_files"
+}
+
+reset_lane_env
+run
+if [ "$RC" -eq 0 ] && [ "$(tail -n 1 <<<"$OUT")" = true ] \
+  && grep -qF -- "::notice::archive-only admission lane: $LANE_REPO#$PR head $HEAD_SHA only archives ARB chair records; no arb-consensus citation is required" <<<"$OUT" \
+  && grep -qF -- "contents/$LANE_ADR/arb-record.md?ref=$HEAD_SHA" "$CALLS"; then
+  pass "an archive-only verJSON/.github pull request passes Gate R without a citation and names the lane"
+else
+  fail "an archive-only verJSON/.github pull request passes Gate R without a citation and names the lane (rc=$RC, output: $OUT)"
+fi
 
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R

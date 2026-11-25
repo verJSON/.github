@@ -138,7 +138,10 @@ citation_out="$(bash "$citation_verifier" "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED
   "$review_id" "$reviews_tmp" 2>&1)" || citation_status=$?
 rm -f "$reviews_tmp"
 case "$citation_status" in
-  0) ;;
+  0)
+    # Surface a lane notice (ADR 0309) that would otherwise be discarded with the output.
+    grep '^::notice::' <<<"$citation_out" >&2 || true
+    ;;
   3)
     # Preserve the companion's ::error:: line for Gate R's receipt_reason.
     printf '%s\n' "$citation_out" >&2
