@@ -322,6 +322,20 @@ run
 expect "an archive PR that also changes another path still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED scripts/example.sh (added) is outside the archive-only shape"
 
+# Release-note fragments live directly under NEXT/; anything deeper is not a fragment.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --argjson nested "$(pr_file added NEXT/drafts/example.md)" '. + [$nested]' <<<"$archive_only_files")"
+run
+expect "an archive PR that adds a file below a NEXT subdirectory still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED NEXT/drafts/example.md (added) is outside the archive-only shape"
+
+# Without a record there is nothing to archive: an index or fragment edit alone cites.
+reset_lane_env
+FILES_FIXTURE="[$(pr_file modified docs/decisions/README.md),$(pr_file added NEXT/2026-11-25-issue-1-example.md)]"
+run
+expect "a pull request that only edits the index and adds a fragment still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED the pull request adds no arb-record.md"
+
 # Archived records are immutable: editing one is never an archive.
 reset_lane_env
 archived=docs/decisions/0271-arb-consensus-is-approval-authority/arb-record.md
