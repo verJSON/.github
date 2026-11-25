@@ -371,6 +371,13 @@ run
 expect "an unreadable file list leaves Gate R unevaluated, never admitted" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not list the files of $LANE_REPO#$PR"
 
+# Nor can an added record that cannot be read be shown to parse.
+reset_lane_env
+export FAIL_ARCHIVE=1
+run
+expect "an unreadable added record leaves Gate R unevaluated, never admitted" 1 \
+  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not fetch arb-consensus archive $LANE_REPO@$HEAD_SHA:$LANE_ADR/arb-record.md"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.

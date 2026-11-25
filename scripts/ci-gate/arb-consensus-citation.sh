@@ -168,7 +168,7 @@ select_preceding_citation() {
 # only archives ARB chair records needs no citation of its own: requiring one is
 # circular. Prints the reason the lane does not apply and returns 1, or returns 0.
 archive_only_lane() {
-  local files records record text
+  local files records record text status
   local outside unpaired
   files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs '
       if all(.[]; type == "array") then add // [] else error("not a file list") end
@@ -198,7 +198,9 @@ archive_only_lane() {
   [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
   while IFS= read -r record; do
     text="$(read_record_text "$TARGET_REPO" "$EXPECTED_HEAD_SHA" "$record")" || {
-      printf '%s' "$text"; return 1
+      status=$?
+      printf '%s' "$text"
+      return "$status"
     }
     text="$(parse_slate_fence "$text")" || { printf '%s: %s' "$record" "$text"; return 1; }
   done <<<"$records"
