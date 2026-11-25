@@ -389,6 +389,16 @@ else
   fail "an archive-only verJSON/.github pull request passes Gate R without a citation and names the lane (rc=$RC, output: $OUT)"
 fi
 
+# One request: pagination would read pages against a base that can move between them.
+reset_lane_env
+run
+if [ "$RC" -eq 0 ] && grep -q "/pulls/$PR/files?per_page=100" "$CALLS" \
+  && ! grep "/pulls/$PR/files" "$CALLS" | grep -q -- '--paginate'; then
+  pass "the archive-only lane reads its file list in one unpaginated request"
+else
+  fail "the archive-only lane reads its file list in one unpaginated request (rc=$RC, calls: $(grep '/files' "$CALLS"))"
+fi
+
 CITATION_REQUIRED="an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge"
 LANE_SKIPPED="the archive-only admission lane does not apply:"
 
