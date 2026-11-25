@@ -443,6 +443,23 @@ run
 expect "an archive PR with a non-archive path on a later file-list page still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED scripts/example.sh (added) is outside the archive-only shape"
 
+# Deleting an archived ADR, record and README together, is never an archive.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --argjson record "$(pr_file removed "$archived")" \
+  --argjson readme "$(pr_file removed "${archived%/*}/README.md")" '. + [$record, $readme]' <<<"$archive_only_files")"
+run
+expect "an archive PR that removes an archived ADR still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $archived (removed) is outside the archive-only shape"
+
+# Moving an archived record into a new ADR directory is not adding one.
+reset_lane_env
+SECOND_ADR=docs/decisions/0310-second-delivery-arb
+FILES_FIXTURE="$(jq -c --argjson record "$(pr_file renamed "$SECOND_ADR/arb-record.md")" \
+  --argjson readme "$(pr_file added "$SECOND_ADR/README.md")" '. + [$record, $readme]' <<<"$archive_only_files")"
+run
+expect "an archive PR that renames a record into a new ADR directory still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $SECOND_ADR/arb-record.md (renamed) is outside the archive-only shape"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
