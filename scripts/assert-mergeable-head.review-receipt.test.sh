@@ -79,7 +79,9 @@ case "$args" in
   # with the target's content and path, which CONTENTS_SERVED_PATH stands in for.
   *"/contents/"*)
     path="${args#*/contents/}"; path="${path%%\?*}"
-    jq -nc --arg c "$ARCHIVE_B64" --arg type "${CONTENTS_TYPE:-file}" --arg path "${CONTENTS_SERVED_PATH:-$path}" \
+    # BAD_RECORD_PATH serves BAD_RECORD_B64 instead, so one record of several can differ.
+    content="$ARCHIVE_B64"; [ "$path" != "${BAD_RECORD_PATH:-}" ] || content="$BAD_RECORD_B64"
+    jq -nc --arg c "$content" --arg type "${CONTENTS_TYPE:-file}" --arg path "${CONTENTS_SERVED_PATH:-$path}" \
       --arg encoding "${CONTENTS_ENCODING:-base64}" '{type: $type, path: $path, content: $c, encoding: $encoding}
         | if env.CONTENTS_MALFORMED == "1" then del(.type) else . end' ;;
   # The archive-only admission lane (#2285) reads the pull request's changed files.
@@ -149,7 +151,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES CONTENTS_SERVED_PATH CONTENTS_TYPE CONTENTS_ENCODING CONTENTS_MALFORMED FAIL_TREE TREE_FIXTURE
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES CONTENTS_SERVED_PATH CONTENTS_TYPE CONTENTS_ENCODING CONTENTS_MALFORMED BAD_RECORD_PATH BAD_RECORD_B64 FAIL_TREE TREE_FIXTURE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -582,6 +584,47 @@ FILES_FIXTURE="$(lane_with_adr docs/decisions/310-second-delivery-arb)"
 run
 expect "an archive PR whose ADR number is not four digits still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED docs/decisions/310-second-delivery-arb/arb-record.md (added) is outside the archive-only shape"
+
+# The decision index is regenerated, never created or deleted, by an archive.
+reset_lane_env
+FILES_FIXTURE="$(jq -c 'map(if .filename == "docs/decisions/README.md" then .status = "added" else . end)' <<<"$archive_only_files")"
+run
+expect "an archive PR that adds rather than modifies the decision index still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED docs/decisions/README.md (added) is outside the archive-only shape"
+
+# An executable record is not a regular file either.
+reset_lane_env
+TREE_FIXTURE="$(lane_tree_with_mode "$LANE_ADR/arb-record.md" 100755)"
+export TREE_FIXTURE
+run
+expect "an archive PR whose added record is executable still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/arb-record.md is not a regular file at head $HEAD_SHA (blob 100755)"
+
+# A gitlink names another repository's commit, not a file in this one.
+reset_lane_env
+TREE_FIXTURE="$(lane_tree_with_mode "$LANE_ADR/arb-record.md" 160000 \
+  | jq -c --arg p "$LANE_ADR/arb-record.md" '(.tree[] | select(.path == $p) | .type) = "commit"')"
+export TREE_FIXTURE
+run
+expect "an archive PR whose added record is a gitlink still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/arb-record.md is not a regular file at head $HEAD_SHA (commit 160000)"
+
+# The lane removes only the citation: an archive PR without a receipt still fails Gate R.
+reset_lane_env
+REVIEWS_FIXTURE='[]'
+run
+expect "an archive-only pull request without a receipt still fails Gate R" 6 \
+  "Gate R: $LANE_REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — an exact-head independent-review verdict is required before autonomous merge"
+
+# Every added record parses, not just the first.
+reset_lane_env
+FILES_FIXTURE="$(lane_with_adr "$SECOND_ADR")"
+export BAD_RECORD_PATH="$SECOND_ADR/arb-record.md"
+BAD_RECORD_B64="$(printf '# chair without a slate' | base64 -w0)"
+export BAD_RECORD_B64
+run
+expect "an archive PR whose second added record does not parse still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $SECOND_ADR/arb-record.md: arb-consensus archive has no canonical-slate-json fence"
 
 # Git paths may contain a newline, and jq's `$` also matches before a trailing one, so
 # "README.md<LF>" must not pass the shape and pair as README.md.
