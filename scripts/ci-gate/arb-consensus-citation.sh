@@ -189,30 +189,31 @@ archive_only_lane() {
     printf "the file list reached GitHub's %s-file limit and may be truncated" "$PR_FILES_LIST_LIMIT"
     return 1
   }
+  # jq's `$` also matches before a trailing newline, so every lane pattern ends at `\z`.
   # Every changed file is an added record, an added ADR README, the regenerated
   # decision index, or an added release-note fragment; anything else needs a citation.
   outside="$(jq -r --arg adr "$ADR_DIRECTORY_RE" 'first(.[] | select(
-      (.status == "added" and (.filename | test($adr + "(arb-record|README)[.]md$")))
+      (.status == "added" and (.filename | test($adr + "(arb-record|README)[.]md\\z")))
       or (.status == "modified" and .filename == "docs/decisions/README.md")
-      or (.status == "added" and (.filename | test("^NEXT/[^/]+[.]md$")))
+      or (.status == "added" and (.filename | test("^NEXT/[^/]+[.]md\\z")))
       | not)
     | "\(.filename | gsub("[[:cntrl:]]"; " ")) (\(.status))") // empty' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -z "$outside" ] || { printf '%s is outside the archive-only shape' "$outside"; return 1; }
   unpaired="$(jq -r '[.[] | .filename | select(startswith("docs/decisions/") and . != "docs/decisions/README.md")
-      | capture("^(?<dir>docs/decisions/[^/]+/)(?<file>.+)$")]
+      | capture("^(?<dir>docs/decisions/[^/]+/)(?<file>.+)\\z")]
     | group_by(.dir) | map(select((map(.file) | sort) != ["README.md", "arb-record.md"]) | .[0].dir)
     | first(.[]) // empty' <<<"$files")" || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -z "$unpaired" ] || { printf '%s must add both README.md and arb-record.md' "$unpaired"; return 1; }
   # The list is the current head's. Each added or modified entry names its commit, so a
   # list of any other head cannot vouch for the one being merged.
   jq -e --arg head "$EXPECTED_HEAD_SHA" 'all(.[]; .contents_url | type == "string"
-      and test("[?&]ref=" + $head + "(&|$)"))' <<<"$files" >/dev/null || {
+      and test("[?&]ref=" + $head + "(&|\\z)"))' <<<"$files" >/dev/null || {
     printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
     return 3
   }
   records="$(jq -r --arg adr "$ADR_DIRECTORY_RE" '.[] | select(.status == "added")
-    | .filename | select(test($adr + "arb-record[.]md$"))' <<<"$files")" \
+    | .filename | select(test($adr + "arb-record[.]md\\z"))' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
   while IFS= read -r record; do
