@@ -19,12 +19,14 @@ The owner also set a new charter on 2026-11-24:
 
 Until verjson-agents#556 lands, the ledger engine sees only the required member, so the chair enforced the supermajority condition from the recorded advisory ballots, as the chair record states.
 
-Gate R requires this archived chair record before the autonomous merge of head `27ae92f0240e4757e4a80f5a71a8f2b175cc1d1f`.
+Gate R required this archived chair record before the autonomous merge of head `27ae92f0240e4757e4a80f5a71a8f2b175cc1d1f`. verjson-cli#411 merged as `abd1085` at 2026-11-25T02:06:13Z, citing this branch's commit `519e3c9dae3fe13dc3fb6901a00bcf2b4ca65c47` before the archive landed on `main`. That reverses the order ADR 0305 set for the Wave 0 archive, where the archive landed before any source PR cited it; this ADR records the deviation rather than repairing it, and `arb-record.md` stays byte-identical to the cited commit.
+
+The charter does not define a split. The chair reads it as a candidate that does not meet the decision rule (claude's ACCEPT plus at least two advisory ACCEPTs). codex's round-3 REVISE on B2, L3 and M1 counts as adjudicated because it restates codex's round-2 rebuttal: claude dismissed the finding in round 2 and confirmed that dismissal against the rebuttal in round 3; each of those candidates meets the rule, so the chair found no split to escalate. The record's note that owner ratification is pending is not a merge condition: under ADR 0271 the board's consensus is the approval authority.
 
 ## Decision
 
 1. **Archive the chair record** at `docs/decisions/0306-verjson-cli-411-vaultwarden-lifecycle-delivery-arb/arb-record.md`.
-2. **Adopted slate:** merge verjson-cli#411 at exactly `27ae92f0240e4757e4a80f5a71a8f2b175cc1d1f` after Gate R. L1–L3 and D1 are kind (b) debt for a follow-up issue linked from verjson-cli#410. codex's retained dissent on L3 is recorded for the owner.
+2. **Adopted slate:** merge verjson-cli#411 at exactly `27ae92f0240e4757e4a80f5a71a8f2b175cc1d1f` after Gate R. L1–L3 and D1 are kind (b) debt for a follow-up issue linked from verjson-cli#410. codex's retained dissent on B2, L3 and M1 (one finding) is recorded for the owner.
 3. **This ADR does not** authorize `--admin`, live host mutation, or any other head.
 
 ## Consequences
