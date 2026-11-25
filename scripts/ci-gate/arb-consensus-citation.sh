@@ -185,14 +185,16 @@ select_preceding_citation() {
 # Archive-only admission lane (ADR 0309 / #2285). A verJSON/.github pull request that
 # only archives ARB chair records needs no citation of its own: requiring one is
 # circular. Prints the reason the lane does not apply and returns 1, or returns 0.
-readonly PR_FILES_LIST_LIMIT=3000
+readonly PR_FILES_PAGE_SIZE=100
 readonly ADR_DIRECTORY_RE='^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/'
 archive_only_lane() {
   local files outside unpaired tree irregular records record text status
-  files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs '
-      if all(.[]; type == "array") then add // [] else error("not a file list") end
-      | if all(.[]; type == "object" and (.filename | type == "string") and (.status | type == "string"))
-        then . else error("not a file list") end')" || {
+  # One request only: pages are separate requests against a base that can move between
+  # them, so a paginated list can skip a row.
+  files="$(gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=$PR_FILES_PAGE_SIZE" | jq -c '
+      if type == "array" and all(.[]; type == "object" and (.filename | type == "string")
+        and (.status | type == "string"))
+      then . else error("not a file list") end')" || {
     printf 'could not list the files of %s#%s' "$TARGET_REPO" "$PR_NUMBER"
     return 3
   }
@@ -204,9 +206,9 @@ archive_only_lane() {
     printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
     return 3
   }
-  # GitHub lists at most 3000 files; a list that long may hide a path outside the shape.
-  [ "$(jq length <<<"$files")" -lt "$PR_FILES_LIST_LIMIT" ] || {
-    printf "the file list reached GitHub's %s-file limit and may be truncated" "$PR_FILES_LIST_LIMIT"
+  # A full page may continue on another, which this single read never sees.
+  [ "$(jq length <<<"$files")" -lt "$PR_FILES_PAGE_SIZE" ] || {
+    printf 'the file list fills a page of %s rows, so it is not read in one request' "$PR_FILES_PAGE_SIZE"
     return 1
   }
   # jq's `$` also matches before a trailing newline, so every lane pattern ends at `\z`.

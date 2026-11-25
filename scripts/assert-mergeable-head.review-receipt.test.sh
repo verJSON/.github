@@ -72,9 +72,8 @@ case "$args" in
     [ "${FAIL_TREE:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
     if [ -n "${TREE_FIXTURE:-}" ]; then printf '%s\n' "$TREE_FIXTURE"
     else
-      if [ -n "${FILES_FIXTURE_FILE:-}" ]; then pages="$(cat "$FILES_FIXTURE_FILE")"; else pages="$FILES_FIXTURE"; fi
-      jq -cs 'add | {truncated: false, tree: [.[] | select(.status != "removed")
-        | {path: .filename, mode: "100644", type: "blob"}]}' <<<"$pages"
+      jq -c '{truncated: false, tree: [.[] | select(.status != "removed")
+        | {path: .filename, mode: "100644", type: "blob"}]}' <<<"$FILES_FIXTURE"
     fi ;;
   # Like GitHub, a file answers with its own type and path. A symlink to a file answers
   # with the target's content and path, which CONTENTS_SERVED_PATH stands in for.
@@ -85,12 +84,7 @@ case "$args" in
   # The archive-only admission lane (#2285) reads the pull request's changed files.
   *"/pulls/$PR/files?per_page=100"*)
     [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
-    # A list too large for one environment variable is served from a file. A fixture
-    # holds one JSON array per page; like gh, only --paginate reads past the first.
-    if [ -n "${FILES_FIXTURE_FILE:-}" ]; then pages="$(cat "$FILES_FIXTURE_FILE")"
-    else pages="$FILES_FIXTURE"; fi
-    if [[ "$args" == *"--paginate"* ]]; then printf '%s\n' "$pages"
-    else jq -cn 'input' <<<"$pages"; fi ;;
+    printf '%s\n' "$FILES_FIXTURE" ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
   # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
@@ -154,7 +148,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES FILES_FIXTURE_FILE CONTENTS_SERVED_PATH CONTENTS_TYPE FAIL_TREE TREE_FIXTURE
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES CONTENTS_SERVED_PATH CONTENTS_TYPE FAIL_TREE TREE_FIXTURE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -475,14 +469,14 @@ run
 expect "an unreadable added record leaves Gate R unevaluated, never admitted" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not fetch arb-consensus archive $LANE_REPO@$HEAD_SHA:$LANE_ADR/arb-record.md"
 
-# GitHub lists at most 3000 files, so a list that long may hide a non-archive path.
+# Pages are separate requests against a base that can move between them, so a row can
+# be skipped. Only a list that fits in one page, fewer than 100 rows, is read whole.
 reset_lane_env
-jq -c --argjson fragment "$(pr_file added NEXT/2026-11-25-issue-1-fragment.md)" \
-  '. + [range(3000 - length) | $fragment]' <<<"$archive_only_files" >"$tmp/files-3000.json"
-export FILES_FIXTURE_FILE="$tmp/files-3000.json"
+FILES_FIXTURE="$(jq -c --argjson fragment "$(pr_file added NEXT/2026-11-25-issue-1-fragment.md)" \
+  '. + [range(100 - length) | $fragment]' <<<"$archive_only_files")"
 run
-expect "an archive PR whose file list reaches GitHub's 3000-file limit still requires a citation" 6 \
-  "$CITATION_REQUIRED; $LANE_SKIPPED the file list reached GitHub's 3000-file limit and may be truncated"
+expect "an archive PR whose file list fills a page of 100 rows still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED the file list fills a page of 100 rows, so it is not read in one request"
 
 # The list GitHub serves belongs to whatever the head is now. A list of another head says
 # nothing about the one being merged: a push that drops a non-archive path must not
@@ -502,22 +496,6 @@ FILES_FIXTURE="$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" --argjson
 run
 expect "a non-archive file list that describes another head leaves Gate R unevaluated" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
-
-# A push during pagination can serve later pages from a newer head; every page must
-# describe the head being merged, not just one of them.
-reset_lane_env
-FILES_FIXTURE="$archive_only_files"$'\n'"$(jq -c --arg head "$HEAD_SHA" --arg other "$OTHER_SHA" \
-  '[.[] | .contents_url |= sub("ref=" + $head; "ref=" + $other)]' <<<"[$(pr_file added NEXT/2026-11-25-issue-1-later.md)]")"
-run
-expect "a file list whose later page describes another head leaves Gate R unevaluated, never admitted" 1 \
-  "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: the file list of $LANE_REPO#$PR does not describe head $HEAD_SHA"
-
-# GitHub serves 100 files per page: a non-archive path on a later page must be seen.
-reset_lane_env
-FILES_FIXTURE="$archive_only_files"$'\n'"[$(pr_file added scripts/example.sh)]"
-run
-expect "an archive PR with a non-archive path on a later file-list page still requires a citation" 6 \
-  "$CITATION_REQUIRED; $LANE_SKIPPED scripts/example.sh (added) is outside the archive-only shape"
 
 # Deleting an archived ADR, record and README together, is never an archive.
 reset_lane_env
