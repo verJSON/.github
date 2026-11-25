@@ -333,6 +333,25 @@ run
 expect "an archive PR whose ADR directory lacks its README still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/ must add both README.md and arb-record.md"
 
+# The lane belongs to the archive repository alone: elsewhere the files are never read.
+reset_env
+REVIEWS_FIXTURE="[$receipt]"
+FILES_FIXTURE="$archive_only_files"
+run
+if [ "$RC" -eq 6 ] && grep -qF -- "has no valid ADR 0202 independent-review receipt — $CITATION_REQUIRED" <<<"$OUT" \
+  && ! grep -qF -- "$LANE_SKIPPED" <<<"$OUT" && ! grep -q '/files' "$CALLS"; then
+  pass "an archive-shaped pull request in another repository still requires a citation"
+else
+  fail "an archive-shaped pull request in another repository still requires a citation (rc=$RC, output: $OUT)"
+fi
+
+# GitHub names are case-insensitive, so the archive repository's identity is too.
+reset_lane_env
+REPO=Verjson/.github
+run
+expect "a differently cased verJSON/.github still takes the archive-only lane" 0 \
+  "::notice::archive-only admission lane: Verjson/.github#$PR head $HEAD_SHA"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
