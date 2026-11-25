@@ -467,6 +467,31 @@ run
 expect "an archive PR whose second ADR directory lacks its README still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $SECOND_ADR/ must add both README.md and arb-record.md"
 
+# Paths are case-sensitive: a record below docs/Decisions is outside the ADR tree.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --argjson record "$(pr_file added "docs/Decisions/0310-second-delivery-arb/arb-record.md")" \
+  '. + [$record]' <<<"$archive_only_files")"
+run
+expect "an archive PR that adds a record below docs/Decisions still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED docs/Decisions/0310-second-delivery-arb/arb-record.md (added) is outside the archive-only shape"
+
+# ADR directories are NNNN-<lowercase-kebab-slug>; any other name is not an ADR.
+lane_with_adr() { # adr-directory
+  jq -c --argjson record "$(pr_file added "$1/arb-record.md")" \
+    --argjson readme "$(pr_file added "$1/README.md")" '. + [$record, $readme]' <<<"$archive_only_files"
+}
+reset_lane_env
+FILES_FIXTURE="$(lane_with_adr docs/decisions/0310-Second_Delivery-ARB)"
+run
+expect "an archive PR whose ADR slug has uppercase letters or underscores still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED docs/decisions/0310-Second_Delivery-ARB/arb-record.md (added) is outside the archive-only shape"
+
+reset_lane_env
+FILES_FIXTURE="$(lane_with_adr docs/decisions/310-second-delivery-arb)"
+run
+expect "an archive PR whose ADR number is not four digits still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED docs/decisions/310-second-delivery-arb/arb-record.md (added) is outside the archive-only shape"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
