@@ -460,6 +460,13 @@ run
 expect "an archive PR that renames a record into a new ADR directory still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED $SECOND_ADR/arb-record.md (renamed) is outside the archive-only shape"
 
+# Every ADR directory is complete, not just the first one.
+reset_lane_env
+FILES_FIXTURE="$(jq -c --argjson record "$(pr_file added "$SECOND_ADR/arb-record.md")" '. + [$record]' <<<"$archive_only_files")"
+run
+expect "an archive PR whose second ADR directory lacks its README still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $SECOND_ADR/ must add both README.md and arb-record.md"
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
