@@ -71,7 +71,9 @@ case "$args" in
   # The archive-only admission lane (#2285) reads the pull request's changed files.
   *"/pulls/$PR/files?per_page=100"*)
     [ "${FAIL_FILES:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
-    printf '%s\n' "$FILES_FIXTURE" ;;
+    # A list too large for one environment variable is served from a file.
+    if [ -n "${FILES_FIXTURE_FILE:-}" ]; then cat "$FILES_FIXTURE_FILE"
+    else printf '%s\n' "$FILES_FIXTURE"; fi ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
   # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
@@ -135,7 +137,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES FILES_FIXTURE_FILE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -377,6 +379,15 @@ export FAIL_ARCHIVE=1
 run
 expect "an unreadable added record leaves Gate R unevaluated, never admitted" 1 \
   "Gate R cannot evaluate $LANE_REPO#$PR head $HEAD_SHA: could not fetch arb-consensus archive $LANE_REPO@$HEAD_SHA:$LANE_ADR/arb-record.md"
+
+# GitHub lists at most 3000 files, so a list that long may hide a non-archive path.
+reset_lane_env
+jq -c --argjson fragment "$(pr_file added NEXT/2026-11-25-issue-1-fragment.md)" \
+  '. + [range(3000 - length) | $fragment]' <<<"$archive_only_files" >"$tmp/files-3000.json"
+export FILES_FIXTURE_FILE="$tmp/files-3000.json"
+run
+expect "an archive PR whose file list reaches GitHub's 3000-file limit still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED the file list reached GitHub's 3000-file limit and may be truncated"
 
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R

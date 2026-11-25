@@ -167,6 +167,7 @@ select_preceding_citation() {
 # Archive-only admission lane (ADR 0309 / #2285). A verJSON/.github pull request that
 # only archives ARB chair records needs no citation of its own: requiring one is
 # circular. Prints the reason the lane does not apply and returns 1, or returns 0.
+readonly PR_FILES_LIST_LIMIT=3000
 archive_only_lane() {
   local files records record text status
   local outside unpaired
@@ -176,6 +177,11 @@ archive_only_lane() {
         then . else error("not a file list") end')" || {
     printf 'could not list the files of %s#%s' "$TARGET_REPO" "$PR_NUMBER"
     return 3
+  }
+  # GitHub lists at most 3000 files; a list that long may hide a path outside the shape.
+  [ "$(jq length <<<"$files")" -lt "$PR_FILES_LIST_LIMIT" ] || {
+    printf "the file list reached GitHub's %s-file limit and may be truncated" "$PR_FILES_LIST_LIMIT"
+    return 1
   }
   # Every changed file is an added record, an added ADR README, the regenerated
   # decision index, or an added release-note fragment; anything else needs a citation.
