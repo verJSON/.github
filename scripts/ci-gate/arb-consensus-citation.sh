@@ -14,6 +14,12 @@
 # reviews-json-file is the paginated reviews array already fetched by the receipt
 # verifier (jq -s '.' shape: array of page arrays, or a flat array). Exit codes
 # match independent-review-receipt.sh: 0 ok, 1 refused, 2 bad args, 3 unanswered.
+#
+# Archive-only admission lane (ADR 0309): a verJSON/.github pull request whose exact
+# head only adds ADR chair records with their READMEs, regenerates the decision index
+# and adds NEXT fragments passes without a citation, with a ::notice:: naming the lane,
+# once each added record parses as a cited archive would. Any other pull request falls
+# back to the citation requirement; an unreadable file list or record exits 3.
 set -euo pipefail
 
 [ "$#" -eq 5 ] || {
@@ -168,9 +174,9 @@ select_preceding_citation() {
 # only archives ARB chair records needs no citation of its own: requiring one is
 # circular. Prints the reason the lane does not apply and returns 1, or returns 0.
 readonly PR_FILES_LIST_LIMIT=3000
+readonly ADR_DIRECTORY_RE='^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/'
 archive_only_lane() {
-  local files records record text status
-  local outside unpaired
+  local files outside unpaired records record text status
   files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs '
       if all(.[]; type == "array") then add // [] else error("not a file list") end
       | if all(.[]; type == "object" and (.filename | type == "string") and (.status | type == "string"))
@@ -185,8 +191,8 @@ archive_only_lane() {
   }
   # Every changed file is an added record, an added ADR README, the regenerated
   # decision index, or an added release-note fragment; anything else needs a citation.
-  outside="$(jq -r 'first(.[] | select(
-      (.status == "added" and (.filename | test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/(arb-record|README)[.]md$")))
+  outside="$(jq -r --arg adr "$ADR_DIRECTORY_RE" 'first(.[] | select(
+      (.status == "added" and (.filename | test($adr + "(arb-record|README)[.]md$")))
       or (.status == "modified" and .filename == "docs/decisions/README.md")
       or (.status == "added" and (.filename | test("^NEXT/[^/]+[.]md$")))
       | not)
@@ -205,8 +211,8 @@ archive_only_lane() {
     printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
     return 3
   }
-  records="$(jq -r '.[] | select(.status == "added")
-    | .filename | select(test("^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/arb-record[.]md$"))' <<<"$files")" \
+  records="$(jq -r --arg adr "$ADR_DIRECTORY_RE" '.[] | select(.status == "added")
+    | .filename | select(test($adr + "arb-record[.]md$"))' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
   while IFS= read -r record; do
