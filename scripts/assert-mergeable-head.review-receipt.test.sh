@@ -352,6 +352,16 @@ run
 expect "a differently cased verJSON/.github still takes the archive-only lane" 0 \
   "::notice::archive-only admission lane: Verjson/.github#$PR head $HEAD_SHA"
 
+# An added record must parse as Gate R parses a cited archive, or no one can cite it.
+reset_lane_env
+ARCHIVE_B64="$(printf '%s' "# chair without a slate" | base64 -w0 2>/dev/null || printf '%s' "# chair without a slate" | base64)"
+export ARCHIVE_B64
+run
+expect "an archive PR whose added record has no canonical-slate-json fence still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/arb-record.md: arb-consensus archive has no canonical-slate-json fence"
+ARCHIVE_B64="$(printf '%s' "$ARCHIVE_TEXT" | base64 -w0 2>/dev/null || printf '%s' "$ARCHIVE_TEXT" | base64)"
+export ARCHIVE_B64
+
 # --- scope -----------------------------------------------------------------------
 # A base ref without the organization's arm rule is not promotion-enabled: Gate R
 # neither demands a receipt nor reads the reviews.
