@@ -188,7 +188,7 @@ select_preceding_citation() {
 readonly PR_FILES_LIST_LIMIT=3000
 readonly ADR_DIRECTORY_RE='^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/'
 archive_only_lane() {
-  local files outside unpaired records record text status
+  local files outside unpaired tree irregular records record text status
   files="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -cs '
       if all(.[]; type == "array") then add // [] else error("not a file list") end
       | if all(.[]; type == "object" and (.filename | type == "string") and (.status | type == "string"))
@@ -225,6 +225,26 @@ archive_only_lane() {
     | group_by(.dir) | map(select((map(.file) | sort) != ["README.md", "arb-record.md"]) | .[0].dir)
     | first(.[]) // empty' <<<"$files")" || { printf 'could not evaluate the archive-only shape'; return 3; }
   [ -z "$unpaired" ] || { printf '%s must add both README.md and arb-record.md' "$unpaired"; return 1; }
+  # The head's tree, not the Contents API, says what each path is: the Contents API
+  # follows symlinks. Every listed path must be a regular, non-executable blob.
+  # gh api git/trees/ must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
+  [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'head %s is not a 40-hex object name' "$EXPECTED_HEAD_SHA"
+    return 3
+  }
+  tree="$(gh api "repos/$TARGET_REPO/git/trees/$EXPECTED_HEAD_SHA?recursive=1" | jq -c '
+      if type == "object" and (.truncated | type == "boolean") and (.tree | type == "array")
+      then . else error("not a tree") end')" || {
+    printf 'could not read the tree of %s@%s' "$TARGET_REPO" "$EXPECTED_HEAD_SHA"
+    return 3
+  }
+  irregular="$(printf '%s\n%s\n' "$tree" "$files" | jq -rs --arg head "$EXPECTED_HEAD_SHA" '
+      .[0].tree as $entries | .[1] as $files
+      | ($entries | map({key: (.path | tostring), value: "\(.type) \(.mode)"}) | from_entries) as $at
+      | first($files[] | select(.status != "removed") | .filename | select($at[.] != "blob 100644")
+        | "\(gsub("[[:cntrl:]]"; " ")) is not a regular file at head \($head) (\($at[.] // "absent"))")
+      // empty')" || { printf 'could not evaluate the archive-only shape'; return 3; }
+  [ -z "$irregular" ] || { printf '%s' "$irregular"; return 1; }
   records="$(jq -r --arg adr "$ADR_DIRECTORY_RE" '.[] | select(.status == "added")
     | .filename | select(test($adr + "arb-record[.]md\\z"))' <<<"$files")" \
     || { printf 'could not evaluate the archive-only shape'; return 3; }

@@ -66,6 +66,16 @@ case "$args" in
   *"/commits/"*"/status"*) printf '{"total_count":0,"statuses":[]}\n' ;;
   *"/actions/runs?head_sha="*) printf '%s\n' "$RUNS_FIXTURE" ;;
   *"/annotations?per_page"*) printf '[]\n' ;;
+  # The head's recursive tree: TREE_FIXTURE, or every non-removed listed file as a
+  # regular blob, the shape an archive pull request has.
+  *"/git/trees/$HEAD_SHA?recursive=1"*)
+    [ "${FAIL_TREE:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
+    if [ -n "${TREE_FIXTURE:-}" ]; then printf '%s\n' "$TREE_FIXTURE"
+    else
+      if [ -n "${FILES_FIXTURE_FILE:-}" ]; then pages="$(cat "$FILES_FIXTURE_FILE")"; else pages="$FILES_FIXTURE"; fi
+      jq -cs 'add | {truncated: false, tree: [.[] | select(.status != "removed")
+        | {path: .filename, mode: "100644", type: "blob"}]}' <<<"$pages"
+    fi ;;
   # Like GitHub, a file answers with its own type and path. A symlink to a file answers
   # with the target's content and path, which CONTENTS_SERVED_PATH stands in for.
   *"/contents/"*)
@@ -107,7 +117,7 @@ case "$args" in
 esac
 GH
 chmod +x "$tmp/bin/gh"
-export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" REVIEW_LIST_CALLS="$tmp/review-list-calls" PR ARCHIVE_B64
+export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" REVIEW_LIST_CALLS="$tmp/review-list-calls" PR HEAD_SHA ARCHIVE_B64
 
 check_run() { # id name suite
   printf '{"id":%s,"name":"%s","status":"completed","conclusion":"success","app":{"id":%s},"check_suite":{"id":%s}}' \
@@ -144,7 +154,7 @@ reset_env() { # [target-repo]
   REPO="${1:-$DEFAULT_REPO}"
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES FILES_FIXTURE_FILE CONTENTS_SERVED_PATH CONTENTS_TYPE
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR FAIL_ARCHIVE FAIL_FILES FILES_FIXTURE_FILE CONTENTS_SERVED_PATH CONTENTS_TYPE FAIL_TREE TREE_FIXTURE
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -421,6 +431,19 @@ export CONTENTS_SERVED_PATH="$archived"
 run
 expect "an archive PR whose added record resolves to another path still requires a citation" 6 \
   "$CITATION_REQUIRED; $LANE_SKIPPED arb-consensus archive $LANE_REPO@$HEAD_SHA:$LANE_ADR/arb-record.md is served as $archived"
+
+# The head's tree, not the Contents API, says what each added path is. A record that is
+# a symlink is not an archive, whatever its target holds.
+lane_tree_with_mode() { # path mode -> the archive PR's head tree with that entry's mode
+  jq -c --arg p "$1" --arg mode "$2" '{truncated: false, tree: [.[] | {path: .filename, mode: "100644", type: "blob"}]}
+    | (.tree[] | select(.path == $p) | .mode) = $mode' <<<"$archive_only_files"
+}
+reset_lane_env
+TREE_FIXTURE="$(lane_tree_with_mode "$LANE_ADR/arb-record.md" 120000)"
+export TREE_FIXTURE
+run
+expect "an archive PR whose added record is a symlink still requires a citation" 6 \
+  "$CITATION_REQUIRED; $LANE_SKIPPED $LANE_ADR/arb-record.md is not a regular file at head $HEAD_SHA (blob 120000)"
 
 # Nor can an added record that cannot be read be shown to parse.
 reset_lane_env
