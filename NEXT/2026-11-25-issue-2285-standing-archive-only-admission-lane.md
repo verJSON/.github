@@ -6,7 +6,7 @@ title: Admit archive-only verJSON/.github pull requests without a citation
 ---
 
 Gate R's arb-consensus citation step now has a standing archive-only admission
-lane (ADR 0309, pending owner ratification). A verJSON/.github pull request
+lane (ADR 0309; admitted under ADR 0310). A verJSON/.github pull request
 whose exact head only adds ADR chair records with their READMEs, regenerates the
 decision index and adds NEXT fragments, all as regular files, in a file list
 read whole in one request, passes without a citation once each added record

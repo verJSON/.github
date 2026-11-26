@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0310](0310-verjson-dotgithub-2287-archive-lane-admission-arb/README.md) | 2026-11-26 | Admission ARB for verJSON/.github#2287 (archive-only lane, ADR 0309) |
 | [0309](0309-standing-archive-only-admission-lane/README.md) | 2026-11-25 | Standing archive-only admission lane for ARB chair records |
 | [0308](0308-verjson-dotgithub-2280-archive-admission-arb/README.md) | 2026-11-25 | Admission ARB for verJSON/.github#2280 (archives 0306 and 0307) |
 | [0307](0307-verjson-agents-558-arb-ledger-v3-delivery-arb/README.md) | 2026-11-25 | Delivery ARB archive for verjson-agents#558 ARB ledger v3 |

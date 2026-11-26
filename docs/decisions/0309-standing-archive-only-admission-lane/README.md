@@ -1,7 +1,7 @@
 # 0309 — Standing archive-only admission lane for ARB chair records
 
 - **Date:** 2026-11-25
-- **Status:** Proposed — pending the owner's ratification of this ADR.
+- **Status:** Accepted — ratified on [#2287](https://github.com/verJSON/.github/pull/2287#issuecomment-7183499120), the ratification the Authority line names; clarifications in [ADR 0310](../0310-verjson-dotgithub-2287-archive-lane-admission-arb/README.md).
 - **Authority:** the owner's ratification on [#2287](https://github.com/verJSON/.github/pull/2287) (pending; the Status line links it when this ADR becomes Accepted).
 - **Extends:** [ADR 0271](../0271-arb-consensus-is-approval-authority/README.md) (Gate R's arb-consensus citation). Supersedes nothing.
 - **Changes:** how Gate R enforces [ADR 0271](../0271-arb-consensus-is-approval-authority/README.md) Decision 3 for archive-only pull requests (see Consequences).
