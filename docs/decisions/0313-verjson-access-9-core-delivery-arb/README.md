@@ -17,6 +17,6 @@ This README restates the board's outcome and records no new decision (ADR 0271 D
 - **Decision:** the board approved merging verjson-access#9 at exactly `cd0e0a58ef02316cbd6e5dceb6f9b2253ddcb1d9`, with `--match-head-commit` and never `--admin`.
 - **Kind (a) defects:** rounds 1 and 2 found kind (a) defects, which were fixed in later heads and re-verified.
 - **Follow-ups:** verjson-access#13, #14 and #15 carry the kind (b) items. Production use stays blocked on verjson-access#7.
-- **Retained dissent:** one advisory member, codex, kept its final-round dissent. claude ruled each of its items kind (b).
+- **Retained dissent:** codex's final-round REVISE on PLAN, ENGINE, POLICY, DOCS, TESTS, X1, X2 and M1 is retained for the owner, with no later ballot. In round 3, claude ruled codex's round-2 findings kind (b).
 
 [arb-record]: ./arb-record.md
