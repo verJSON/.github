@@ -14,6 +14,12 @@
 # reviews-json-file is the paginated reviews array already fetched by the receipt
 # verifier (jq -s '.' shape: array of page arrays, or a flat array). Exit codes
 # match independent-review-receipt.sh: 0 ok, 1 refused, 2 bad args, 3 unanswered.
+#
+# Archive-only admission lane (ADR 0309): a verJSON/.github pull request whose exact
+# head only adds ADR chair records with their READMEs, regenerates the decision index
+# and adds NEXT fragments passes without a citation, with a ::notice:: naming the lane,
+# once each added record parses as a cited archive would. Any other pull request falls
+# back to the citation requirement; an unreadable file list or record exits 3.
 set -euo pipefail
 
 [ "$#" -eq 5 ] || {
@@ -39,6 +45,128 @@ REVIEWS_FILE="$5"
 # Exact citation marker. Digest stays out of the ADR 0202 receipt marker.
 # archive locator: owner/repo@40-hex:relative/path (no .., no absolute path).
 citation_re='^<!-- arb-consensus:v1 run:(arb-[A-Za-z0-9][A-Za-z0-9._-]{1,62}) slate:([0-9a-f]{64}) archive:([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)@([0-9a-f]{40}):([A-Za-z0-9._/-]+[A-Za-z0-9._-]) -->$'
+
+# Print the decoded content of <path> at <ref> in <repo>. On failure print the reason
+# and return 3 when the read failed or its response is malformed (unanswered), or 1
+# when the record is refused. Parse .content locally so test stubs that return the
+# Contents JSON object work without implementing gh's --jq filter.
+read_record_text() { # repo ref path
+  local repo="$1" ref="$2" path="$3" json verdict err_file text err
+  local locator="arb-consensus archive $repo@$ref:$path"
+  # gh api ?ref= must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
+  [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'arb-consensus archive ref %s is not a 40-hex object name' "$ref"
+    return 1
+  }
+  json="$(gh api "repos/$repo/contents/$path?ref=$ref")" || {
+    printf 'could not fetch %s' "$locator"
+    return 3
+  }
+  # One parse. A directory answers with an array, and a symlink to a non-file or a
+  # submodule with an object of its own type and no content: definite answers, refused.
+  # A symlink to a file answers as the target file at the target's path, so only a file
+  # served at the requested path is that file, and only base64 carries its bytes.
+  verdict="$(jq -er --arg path "$path" '
+      def shown: gsub("[[:cntrl:]]"; " ");
+      if type == "array" then "refuse\tis a directory"
+      elif type == "object" and (.type | type) == "string" and .type != "file" then
+        "refuse\tis a \(.type | shown), not a file"
+      elif type == "object" and .type == "file" and (.path | type) == "string"
+        and (.encoding | type) == "string" and (.content | type) == "string" then
+        if .path != $path then "refuse\tis served as \(.path | shown)"
+        elif .encoding != "base64" then "refuse\tis encoded as \(.encoding | shown), not base64"
+        else "content\t\(.content)" end
+      else error("malformed contents response") end' <<<"$json" 2>/dev/null)" || {
+    printf '%s returned a malformed contents response' "$locator"
+    return 3
+  }
+  [[ "$verdict" == content$'\t'* ]] || {
+    printf '%s %s' "$locator" "${verdict#refuse$'\t'}"
+    return 1
+  }
+  # Decode and check the bytes in Python: Bash drops NUL bytes before anything hashes them.
+  err_file="$(mktemp)"
+  text="$(python3 -c '
+import base64, binascii, re, sys
+try:
+    data = base64.b64decode(re.sub(r"\s", "", sys.stdin.read()), validate=True)
+except (binascii.Error, ValueError):
+    sys.exit("is not decodable")
+if not data:
+    sys.exit("has no content")
+if b"\0" in data:
+    sys.exit("contains a NUL byte")
+try:
+    data.decode("utf-8")
+except UnicodeDecodeError:
+    sys.exit("is not valid UTF-8")
+sys.stdout.buffer.write(data)
+' <<<"${verdict#content$'\t'}" 2>"$err_file")" || {
+    err="$(tr -d '\r' <"$err_file")"
+    err="${err%%$'\n'*}"
+    rm -f "$err_file"
+    printf '%s %s' "$locator" "${err:-could not be decoded}"
+    return 1
+  }
+  rm -f "$err_file"
+  printf '%s' "$text"
+}
+
+# Encoding (ADR 0271): UTF-8 bytes of the single-line JSON object inside the first
+# ```canonical-slate-json fence, with one trailing newline removed if present.
+# Schema: JSON object whose string run_id is non-empty. Prints "<digest>\t<run_id>",
+# or the specific reason and returns 1.
+parse_slate_fence() { # record-text
+  local err_file out err
+  err_file="$(mktemp)"
+  out="$(python3 -c '
+import hashlib, json, re, sys
+text = sys.stdin.read()
+match = re.search(
+    r"^[ \t]*```canonical-slate-json\r?\n(.*?)^[ \t]*```",
+    text,
+    re.M | re.S,
+)
+if match is None:
+    sys.stderr.write("arb-consensus archive has no canonical-slate-json fence\n")
+    sys.exit(1)
+body = match.group(1)
+if body.endswith("\n"):
+    body = body[:-1]
+if body.endswith("\r"):
+    body = body[:-1]
+if "\n" in body or "\r" in body:
+    sys.stderr.write("canonical-slate-json fence must contain a single JSON line\n")
+    sys.exit(1)
+if not body:
+    sys.stderr.write("canonical-slate-json fence is empty\n")
+    sys.exit(1)
+try:
+    obj = json.loads(body)
+except json.JSONDecodeError as exc:
+    sys.stderr.write(f"canonical-slate-json fence is not valid JSON: {exc}\n")
+    sys.exit(1)
+if not isinstance(obj, dict):
+    sys.stderr.write("canonical-slate-json fence must be a JSON object\n")
+    sys.exit(1)
+archived_run = obj.get("run_id")
+if not isinstance(archived_run, str) or not archived_run:
+    sys.stderr.write("canonical-slate-json fence is missing string run_id\n")
+    sys.exit(1)
+digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+sys.stdout.write(f"{digest}\t{archived_run}\n")
+' <<<"$1" 2>"$err_file")" || {
+    # Read the whole stderr file, then take the first line — do not pipe into
+    # head (pipefail-sigpipe / #1430).
+    err="$(tr -d '\r' <"$err_file")"
+    err="${err%%$'\n'*}"
+    rm -f "$err_file"
+    printf '%s' "${err:-arb-consensus archive slate verification failed}"
+    return 1
+  }
+  rm -f "$err_file"
+  printf '%s' "$out"
+}
 
 MAX_CANDIDATE_LOOKUPS=20
 select_preceding_citation() {
@@ -81,11 +209,110 @@ select_preceding_citation() {
   return 1
 }
 
+# Archive-only admission lane (ADR 0309 / #2285). A verJSON/.github pull request that
+# only archives ARB chair records needs no citation of its own: requiring one is
+# circular. Prints the reason the lane does not apply and returns 1, or returns 0.
+readonly PR_FILES_PAGE_SIZE=100
+readonly ADR_DIRECTORY_RE='^docs/decisions/[0-9]{4}-[a-z0-9][a-z0-9-]*/'
+archive_only_lane() {
+  local files outside unpaired tree irregular records record text status
+  # One request only: pages are separate requests against a base that can move between
+  # them, so a paginated list can skip a row.
+  files="$(gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=$PR_FILES_PAGE_SIZE" | jq -c '
+      if type == "array" and all(.[]; type == "object" and (.filename | type == "string")
+        and (.status | type == "string"))
+      then . else error("not a file list") end')" || {
+    printf 'could not list the files of %s#%s' "$TARGET_REPO" "$PR_NUMBER"
+    return 3
+  }
+  # The list is the current head's, which can move after the receipt. Each entry's
+  # contents_url names its commit: the head, or the base for a removed file. A list of
+  # any other head cannot vouch for the one being merged, archive-shaped or not.
+  jq -e --arg head "$EXPECTED_HEAD_SHA" 'all(.[] | select(.status != "removed");
+      .contents_url | type == "string" and test("[?&]ref=" + $head + "(&|\\z)"))' <<<"$files" >/dev/null || {
+    printf 'the file list of %s#%s does not describe head %s' "$TARGET_REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA"
+    return 3
+  }
+  # A full page may continue on another, which this single read never sees.
+  [ "$(jq length <<<"$files")" -lt "$PR_FILES_PAGE_SIZE" ] || {
+    printf 'the file list fills a page of %s rows, so it is not read in one request' "$PR_FILES_PAGE_SIZE"
+    return 1
+  }
+  # jq's `$` also matches before a trailing newline, so every lane pattern ends at `\z`.
+  # Every changed file is an added record, an added ADR README, the regenerated
+  # decision index, or an added release-note fragment; anything else needs a citation.
+  outside="$(jq -r --arg adr "$ADR_DIRECTORY_RE" 'first(.[] | select(
+      (.status == "added" and (.filename | test($adr + "(arb-record|README)[.]md\\z")))
+      or (.status == "modified" and .filename == "docs/decisions/README.md")
+      or (.status == "added" and (.filename | test("^NEXT/[A-Za-z0-9][A-Za-z0-9._-]*[.]md\\z")))
+      | not)
+    | "\(.filename | gsub("[[:cntrl:]]"; " ")) (\(.status))") // empty' <<<"$files")" \
+    || { printf 'could not evaluate the archive-only shape'; return 3; }
+  [ -z "$outside" ] || { printf '%s is outside the archive-only shape' "$outside"; return 1; }
+  unpaired="$(jq -r '[.[] | .filename | select(startswith("docs/decisions/") and . != "docs/decisions/README.md")
+      | capture("^(?<dir>docs/decisions/[^/]+/)(?<file>.+)\\z")]
+    | group_by(.dir) | map(select((map(.file) | sort) != ["README.md", "arb-record.md"]) | .[0].dir)
+    | first(.[]) // empty' <<<"$files")" || { printf 'could not evaluate the archive-only shape'; return 3; }
+  [ -z "$unpaired" ] || { printf '%s must add both README.md and arb-record.md' "$unpaired"; return 1; }
+  # The head's tree, not the Contents API, says what each path is: the Contents API
+  # follows symlinks. Every listed path must be a regular, non-executable blob.
+  # gh api git/trees/ must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
+  [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'head %s is not a 40-hex object name' "$EXPECTED_HEAD_SHA"
+    return 3
+  }
+  tree="$(gh api "repos/$TARGET_REPO/git/trees/$EXPECTED_HEAD_SHA?recursive=1" | jq -c '
+      if type == "object" and (.truncated | type == "boolean") and (.tree | type == "array")
+      then . else error("not a tree") end')" || {
+    printf 'could not read the tree of %s@%s' "$TARGET_REPO" "$EXPECTED_HEAD_SHA"
+    return 3
+  }
+  [ "$(jq -r .truncated <<<"$tree")" = false ] || {
+    printf 'the tree of head %s is truncated' "$EXPECTED_HEAD_SHA"
+    return 1
+  }
+  irregular="$(printf '%s\n%s\n' "$tree" "$files" | jq -rs --arg head "$EXPECTED_HEAD_SHA" '
+      .[0].tree as $entries | .[1] as $files
+      | ($entries | map({key: (.path | tostring), value: "\(.type) \(.mode)"}) | from_entries) as $at
+      | first($files[] | select(.status != "removed") | .filename | select($at[.] != "blob 100644")
+        | "\(gsub("[[:cntrl:]]"; " ")) is not a regular file at head \($head) (\($at[.] // "absent"))")
+      // empty')" || { printf 'could not evaluate the archive-only shape'; return 3; }
+  [ -z "$irregular" ] || { printf '%s' "$irregular"; return 1; }
+  records="$(jq -r --arg adr "$ADR_DIRECTORY_RE" '.[] | select(.status == "added")
+    | .filename | select(test($adr + "arb-record[.]md\\z"))' <<<"$files")" \
+    || { printf 'could not evaluate the archive-only shape'; return 3; }
+  [ -n "$records" ] || { printf 'the pull request adds no arb-record.md'; return 1; }
+  while IFS= read -r record; do
+    text="$(read_record_text "$TARGET_REPO" "$EXPECTED_HEAD_SHA" "$record")" || {
+      status=$?
+      printf '%s' "$text"
+      return "$status"
+    }
+    text="$(parse_slate_fence "$text")" || { printf '%s: %s' "$record" "$text"; return 1; }
+  done <<<"$records"
+}
+
+# Fall back to the citation requirement when the lane does not apply, keeping its reason.
+lane_reason=""
+target_repo_cf="$(printf '%s' "$TARGET_REPO" | tr '[:upper:]' '[:lower:]')"
+if [ "$target_repo_cf" = "verjson/.github" ]; then
+  lane_status=0
+  lane_reason="$(archive_only_lane)" || lane_status=$?
+  case "$lane_status" in
+    0)
+      echo "::notice::archive-only admission lane: $TARGET_REPO#$PR_NUMBER head $EXPECTED_HEAD_SHA only archives ARB chair records; no arb-consensus citation is required (ADR 0309)"
+      exit 0
+      ;;
+    1) ;;
+    *) echo "::error::$lane_reason"; exit 3 ;;
+  esac
+fi
+
 reviews="$(cat "$REVIEWS_FILE")"
 selected="$(select_preceding_citation "$reviews")" || {
   status=$?
   [ "$status" -eq 3 ] && exit 3
-  echo "::error::an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge"
+  echo "::error::an exact-head preceding arb-consensus citation COMMENT is required before autonomous merge${lane_reason:+; the archive-only admission lane does not apply: $lane_reason}"
   exit 1
 }
 
@@ -114,76 +341,15 @@ archive_repo_cf="$(printf '%s' "$archive_repo" | tr '[:upper:]' '[:lower:]')"
 
 # Fail closed: recompute SHA-256 over the archive's canonical-slate-json fence
 # (ADR 0271 / #2189). Substring presence of the digest string is not enough.
-# Parse .content locally so test stubs that return the Contents JSON object work
-# without implementing gh's --jq filter.
-# Re-assert 40-hex in this block: citation_re already matched, but gh api ?ref=
-# must sit beside a live sha guard (default-branch-uri-encoding.test.sh).
-[[ "$archive_sha" =~ ^[0-9a-f]{40}$ ]]   || { echo "::error::arb-consensus archive sha is not a 40-hex object name"; exit 1; }
-archive_json="$(gh api "repos/$archive_repo/contents/$archive_path?ref=$archive_sha")" || {
-  echo "::error::could not fetch arb-consensus archive $archive_repo@$archive_sha:$archive_path"
-  exit 3
+archive_text="$(read_record_text "$archive_repo" "$archive_sha" "$archive_path")" || {
+  status=$?
+  echo "::error::$archive_text"
+  exit "$status"
 }
-archive_b64="$(jq -r '.content // empty' <<<"$archive_json")"
-[ -n "$archive_b64" ] || {
-  echo "::error::arb-consensus archive $archive_repo@$archive_sha:$archive_path has no content"
+slate_verify_out="$(parse_slate_fence "$archive_text")" || {
+  echo "::error::$slate_verify_out"
   exit 1
 }
-archive_text="$(printf '%s' "$archive_b64" | tr -d '\n\r ' | base64 -d 2>/dev/null)" || {
-  echo "::error::arb-consensus archive $archive_repo@$archive_sha:$archive_path is not decodable"
-  exit 1
-}
-
-# Encoding (ADR 0271): UTF-8 bytes of the single-line JSON object inside the first
-# ```canonical-slate-json fence, with one trailing newline removed if present.
-# Schema: JSON object whose string run_id equals the citation run id.
-slate_verify_err="$(mktemp)"
-slate_verify_out="$(python3 -c '
-import hashlib, json, re, sys
-text = sys.stdin.read()
-match = re.search(
-    r"^[ \t]*```canonical-slate-json\r?\n(.*?)^[ \t]*```",
-    text,
-    re.M | re.S,
-)
-if match is None:
-    sys.stderr.write("arb-consensus archive has no canonical-slate-json fence\n")
-    sys.exit(1)
-body = match.group(1)
-if body.endswith("\n"):
-    body = body[:-1]
-if body.endswith("\r"):
-    body = body[:-1]
-if "\n" in body or "\r" in body:
-    sys.stderr.write("canonical-slate-json fence must contain a single JSON line\n")
-    sys.exit(1)
-if not body:
-    sys.stderr.write("canonical-slate-json fence is empty\n")
-    sys.exit(1)
-try:
-    obj = json.loads(body)
-except json.JSONDecodeError as exc:
-    sys.stderr.write(f"canonical-slate-json fence is not valid JSON: {exc}\n")
-    sys.exit(1)
-if not isinstance(obj, dict):
-    sys.stderr.write("canonical-slate-json fence must be a JSON object\n")
-    sys.exit(1)
-archived_run = obj.get("run_id")
-if not isinstance(archived_run, str) or not archived_run:
-    sys.stderr.write("canonical-slate-json fence is missing string run_id\n")
-    sys.exit(1)
-digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-sys.stdout.write(f"{digest}\t{archived_run}\n")
-' <<<"$archive_text" 2>"$slate_verify_err")" || {
-  # Read the whole stderr file, then take the first line — do not pipe into
-  # head (pipefail-sigpipe / #1430).
-  err="$(tr -d '\r' <"$slate_verify_err")"
-  err="${err%%$'\n'*}"
-  rm -f "$slate_verify_err"
-  [ -n "$err" ] || err="arb-consensus archive slate verification failed"
-  echo "::error::$err"
-  exit 1
-}
-rm -f "$slate_verify_err"
 IFS=$'\t' read -r computed_digest archived_run_id <<<"$slate_verify_out"
 [[ "$computed_digest" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "::error::arb-consensus archive slate digest computation failed"; exit 1; }

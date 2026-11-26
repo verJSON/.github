@@ -58,7 +58,9 @@ case "$args" in
   # The repository is promotion-enabled, so Gate R (ADR 0257) also reads its
   # independent-review receipt plus a preceding arb-consensus citation (#2184).
   *"/contents/"*)
-    jq -nc --arg c "$ARCHIVE_B64" '{content: $c, encoding: "base64"}' ;;
+    # Like GitHub, the file answers with its own type and path.
+    path="${args#*/contents/}"; path="${path%%\?*}"
+    jq -nc --arg c "$ARCHIVE_B64" --arg path "$path" '{type: "file", path: $path, content: $c, encoding: "base64"}' ;;
   *"/pulls/121/reviews?per_page=100"*) printf '%s\n' "$REVIEWS_FIXTURE" ;;
   *"/pulls/121/reviews/"[0-9]*)
     id="$(sed -n 's|.*/reviews/\([0-9][0-9]*\).*|\1|p' <<<"$args")"
