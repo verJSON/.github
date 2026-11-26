@@ -15,7 +15,7 @@ That value is a consistency anchor written by the publisher, not provenance (ADR
 
 This README restates the board's outcome and records no new decision (ADR 0271 Decision 1).
 - **Decision:** the board approved merging verjson-access#17 at exactly `e112845a7af184dd9faeb9b59b5af3d3adc0234f`, with `--match-head-commit` and never `--admin`.
-- **Findings and follow-ups:** codex's findings were fixed in later heads where cheap. The rest are tracked in verjson-access#16 and #13.
+- **Findings and follow-ups:** codex's findings were fixed in later heads where cheap. The record routes the remaining kind (b) items to verjson-access#16, #13, verjson-docs#49, new follow-up issues, or the source PR, and requires each to be recorded before #17's `hold` label is removed. They were recorded in verjson-access#18 and #16 (comment 7203394897); the two ADR 0003 wording items the record prefers fixed in #17 were noted on #16 instead, because the approval is bound to #17's exact head.
 - **Retained dissent:** codex's final-round REVISE on CHAIN, USE, DOCS, TESTS, X1, X2 and M1 is retained for the owner, with no later ballot. In round 3, claude ruled codex's round-2 findings kind (b).
 
 [arb-record]: ./arb-record.md
