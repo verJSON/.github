@@ -1,6 +1,6 @@
 ---
 date: 2026-11-26
-issue: 419
+id: 20261126T060400Z
 impact: patch
 title: Archive delivery ARB for verjson-cli#419
 ---

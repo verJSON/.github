@@ -11,6 +11,6 @@
 
 `arb-record.md` is the run-24 chair artifact, copied byte for byte. Its whole-file SHA-256 is `5655c1a617fa7a89e07ae4b1951116d6e9b0c4c06125504d6eeac78a28402a5f`. That value is a consistency anchor written by the publisher, not provenance (ADR 0309). The provenance channel that predates this pull request is the chair's board-outcome comment on the source PR, [verjson-cli#419 comment 7184062833](https://github.com/verJSON/verjson-cli/pull/419#issuecomment-7184062833) (2026-11-26T06:04:09Z), which states the same hash, run id and fence digest.
 
-This README restates the board's outcome and records no new decision (ADR 0271 Decision 1). The board approved merging verjson-cli#419 at exactly `02073324c65d55f80c0ab932f9dd5dc6a4eea9e0`, with `--match-head-commit` and never `--admin`. Its kind (b) items are tracked in verjson-cli#421, and it retained no dissent.
+This README restates the board's outcome and records no new decision (ADR 0271 Decision 1). The board approved merging verjson-cli#419 at exactly `02073324c65d55f80c0ab932f9dd5dc6a4eea9e0`, with `--match-head-commit` and never `--admin`. verjson-cli#421 carries its kind (b) follow-ups, and it retained no dissent.
 
 [arb-record]: ./arb-record.md
