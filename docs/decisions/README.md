@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0313](0313-verjson-access-9-core-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-access#9 workforce access core |
 | [0312](0312-verjson-cli-416-access-dispatch-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-cli#416 access dispatch |
 | [0311](0311-verjson-cli-419-ci-onboarding-help-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-cli#419 CI onboarding help |
 | [0310](0310-verjson-dotgithub-2287-archive-lane-admission-arb/README.md) | 2026-11-26 | Admission ARB for verJSON/.github#2287 (archive-only lane, ADR 0309) |
