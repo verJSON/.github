@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0316](0316-verjson-access-20-keycloak-connector-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-access#20 Keycloak connector |
 | [0315](0315-verjson-access-17-policy-trust-root-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-access#17 policy trust root |
 | [0314](0314-wave-zero-source-requalification-archive/README.md) | 2026-11-26 | Wave 0 source requalification archive for the GitLab runner rehearsal |
 | [0313](0313-verjson-access-9-core-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-access#9 workforce access core |
