@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0320](0320-runner-281-doctl-status-adoption-arb/README.md) | 2026-11-27 | Board review of the runner adopter for doctl status diagnostics |
 | [0319](0319-dotgithub-2299-doctl-diagnostics-arb/README.md) | 2026-11-27 | Delivery ARB archive for verJSON/.github#2299 doctl diagnostics |
 | [0318](0318-verjson-access-23-openbao-connector-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-access#23 OpenBao connector |
 | [0317](0317-runner-280-deployment-diagnostics-arb/README.md) | 2026-11-27 | Board review of runner deployment diagnostics for #280 |
