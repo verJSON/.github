@@ -20,7 +20,7 @@ _PAYLOAD_FIELDS = {
     "issuer", "consumer", "policyRevision", "repositoryAuthority", "destinationId", "issuedAt", "expiresAt",
     "subjectId", "subjectSha256", "snapshot",
 }
-_MAX_ENVELOPE_BYTES = 48 * 1024
+MAX_ENVELOPE_BYTES = 48 * 1024
 _MAX_PAYLOAD_BYTES = 20 * 1024
 _MAX_SIGNATURE_BYTES = 8 * 1024
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
@@ -116,11 +116,11 @@ def verify_snapshot_handoff(
     The signature verifier returns False for an invalid signature and raises
     SignatureVerifierUnavailable for an outage specific to its backend.
     """
-    if not isinstance(envelope_bytes, bytes) or not 0 < len(envelope_bytes) <= _MAX_ENVELOPE_BYTES:
+    if not isinstance(envelope_bytes, bytes) or not 0 < len(envelope_bytes) <= MAX_ENVELOPE_BYTES:
         raise ReceiptError("handoff envelope size is invalid")
     if _sha256(envelope_bytes) != delivery.envelope_sha256:
         raise ReceiptError("handoff envelope differs from authenticated delivery digest")
-    envelope = decode_receipt_json(envelope_bytes, max_bytes=_MAX_ENVELOPE_BYTES)
+    envelope = decode_receipt_json(envelope_bytes, max_bytes=MAX_ENVELOPE_BYTES)
     if not isinstance(envelope, dict) or set(envelope) != {"payloadType", "payload", "signatures"}:
         raise ReceiptError("handoff envelope fields are invalid")
     if envelope["payloadType"] != _PAYLOAD_TYPE.decode("ascii"):

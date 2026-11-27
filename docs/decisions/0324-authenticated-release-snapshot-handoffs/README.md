@@ -58,6 +58,31 @@ acceptance transaction. The tests use an ephemeral Ed25519 issuer.
 The wire profile leaves production issuer provisioning and verification to a
 separately qualified adapter.
 
+### GitHub attempt and artifact transport
+
+The GitHub artifact API gives the artifact ID, archive digest, and originating
+run. It does not identify the run attempt. The transport reader requires a
+completed successful `verjson-snapshot-handoff-artifact` check from the App ID
+in independently protected policy. Its summary is a `snapshot-handoff-artifact-v1`
+claim. The claim binds the repository ID, immutable producer workflow, run ID
+and attempt, source commit, version, subject ID and digest, artifact ID, archive
+digest, and digest of the envelope inside the archive.
+
+The protected claim writer must independently authenticate the pinned producer
+and seal those artifact IDs and digests from its specific upload operation. The
+consumer verifies the exact successful dispatch attempt, artifact metadata, and
+the downloaded archive against the claim. The archive must contain just the
+regular `snapshot-handoff.dsse.json` file. The consumer checks the current run
+again before returning the bytes and independent observations to the signature
+verifier. The API adapter must use authenticated reads, bound the download, and
+keep credentials off the artifact redirect host. The subject and release version
+come from independent authenticated observations.
+
+The offline transport reader and verifier still require the protected App
+publisher, independently resolved route, and actual publisher transaction for
+live qualification. A current run read is a freshness check. Effect-time
+fencing and the durable acceptance transaction provide replay protection.
+
 ## Transaction order and recovery
 
 1. The pinned producer resolves current policy and authenticates the explicit
