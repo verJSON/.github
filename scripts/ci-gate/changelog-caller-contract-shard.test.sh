@@ -459,6 +459,7 @@ shard_behavior="$(
   }
   ensure_demo
   ensure_demo
+  # shellcheck disable=SC2154 # assigned by note_fixture_materialization in the sourced fixtures helper
   if [ "$builds" -ne 1 ] || [ "$caller_fixture_materializations" -ne 1 ]; then
     echo "ensure-once:$builds:$caller_fixture_materializations"
   fi
@@ -473,6 +474,7 @@ FIXTURE_OWNER
   caller_case_count=0
   caller_case_ran=0
   unset caller_case_selected_ordinal
+  # shellcheck disable=SC2034 # reset for the fixtures helper; caller_case_prepare writes into it
   declare -A caller_case_selected_ordinal
   caller_case_prepare gamma owner_c || true
   skipped_out="$(fixture_owned_here owner_c <<'FIXTURE_OWNER'
@@ -514,7 +516,7 @@ import sys
 
 caller, shard, manifest = sys.argv[1:]
 text = open(caller, encoding="utf-8").read()
-expected_calls = 341
+expected_calls = 344
 calls = len(re.findall(r"^schedule_adopter_script ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_rejection ", text, re.M))
 calls += len(re.findall(r"^expect_release_mode_rejection ", text, re.M))

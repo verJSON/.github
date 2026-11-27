@@ -1264,6 +1264,21 @@ rc="$(RCA_ORG=Other run_audit)"
   && pass "the audit rejects default ownership in another organization" \
   || { fail "the audit accepted default ownership in another organization ($rc)"; out | sed 's/^/diag - /'; }
 stack node
+run_generator contract-test "$contract_pin" --only-package-dir packages/cli-schema \
+  --release-caller-package-dirs .github/workflows/release-extra.yml=compat \
+  --require-downstream-completion >"$content_root/scripts/changelog-contract.test.sh"
+run_generator release-snapshot "$contract_pin" --only-package-dir packages/cli-schema \
+  --require-downstream-completion >"$content_root/.github/workflows/release.yml"
+rc="$(run_audit)"
+if ! grep -q 'generated-contract-\|generated-release-' "$tmp/out.txt"; then
+  pass "audit regenerates the selected snapshot completion hold"
+else fail "audit rejected selected snapshot policy ($rc)"; out | sed 's/^/diag - /'; fi
+run_generator release-snapshot "$contract_pin" --only-package-dir packages/cli-schema >"$content_root/.github/workflows/release.yml"
+rc="$(run_audit)"
+{ [ "$rc" != "rc=0" ] && grep -q 'generated-contract-byte-drift artifact=release.yml' "$tmp/out.txt"; } \
+  && pass "audit rejects a removed snapshot completion policy" \
+  || { fail "audit accepted removed snapshot policy ($rc)"; out | sed 's/^/diag - /'; }
+stack node
 printf '\n# handwritten drift\n' >>"$content_root/scripts/render-next.sh"
 rc="$(run_audit)"
 { [ "$rc" != "rc=0" ] && grep -q 'generated-contract-byte-drift artifact=render-next.sh' "$tmp/out.txt"; } \

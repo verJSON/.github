@@ -7603,6 +7603,32 @@ else
 fi
 SCHED_SCRIPT
 )"
+held_snapshot="$tmproot/adopter-snapshot-held"
+cp -a "$snapshot_adopter" "$held_snapshot"
+write_generated_fixture "$held_snapshot/.github/workflows/release.yml" \
+  release-snapshot "$sha" --require-downstream-completion
+write_generated_fixture "$held_snapshot/scripts/changelog-contract.test.sh" \
+  contract-test "$sha" --require-downstream-completion
+schedule_adopter_script "$held_snapshot" '
+  if [ "$status" -eq 0 ]; then pass "selected downstream completion hold is accepted"; else fail "selected downstream completion hold is rejected"; fi
+'
+python3 - "$held_snapshot/.github/workflows/release.yml" <<'PY_MUTATE_HOLD'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = 'echo "::error::Downstream completion evidence is unavailable. Release remains on hold."\n          exit 1'
+assert text.count(old) == 2
+text = text.replace(old, old.replace('exit 1', 'true'), 1)
+open(path, 'w').write(text)
+PY_MUTATE_HOLD
+schedule_adopter_script "$held_snapshot" '
+  if [ "$status" -ne 0 ]; then pass "a weakened early downstream hold is rejected"; else fail "a weakened early downstream hold was accepted"; fi
+'
+write_generated_fixture "$held_snapshot/.github/workflows/release.yml" \
+  release-snapshot "$sha"
+schedule_adopter_script "$held_snapshot" '
+  if [ "$status" -ne 0 ]; then pass "removing selected downstream policy is rejected"; else fail "removing selected downstream policy was accepted"; fi
+'
 assert_mutable_verification_path_rejected "$snapshot_adopter" release-snapshot snapshot-mutable-path
 assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snapshot-capture-path-override \
   add_capture_path_override 'overrides the runner-managed PATH before release verification (#1717)'
