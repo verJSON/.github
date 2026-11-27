@@ -1,5 +1,6 @@
 ---
 date: 2026-11-27
+id: c8b464fe
 title: Hold snapshot releases requiring downstream completion
 impact: patch
 ---
