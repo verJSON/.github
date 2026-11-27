@@ -82,6 +82,7 @@ Reverse-chronological index of org-level decisions.
 | [0251](0251-hold-unprotected-bootstrap-caller-delivery/README.md) | 2026-10-31 | Hold unprotected bootstrap caller delivery |
 | [0250](0250-offline-snapshot-receipt-inspection/README.md) | 2026-10-29 | Propose offline snapshot receipt inspection |
 | [0249](0249-temporary-autonomous-merge-hold/README.md) | 2026-10-29 | Temporarily hold autonomous terminal merges |
+| [0248](0248-hold-for-downstream-release-completion/README.md) | 2026-10-28 | Hold snapshots requiring downstream completion |
 | [0247](0247-portable-codeowners/README.md) | 2026-10-28 | Portable generated CODEOWNERS |
 | [0246](0246-bind-container-release-to-source/README.md) | 2026-10-28 | Ecosystem source-bound container release proposal (relocated) |
 | [0245](0245-queue-bound-candidate-admission/README.md) | 2026-10-28 | Ecosystem queue-bound candidate admission proposal (relocated) |

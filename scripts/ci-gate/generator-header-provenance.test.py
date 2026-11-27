@@ -53,6 +53,8 @@ CASES: dict[str, list[list[str]]] = {
          "--approved-internal-package", "@verjson/cli-cloud"],
         # A foreign organization's selected CODEOWNERS team (ADR 0247).
         ["--codeowners-org", "Acme", "--codeowners-team", "platform"],
+        # Opt-in downstream-completion hold for snapshot adopters (#1954 / ADR 0248).
+        ["--require-downstream-completion"],
     ],
     "pr-gate": [["--untrusted-runner", "self-hosted,linux"]],
     "release-node": [
@@ -71,6 +73,7 @@ CASES: dict[str, list[list[str]]] = {
         ["--scope", "@acme", "--node-version", "22", "--default-prefix", "cli-v",
          "--default-component", "cli", "--only-package-dir", "packages/a",
          "--require-ci-context", "tests"],
+        ["--require-downstream-completion"],
     ],
     "release-propose": [["--autonomy", "propose"], ["--autonomy", "dispatch"]],
 }
