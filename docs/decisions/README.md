@@ -12,6 +12,8 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0323](0323-verjson-access-27-vaultwarden-connector-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-access#27 Vaultwarden connector |
+| [0322](0322-verjson-cli-424-secrets-inventory-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-cli#424 Infisical inventory |
 | [0321](0321-runner-282-evidence-adapter-diagnostics-arb/README.md) | 2026-11-27 | Board review of runner evidence adapter diagnostics |
 | [0320](0320-runner-281-doctl-status-adoption-arb/README.md) | 2026-11-27 | Board review of the runner adopter for doctl status diagnostics |
 | [0319](0319-dotgithub-2299-doctl-diagnostics-arb/README.md) | 2026-11-27 | Delivery ARB archive for verJSON/.github#2299 doctl diagnostics |
