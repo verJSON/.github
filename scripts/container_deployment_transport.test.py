@@ -735,6 +735,98 @@ class HostExportTests(unittest.TestCase):
                         value, self._host_export_cli_env(directory), self._decoding_run([result])
                     )
 
+    def test_host_export_classifies_doctl_json_http_status_without_request_id(self):
+        for status, message in (
+            (401, 'doctl authentication rejected (HTTP 401)'),
+            (403, 'doctl API request rejected (HTTP 403)'),
+            (599, 'doctl API request rejected (HTTP 599)'),
+        ):
+            stdout = json.dumps({'errors': [{
+                'detail': f'GET https://api.digitalocean.com/v2/projects: {status} Synthetic rejection',
+                'title': 'Synthetic error',
+                'reason': 'Synthetic rejection',
+                'status': status,
+                'next_step': 'run doctl auth list',
+            }]}).encode() + b'\n'
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(t.shutil, 'which', return_value='/usr/bin/doctl'):
+                with self.assertRaisesRegex(
+                    t.TransportError,
+                    exactly(f'read-only runner host export failed: {message}'),
+                ):
+                    self._host_export_with(host_request(), self._host_export_cli_env(directory),
+                                           self._decoding_run([(1, b'', stdout)]))
+
+    def test_host_export_uses_doctl_json_status_over_prose(self):
+        stdout = json.dumps({'errors': [{
+            'detail': 'Unable to authenticate you',
+            'reason': 'access token is required',
+            'status': 403,
+        }]}).encode()
+        stderr = b'\xff Error: GET https://api.digitalocean.com/v2/projects: 500 (request "abc")\n'
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(t.shutil, 'which', return_value='/usr/bin/doctl'):
+            with self.assertRaisesRegex(
+                t.TransportError,
+                exactly('read-only runner host export failed: doctl API request rejected (HTTP 403)'),
+            ):
+                self._host_export_with(host_request(), self._host_export_cli_env(directory),
+                                       self._decoding_run([(1, stderr, stdout)]))
+
+    def test_doctl_legacy_request_status_takes_priority_over_prose(self):
+        detail = 'GET https://api.digitalocean.com/v2/projects: 403 (request "abc") Unable to authenticate you'
+        stdout = json.dumps({'errors': [{'detail': detail}]})
+
+        self.assertEqual('doctl API request rejected (HTTP 403)', t.doctl_diagnostic(stdout, ''))
+
+    def test_doctl_legacy_request_status_without_request_id(self):
+        detail = 'GET http://127.0.0.1:34567/v2/projects?page=1&per_page=200: 401 Unable to authenticate you'
+        stdout = json.dumps({'errors': [{'detail': detail}]})
+
+        self.assertEqual('doctl authentication rejected (HTTP 401)', t.doctl_diagnostic(stdout, ''))
+
+    def test_doctl_legacy_rejects_invalid_or_multiline_request_status(self):
+        for stderr in (
+            'Error: GET https://api.digitalocean.com/v2/projects: 200 (request "abc") OK',
+            'Error: unrelated diagnostic\nstatus: 400 (request "abc") error',
+            'Error: GET https://api.digitalocean.com/v2/projects: 403 (request "abc")\n'
+            'GET https://api.digitalocean.com/v2/projects: 401 (request "def")',
+        ):
+            with self.subTest(stderr=stderr):
+                self.assertEqual('doctl probe failed', t.doctl_diagnostic('', stderr))
+
+    def test_host_export_rejects_malformed_or_ambiguous_doctl_json(self):
+        detail = 'Unable to authenticate you'
+        malformed = (
+            '{"errors":[{"status":401,"status":403,"detail":"Unable to authenticate you"}]}',
+            '{"errors":[{"status":401}],"errors":[{"status":403}]}',
+            '{"errors":[{"status":401,"detail":"Unable to authenticate you"}',
+            '{"errors":[{"status":401}]}\n{"errors":[{"status":403}]}',
+            'warning\n{"errors":[{"status":401,"detail":"Unable to authenticate you"}]}',
+        )
+        invalid = (
+            {'errors': [{'status': value, 'detail': detail}]}
+            for value in ('401', 401.0, True, None, 399, 600)
+        )
+        ambiguous = (
+            {'errors': [{'status': 401, 'detail': detail}, {'status': 403}]},
+            {'errors': [{'status': 401}, {'status': 401}]},
+            {'errors': {'status': 401, 'detail': detail}},
+            {'status': 401, 'detail': detail},
+            [{'status': 401, 'detail': detail}],
+        )
+        responses = (*malformed, *(json.dumps(case) for case in (*invalid, *ambiguous)))
+        for stdout in responses:
+            with self.subTest(stdout=stdout), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(t.shutil, 'which', return_value='/usr/bin/doctl'):
+                with self.assertRaisesRegex(
+                    t.TransportError,
+                    exactly('read-only runner host export failed: doctl probe failed'),
+                ):
+                    self._host_export_with(host_request(), self._host_export_cli_env(directory),
+                                           self._decoding_run([(1, b'', stdout.encode())]))
+
     def test_host_export_relays_final_cli_line_past_non_utf8_output(self):
         value = host_request()
         run = self._decoding_run([(1, b'\xff progress\n\xe2\x9c\x97 release fields differ\n')])

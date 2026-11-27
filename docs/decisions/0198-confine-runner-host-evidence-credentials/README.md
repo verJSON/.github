@@ -172,3 +172,15 @@ the real transport process, plus a mutation table in which removing any one of
 (for example `Not Found`) or unflagged command words can relay, because they
 carry no credential shape; the CLI and adapter vocabularies are owned by
 verjson-cli-cloud and adopters, so this repository does not enumerate them.
+
+## 2026-11-27 amendment — Preserve structured doctl HTTP status
+
+A loopback reproduction with doctl 2.6.0 returned HTTP 401 and 403 as integers in
+`errors[0].status` on stdout, with empty stderr. The JSON had no request ID, so
+the text classifier could miss both failures. The probe now accepts exactly one
+structured error with an integer HTTP status from 400 through 599. A valid
+status takes precedence over prose, and malformed or ambiguous JSON yields the
+generic fixed diagnostic. Older output can still identify a missing token or
+classify a single legacy request with an explicit HTTP error status.
+[Issue #629](https://github.com/verJSON/.github/issues/629) ·
+[Runner issue #197](https://github.com/verJSON/verjson-git-runners/issues/197)

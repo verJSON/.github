@@ -633,7 +633,7 @@ HOST_EXPORT_FAILURE = 'read-only runner host export failed'
 # relays only a marked line, never a warning or other interpreter output.
 DIAGNOSTIC_MARKER = 'deployment transport: '
 # doctl output is classified into fixed messages; its own text never relays.
-DOCTL_HTTP_STATUS = re.compile(r': ([1-5][0-9]{2}) \(request ')
+DOCTL_HTTP_STATUS = re.compile(r'get https?://\S+: ([0-9]{3})(?: [^\r\n]*)?')
 
 
 def _is_token_shaped(run):
@@ -704,17 +704,50 @@ def is_relayable_diagnostic(line, sensitive_values=(), max_length=MAX_DIAGNOSTIC
     )
 
 
-def doctl_diagnostic(output):
-    """Classify a failed doctl call into a fixed operator message."""
-    text = (output or '').lower()
-    if 'access token is required' in text:
-        return 'doctl access token is required'
-    if 'unable to authenticate you' in text:
+def _doctl_http_diagnostic(status):
+    if type(status) is not int or not 400 <= status <= 599:
+        return 'doctl probe failed'
+    if status == 401:
         return 'doctl authentication rejected (HTTP 401)'
-    status = DOCTL_HTTP_STATUS.search(text)
+    return f'doctl API request rejected (HTTP {status})'
+
+
+def _legacy_doctl_diagnostic(detail):
+    text = detail.strip().lower()
+    if len(text.splitlines()) != 1:
+        return 'doctl probe failed'
+    status = DOCTL_HTTP_STATUS.fullmatch(text)
     if status:
-        return f'doctl API request rejected (HTTP {status.group(1)})'
+        return _doctl_http_diagnostic(int(status.group(1)))
+    text = text.removeprefix('unable to initialize digitalocean api client: ')
+    if text == 'access token is required' or text.startswith('access token is required.'):
+        return 'doctl access token is required'
+    if text.rstrip('.') == 'unable to authenticate you':
+        return 'doctl authentication rejected (HTTP 401)'
     return 'doctl probe failed'
+
+
+def doctl_diagnostic(stdout, stderr):
+    """Classify doctl JSON stdout before considering legacy text diagnostics."""
+    if not (stdout or '').strip():
+        text = (stderr or '').strip()
+        if text.lower().startswith('error: '):
+            return _legacy_doctl_diagnostic(text[len('Error: '):])
+        return 'doctl probe failed'
+
+    try:
+        response = decode(stdout)
+    except (TransportError, ValueError, RecursionError):
+        return 'doctl probe failed'
+    errors = response.get('errors') if isinstance(response, dict) else None
+    if not isinstance(errors, list) or len(errors) != 1 or not isinstance(errors[0], dict):
+        return 'doctl probe failed'
+
+    failure = errors[0]
+    if 'status' not in failure:
+        detail = failure.get('detail')
+        return _legacy_doctl_diagnostic(detail) if isinstance(detail, str) else 'doctl probe failed'
+    return _doctl_http_diagnostic(failure['status'])
 
 
 def cli_diagnostic(output, sensitive_values):
@@ -836,7 +869,7 @@ def host_export(value, token, manifest_result=None, *, run=subprocess.run, clock
                 probe = None
             if probe is not None and probe.returncode != 0:
                 # doctl --output json writes its error to stdout.
-                diagnostic = doctl_diagnostic(f'{probe.stderr}\n{probe.stdout}')
+                diagnostic = doctl_diagnostic(probe.stdout, probe.stderr)
                 raise TransportError(f'{HOST_EXPORT_FAILURE}: {diagnostic}') from None
         try:
             completed = run(command, check=False, capture_output=True, text=True,
