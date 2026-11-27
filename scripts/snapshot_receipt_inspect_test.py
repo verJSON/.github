@@ -53,6 +53,16 @@ class SnapshotReceiptInspectionTest(unittest.TestCase):
     def test_matching_actual_tag_commit_tree_and_snapshot_are_consistent(self):
         self.assertIsNone(self.inspect())
 
+    def test_requires_literal_release_tag_ref_to_exist(self):
+        self.git("tag", "-d", self.receipt["version"])
+
+        with patch("snapshot_receipt_inspect.subprocess.run", wraps=subprocess.run) as run:
+            with self.assertRaisesRegex(ReceiptError, "Git evidence is unavailable"):
+                self.inspect()
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(["git", "-C", str(self.repo), "show-ref", "--verify", "--hash", self.receipt["tagRef"]], commands)
+
     def test_independent_expected_context_cannot_be_substituted(self):
         for key in self.expected:
             with self.subTest(key=key):

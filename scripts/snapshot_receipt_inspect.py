@@ -5,6 +5,7 @@ A successful inspection does not authenticate the producer or authorize any acti
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -77,10 +78,10 @@ def decode_receipt(data: bytes) -> dict:
     return receipt
 
 
-def inspect_snapshot_receipt(data: bytes, *, expected: dict, repository: Path) -> None:
+def inspect_snapshot_receipt(data: bytes, *, expected: Mapping[str, str], repository: Path) -> None:
     """Check consistency only. This never authenticates or authorizes a release."""
     receipt = decode_receipt(data)
-    if not isinstance(expected, dict) or set(expected) != _EXPECTED_FIELDS:
+    if not isinstance(expected, Mapping) or set(expected) != _EXPECTED_FIELDS:
         raise ReceiptError("expected context is incomplete")
     if any(expected[key] != receipt[key] for key in _EXPECTED_FIELDS):
         raise ReceiptError("receipt does not match independent expected context")
@@ -113,7 +114,7 @@ def inspect_snapshot_receipt(data: bytes, *, expected: dict, repository: Path) -
         raise ReceiptError("object format mismatch")
     if git("check-ref-format", receipt["tagRef"]) != b"":
         raise ReceiptError("invalid tag ref")
-    if git("rev-parse", "--verify", receipt["tagRef"]).strip().decode("ascii") != receipt["tagObject"]:
+    if git("show-ref", "--verify", "--hash", receipt["tagRef"]).strip().decode("ascii") != receipt["tagObject"]:
         raise ReceiptError("observed tag ref differs")
     if git("cat-file", "-t", receipt["tagObject"]).strip() != b"tag":
         raise ReceiptError("tag must be annotated")

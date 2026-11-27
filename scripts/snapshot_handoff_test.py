@@ -9,8 +9,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
-from snapshot_handoff import HandoffDelivery, HandoffPolicy, verify_snapshot_handoff
+from snapshot_handoff import HandoffDelivery, HandoffPolicy, SignatureVerifierUnavailable, verify_snapshot_handoff
 from snapshot_receipt_inspect import ReceiptError
 
 
@@ -71,11 +72,17 @@ class SnapshotHandoffTest(unittest.TestCase):
     def setUp(self):
         self.body = {
             "issuer": "release-broker", "consumer": "registry/publisher", "policyRevision": "policy@3",
-            "repositoryAuthority": "https://provider.example", "issuedAt": NOW - 5, "expiresAt": NOW + 55,
+            "repositoryAuthority": "https://provider.example", "destinationId": "registry:destination-15",
+            "issuedAt": NOW - 5, "expiresAt": NOW + 55,
             "subjectId": "artifact:415",
             "subjectSha256": digest(b"subject artifact"), "snapshot": self.snapshot.copy(),
         }
-        self.policy = HandoffPolicy("release-broker", "registry/publisher", "policy@3", 60, self.verify_signature)
+        self.policy = HandoffPolicy(
+            issuer="release-broker", consumer="registry/publisher", revision="policy@3",
+            repository_authority="https://provider.example", repository_id="123",
+            producer_workflow="provider/workflow@immutable", destination_id="registry:destination-15",
+            max_lifetime_seconds=60, verify_signature=self.verify_signature,
+        )
 
     def verify_signature(self, message, signature):
         (self.root / "message").write_bytes(message)
@@ -109,10 +116,11 @@ class SnapshotHandoffTest(unittest.TestCase):
     def test_authenticates_exact_signed_bytes_and_produces_stable_publication_scope(self):
         envelope = self.envelope(hint="other")
         evidence = self.verify(envelope)
-        self.assertEqual(evidence.publication_scope, ("https://provider.example", "123", REF, "registry/publisher"))
+        self.assertEqual(evidence.publication_scope, ("https://provider.example", "123", REF, "registry:destination-15"))
         self.assertEqual(evidence.snapshot["tagObject"], self.snapshot["tagObject"])
         self.assertEqual(evidence.subject_sha256, digest(b"subject artifact"))
         self.assertEqual(evidence.payload_sha256, digest(base64.b64decode(json.loads(envelope)["payload"])))
+        self.assertEqual((evidence.issued_at, evidence.expires_at), (NOW - 5, NOW + 55))
 
     def test_missing_receipt_and_wrong_transport_digest_are_rejected(self):
         with self.assertRaisesRegex(ReceiptError, "envelope size"):
@@ -122,8 +130,20 @@ class SnapshotHandoffTest(unittest.TestCase):
             self.verify(envelope + b" ", delivery=self.delivery(envelope))
 
     def test_forged_signature_does_not_select_an_untrusted_key(self):
-        with self.assertRaisesRegex(ReceiptError, "signature"):
-            self.verify(self.envelope(key="other", hint="other"))
+        with patch("snapshot_handoff.inspect_snapshot_receipt") as inspect:
+            with self.assertRaisesRegex(ReceiptError, "signature is invalid"):
+                self.verify(self.envelope(key="other", hint="other"))
+            inspect.assert_not_called()
+
+    def test_signature_backend_failure_preserves_the_operational_cause(self):
+        envelope = self.envelope()
+        for unavailable in (OSError("backend unavailable"), subprocess.TimeoutExpired("verify", 1)):
+            with self.subTest(error=type(unavailable)), patch("snapshot_handoff.inspect_snapshot_receipt") as inspect:
+                policy = replace(self.policy, verify_signature=Mock(side_effect=unavailable))
+                with self.assertRaisesRegex(SignatureVerifierUnavailable, "signature verifier is unavailable") as caught:
+                    self.verify(envelope, policy=policy)
+                self.assertIs(caught.exception.__cause__, unavailable)
+                inspect.assert_not_called()
 
     def test_changed_payload_bytes_and_payload_type_are_rejected(self):
         envelope = json.loads(self.envelope())
@@ -138,6 +158,37 @@ class SnapshotHandoffTest(unittest.TestCase):
         payload = b'{"issuer":"duplicate",' + json.dumps(self.body).encode()[1:]
         with self.assertRaisesRegex(ReceiptError, "duplicate receipt field"):
             self.verify(self.envelope(payload=payload))
+
+    def test_wire_limits_are_checked_before_calling_the_signature_backend(self):
+        signature = {"sig": "YQ=="}
+        envelope = {"payloadType": TYPE.decode(), "payload": "e30=", "signatures": [signature]}
+        payload_over_limit = base64.b64encode(b" " * (20 * 1024 + 1)).decode()
+        signature_over_limit = base64.b64encode(b"a" * (8 * 1024 + 1)).decode()
+        cases = (
+            (b" " * (48 * 1024 + 1), "envelope size"),
+            (json.dumps(dict(envelope, signatures=[signature, signature])).encode(), "requires one signature"),
+            (json.dumps(dict(envelope, payload=payload_over_limit)).encode(), "payload encoding"),
+            (json.dumps(dict(envelope, signatures=[{"sig": signature_over_limit}])).encode(), "signature encoding"),
+            (json.dumps(dict(envelope, signatures=[{"sig": "YR=="}])).encode(), "signature encoding"),
+        )
+        for index, (wire, reason) in enumerate(cases):
+            with self.subTest(case=index):
+                verifier = Mock(return_value=True)
+                with self.assertRaisesRegex(ReceiptError, reason):
+                    self.verify(wire, policy=replace(self.policy, verify_signature=verifier))
+                verifier.assert_not_called()
+
+    def test_dsse_frame_uses_utf8_byte_lengths(self):
+        envelope = b'{"payloadType":"application/vnd.verjson.snapshot-handoff.v1+json",'
+        envelope += b'"payload":"eyJ0ZXh0Ijoiw6kifQ==","signatures":[{"sig":"YQ=="}]}'
+        verifier = Mock(return_value=True)
+
+        with self.assertRaisesRegex(ReceiptError, "payload fields"):
+            self.verify(envelope, policy=replace(self.policy, verify_signature=verifier))
+
+        verifier.assert_called_once_with(
+            b'DSSEv1 48 application/vnd.verjson.snapshot-handoff.v1+json 13 {"text":"\xc3\xa9"}', b"a",
+        )
 
     def test_signed_policy_and_subject_cannot_be_substituted(self):
         envelope = self.envelope()
@@ -155,6 +206,29 @@ class SnapshotHandoffTest(unittest.TestCase):
             wrong = replace(self.delivery(envelope), snapshot_context=dict(self.context, **{field: "different"}))
             with self.subTest(field=field), self.assertRaisesRegex(ReceiptError, "expected context"):
                 self.verify(envelope, delivery=wrong)
+
+    def test_delivery_keeps_the_dispatch_context_observed_at_construction(self):
+        envelope = self.envelope()
+        context = dict(self.context)
+        delivery = replace(self.delivery(envelope), snapshot_context=context)
+        context["runAttempt"] = "3"
+
+        evidence = self.verify(envelope, delivery=delivery)
+
+        self.assertEqual(evidence.snapshot["runAttempt"], self.context["runAttempt"])
+
+    def test_current_policy_must_authorize_the_signed_source_and_destination(self):
+        envelope = self.envelope()
+        for field, value in (
+            ("repository_authority", "https://other.example"),
+            ("repository_id", "124"),
+            ("producer_workflow", "provider/workflow@other-immutable"),
+            ("destination_id", "registry:destination-16"),
+        ):
+            with self.subTest(field=field), patch("snapshot_handoff.inspect_snapshot_receipt") as inspect:
+                with self.assertRaisesRegex(ReceiptError, "outside current trusted policy scope"):
+                    self.verify(envelope, policy=replace(self.policy, **{field: value}))
+                inspect.assert_not_called()
 
     def test_repository_id_cannot_be_reused_across_provider_authorities(self):
         envelope = self.envelope()
@@ -185,6 +259,16 @@ class SnapshotHandoffTest(unittest.TestCase):
         second = self.verify(envelope, delivery=delivery)
         self.assertEqual(first.publication_scope, second.publication_scope)
         self.assertNotEqual(first.payload_sha256, second.payload_sha256)
+
+    def test_consumer_rename_preserves_the_destination_claim(self):
+        first = self.verify(self.envelope())
+        self.body["consumer"] = "renamed-publisher"
+        self.body["policyRevision"] = "policy@4"
+        policy = replace(self.policy, consumer="renamed-publisher", revision="policy@4")
+
+        second = self.verify(self.envelope(), policy=policy)
+
+        self.assertEqual(first.publication_scope, second.publication_scope)
 
 
 if __name__ == "__main__":

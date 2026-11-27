@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 from types import MappingProxyType
 
 from snapshot_receipt_inspect import ReceiptError, decode_receipt_json, inspect_snapshot_receipt
@@ -16,7 +17,7 @@ from snapshot_receipt_inspect import ReceiptError, decode_receipt_json, inspect_
 
 _PAYLOAD_TYPE = b"application/vnd.verjson.snapshot-handoff.v1+json"
 _PAYLOAD_FIELDS = {
-    "issuer", "consumer", "policyRevision", "repositoryAuthority", "issuedAt", "expiresAt",
+    "issuer", "consumer", "policyRevision", "repositoryAuthority", "destinationId", "issuedAt", "expiresAt",
     "subjectId", "subjectSha256", "snapshot",
 }
 _MAX_ENVELOPE_BYTES = 48 * 1024
@@ -25,13 +26,17 @@ _MAX_SIGNATURE_BYTES = 8 * 1024
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class HandoffPolicy:
-    """Current issuer and scope resolved outside the producer and delivery."""
+    """Protected authorization for one source and canonical destination."""
 
     issuer: str
     consumer: str
     revision: str
+    repository_authority: str
+    repository_id: str
+    producer_workflow: str
+    destination_id: str
     max_lifetime_seconds: int
     verify_signature: Callable[[bytes, bytes], bool]
 
@@ -41,10 +46,17 @@ class HandoffDelivery:
     """Authenticated observations of the dispatch, transport, and subject artifact."""
 
     repository_authority: str
-    snapshot_context: dict[str, str]
+    snapshot_context: Mapping[str, str]
     envelope_sha256: str
     subject_id: str
     subject_sha256: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "snapshot_context", MappingProxyType(dict(self.snapshot_context)))
+
+
+class SignatureVerifierUnavailable(ReceiptError):
+    """The trusted signature verifier could not return a verdict."""
 
 
 @dataclass(frozen=True)
@@ -54,16 +66,18 @@ class VerifiedSnapshotHandoff:
     snapshot: Mapping[str, str | int]
     repository_authority: str
     consumer: str
+    destination_id: str
     subject_id: str
     subject_sha256: str
     policy_revision: str
     payload_sha256: str
+    issued_at: int
     expires_at: int
 
     @property
     def publication_scope(self) -> tuple[str, str, str, str]:
         # New attempts and replacement tag objects must contend for the same scope.
-        return self.repository_authority, str(self.snapshot["repositoryId"]), str(self.snapshot["tagRef"]), self.consumer
+        return self.repository_authority, str(self.snapshot["repositoryId"]), str(self.snapshot["tagRef"]), self.destination_id
 
 
 def _sha256(content: bytes) -> str:
@@ -99,6 +113,8 @@ def verify_snapshot_handoff(
     The caller supplies a verifier pinned to the current issuer's key and algorithm,
     an authenticated observation of a successful dispatch attempt and both artifacts,
     and a trusted clock. This function performs no publication or replay accounting.
+    The signature verifier returns False for an invalid signature and raises
+    SignatureVerifierUnavailable for an outage specific to its backend.
     """
     if not isinstance(envelope_bytes, bytes) or not 0 < len(envelope_bytes) <= _MAX_ENVELOPE_BYTES:
         raise ReceiptError("handoff envelope size is invalid")
@@ -118,7 +134,11 @@ def verify_snapshot_handoff(
     payload = _decode_base64(envelope["payload"], field="payload", max_bytes=_MAX_PAYLOAD_BYTES)
     signature = _decode_base64(signature_entry["sig"], field="signature", max_bytes=_MAX_SIGNATURE_BYTES)
     signed_bytes = b"DSSEv1 %d %s %d %s" % (len(_PAYLOAD_TYPE), _PAYLOAD_TYPE, len(payload), payload)
-    if policy.verify_signature(signed_bytes, signature) is not True:
+    try:
+        signature_verified = policy.verify_signature(signed_bytes, signature)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SignatureVerifierUnavailable("handoff signature verifier is unavailable") from exc
+    if signature_verified is not True:
         raise ReceiptError("handoff signature is invalid")
 
     body = decode_receipt_json(payload, max_bytes=_MAX_PAYLOAD_BYTES)
@@ -129,6 +149,13 @@ def verify_snapshot_handoff(
         raise ReceiptError("handoff differs from current trusted policy")
     if not _is_identifier(body["repositoryAuthority"]) or body["repositoryAuthority"] != delivery.repository_authority:
         raise ReceiptError("handoff repository authority differs from authenticated delivery")
+    snapshot = body["snapshot"]
+    if (body["repositoryAuthority"] != policy.repository_authority
+            or not _is_identifier(body["destinationId"]) or body["destinationId"] != policy.destination_id
+            or not isinstance(snapshot, dict)
+            or snapshot.get("repositoryId") != policy.repository_id
+            or snapshot.get("producerWorkflow") != policy.producer_workflow):
+        raise ReceiptError("handoff is outside current trusted policy scope")
     if (not _is_identifier(body["subjectId"]) or body["subjectId"] != delivery.subject_id
             or not isinstance(body["subjectSha256"], str) or not _SHA256.fullmatch(body["subjectSha256"])
             or body["subjectSha256"] != delivery.subject_sha256):
@@ -138,11 +165,12 @@ def verify_snapshot_handoff(
             or not 0 < issued <= now < expires <= 2**63 - 1 or not 0 < expires - issued <= max_lifetime):
         raise ReceiptError("handoff time window is invalid")
 
-    snapshot = body["snapshot"]
     inspect_snapshot_receipt(json.dumps(snapshot, separators=(",", ":")).encode(),
                              expected=delivery.snapshot_context, repository=repository)
     return VerifiedSnapshotHandoff(
         snapshot=MappingProxyType(snapshot), repository_authority=delivery.repository_authority,
-        consumer=policy.consumer, subject_id=delivery.subject_id, subject_sha256=delivery.subject_sha256,
-        policy_revision=policy.revision, payload_sha256=_sha256(payload), expires_at=expires,
+        consumer=policy.consumer, destination_id=policy.destination_id,
+        subject_id=delivery.subject_id, subject_sha256=delivery.subject_sha256,
+        policy_revision=policy.revision, payload_sha256=_sha256(payload),
+        issued_at=issued, expires_at=expires,
     )
