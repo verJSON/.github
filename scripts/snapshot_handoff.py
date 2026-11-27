@@ -1,0 +1,148 @@
+"""Verify a signed snapshot handoff against independently observed release evidence."""
+from __future__ import annotations
+
+import base64
+import binascii
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
+import re
+from types import MappingProxyType
+
+from snapshot_receipt_inspect import ReceiptError, decode_receipt_json, inspect_snapshot_receipt
+
+
+_PAYLOAD_TYPE = b"application/vnd.verjson.snapshot-handoff.v1+json"
+_PAYLOAD_FIELDS = {
+    "issuer", "consumer", "policyRevision", "repositoryAuthority", "issuedAt", "expiresAt",
+    "subjectId", "subjectSha256", "snapshot",
+}
+_MAX_ENVELOPE_BYTES = 48 * 1024
+_MAX_PAYLOAD_BYTES = 20 * 1024
+_MAX_SIGNATURE_BYTES = 8 * 1024
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class HandoffPolicy:
+    """Current issuer and scope resolved outside the producer and delivery."""
+
+    issuer: str
+    consumer: str
+    revision: str
+    max_lifetime_seconds: int
+    verify_signature: Callable[[bytes, bytes], bool]
+
+
+@dataclass(frozen=True)
+class HandoffDelivery:
+    """Authenticated observations of the dispatch, transport, and subject artifact."""
+
+    repository_authority: str
+    snapshot_context: dict[str, str]
+    envelope_sha256: str
+    subject_id: str
+    subject_sha256: str
+
+
+@dataclass(frozen=True)
+class VerifiedSnapshotHandoff:
+    """Point-in-time evidence for the publisher's separate acceptance transaction."""
+
+    snapshot: Mapping[str, str | int]
+    repository_authority: str
+    consumer: str
+    subject_id: str
+    subject_sha256: str
+    policy_revision: str
+    payload_sha256: str
+    expires_at: int
+
+    @property
+    def publication_scope(self) -> tuple[str, str, str, str]:
+        # New attempts and replacement tag objects must contend for the same scope.
+        return self.repository_authority, str(self.snapshot["repositoryId"]), str(self.snapshot["tagRef"]), self.consumer
+
+
+def _sha256(content: bytes) -> str:
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def _is_identifier(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= 512 and all(33 <= ord(char) <= 126 for char in value)
+
+
+def _decode_base64(value: object, *, field: str, max_bytes: int) -> bytes:
+    if not isinstance(value, str) or len(value) > 4 * ((max_bytes + 2) // 3):
+        raise ReceiptError(f"handoff {field} encoding is invalid")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ReceiptError(f"handoff {field} encoding is invalid") from exc
+    if not 0 < len(decoded) <= max_bytes or base64.b64encode(decoded).decode("ascii") != value:
+        raise ReceiptError(f"handoff {field} encoding is invalid")
+    return decoded
+
+
+def verify_snapshot_handoff(
+    envelope_bytes: bytes,
+    *,
+    delivery: HandoffDelivery,
+    policy: HandoffPolicy,
+    now: int,
+    repository: Path,
+) -> VerifiedSnapshotHandoff:
+    """Require a policy-bound signature and an independently authenticated delivery.
+
+    The caller supplies a verifier pinned to the current issuer's key and algorithm,
+    an authenticated observation of a successful dispatch attempt and both artifacts,
+    and a trusted clock. This function performs no publication or replay accounting.
+    """
+    if not isinstance(envelope_bytes, bytes) or not 0 < len(envelope_bytes) <= _MAX_ENVELOPE_BYTES:
+        raise ReceiptError("handoff envelope size is invalid")
+    if _sha256(envelope_bytes) != delivery.envelope_sha256:
+        raise ReceiptError("handoff envelope differs from authenticated delivery digest")
+    envelope = decode_receipt_json(envelope_bytes, max_bytes=_MAX_ENVELOPE_BYTES)
+    if not isinstance(envelope, dict) or set(envelope) != {"payloadType", "payload", "signatures"}:
+        raise ReceiptError("handoff envelope fields are invalid")
+    if envelope["payloadType"] != _PAYLOAD_TYPE.decode("ascii"):
+        raise ReceiptError("handoff payload type is invalid")
+    signatures = envelope["signatures"]
+    if not isinstance(signatures, list) or len(signatures) != 1 or not isinstance(signatures[0], dict):
+        raise ReceiptError("handoff requires one signature")
+    signature_entry = signatures[0]
+    if signature_entry.keys() not in ({"sig"}, {"sig", "keyid"}) or not isinstance(signature_entry.get("keyid", ""), str):
+        raise ReceiptError("handoff signature fields are invalid")
+    payload = _decode_base64(envelope["payload"], field="payload", max_bytes=_MAX_PAYLOAD_BYTES)
+    signature = _decode_base64(signature_entry["sig"], field="signature", max_bytes=_MAX_SIGNATURE_BYTES)
+    signed_bytes = b"DSSEv1 %d %s %d %s" % (len(_PAYLOAD_TYPE), _PAYLOAD_TYPE, len(payload), payload)
+    if policy.verify_signature(signed_bytes, signature) is not True:
+        raise ReceiptError("handoff signature is invalid")
+
+    body = decode_receipt_json(payload, max_bytes=_MAX_PAYLOAD_BYTES)
+    if not isinstance(body, dict) or set(body) != _PAYLOAD_FIELDS:
+        raise ReceiptError("handoff payload fields are invalid")
+    expected_policy = {"issuer": policy.issuer, "consumer": policy.consumer, "policyRevision": policy.revision}
+    if any(not _is_identifier(body[field]) or body[field] != value for field, value in expected_policy.items()):
+        raise ReceiptError("handoff differs from current trusted policy")
+    if not _is_identifier(body["repositoryAuthority"]) or body["repositoryAuthority"] != delivery.repository_authority:
+        raise ReceiptError("handoff repository authority differs from authenticated delivery")
+    if (not _is_identifier(body["subjectId"]) or body["subjectId"] != delivery.subject_id
+            or not isinstance(body["subjectSha256"], str) or not _SHA256.fullmatch(body["subjectSha256"])
+            or body["subjectSha256"] != delivery.subject_sha256):
+        raise ReceiptError("handoff subject artifact differs from authenticated delivery")
+    issued, expires, max_lifetime = body["issuedAt"], body["expiresAt"], policy.max_lifetime_seconds
+    if (any(type(value) is not int for value in (issued, expires, now, max_lifetime))
+            or not 0 < issued <= now < expires <= 2**63 - 1 or not 0 < expires - issued <= max_lifetime):
+        raise ReceiptError("handoff time window is invalid")
+
+    snapshot = body["snapshot"]
+    inspect_snapshot_receipt(json.dumps(snapshot, separators=(",", ":")).encode(),
+                             expected=delivery.snapshot_context, repository=repository)
+    return VerifiedSnapshotHandoff(
+        snapshot=MappingProxyType(snapshot), repository_authority=delivery.repository_authority,
+        consumer=policy.consumer, subject_id=delivery.subject_id, subject_sha256=delivery.subject_sha256,
+        policy_revision=policy.revision, payload_sha256=_sha256(payload), expires_at=expires,
+    )

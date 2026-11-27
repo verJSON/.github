@@ -40,16 +40,20 @@ def _unique_object(pairs):
     return result
 
 
-def decode_receipt(data: bytes) -> dict:
-    if not isinstance(data, bytes) or not 0 < len(data) <= _MAX_RECEIPT:
+def decode_receipt_json(data: bytes, *, max_bytes: int) -> object:
+    if not isinstance(data, bytes) or not 0 < len(data) <= max_bytes:
         raise ReceiptError("receipt size is invalid")
     try:
-        receipt = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
-                             parse_constant=lambda _: (_ for _ in ()).throw(ReceiptError("invalid number")))
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
+                          parse_constant=lambda _: (_ for _ in ()).throw(ReceiptError("invalid number")))
     except ReceiptError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise ReceiptError("receipt is invalid JSON") from exc
+
+
+def decode_receipt(data: bytes) -> dict:
+    receipt = decode_receipt_json(data, max_bytes=_MAX_RECEIPT)
     if not isinstance(receipt, dict) or set(receipt) != _FIELDS:
         raise ReceiptError("receipt fields are invalid")
     if type(receipt["schemaVersion"]) is not int or receipt["schemaVersion"] != 1 or receipt["kind"] != "snapshot-receipt-prototype":
