@@ -7605,8 +7605,10 @@ SCHED_SCRIPT
 )"
 held_snapshot="$tmproot/adopter-snapshot-held"
 cp -a "$snapshot_adopter" "$held_snapshot"
-bash "$gen" release-snapshot "$sha" --require-downstream-completion >"$held_snapshot/.github/workflows/release.yml"
-bash "$gen" contract-test "$sha" --require-downstream-completion >"$held_snapshot/scripts/changelog-contract.test.sh"
+write_generated_fixture "$held_snapshot/.github/workflows/release.yml" \
+  release-snapshot "$sha" --require-downstream-completion
+write_generated_fixture "$held_snapshot/scripts/changelog-contract.test.sh" \
+  contract-test "$sha" --require-downstream-completion
 schedule_adopter_script "$held_snapshot" '
   if [ "$status" -eq 0 ]; then pass "selected downstream completion hold is accepted"; else fail "selected downstream completion hold is rejected"; fi
 '
@@ -7622,7 +7624,8 @@ PY_MUTATE_HOLD
 schedule_adopter_script "$held_snapshot" '
   if [ "$status" -ne 0 ]; then pass "a weakened early downstream hold is rejected"; else fail "a weakened early downstream hold was accepted"; fi
 '
-bash "$gen" release-snapshot "$sha" >"$held_snapshot/.github/workflows/release.yml"
+write_generated_fixture "$held_snapshot/.github/workflows/release.yml" \
+  release-snapshot "$sha"
 schedule_adopter_script "$held_snapshot" '
   if [ "$status" -ne 0 ]; then pass "removing selected downstream policy is rejected"; else fail "removing selected downstream policy was accepted"; fi
 '
