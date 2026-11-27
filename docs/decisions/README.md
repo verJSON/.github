@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0318](0318-verjson-access-23-openbao-connector-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-access#23 OpenBao connector |
 | [0317](0317-runner-280-deployment-diagnostics-arb/README.md) | 2026-11-27 | Board review of runner deployment diagnostics for #280 |
 | [0316](0316-verjson-access-20-keycloak-connector-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-access#20 Keycloak connector |
 | [0315](0315-verjson-access-17-policy-trust-root-delivery-arb/README.md) | 2026-11-26 | Delivery ARB archive for verjson-access#17 policy trust root |
