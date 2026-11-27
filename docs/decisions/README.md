@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0325](0325-verjson-access-28-server-mode-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-access#28 server mode slice 1 |
 | [0324](0324-authenticated-release-snapshot-handoffs/README.md) | 2026-11-27 | Propose authenticated release snapshot handoffs |
 | [0323](0323-verjson-access-27-vaultwarden-connector-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-access#27 Vaultwarden connector |
 | [0322](0322-verjson-cli-424-secrets-inventory-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-cli#424 Infisical inventory |
