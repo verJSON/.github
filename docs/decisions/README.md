@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0328](0328-verjson-cli-428-secrets-script-fixes-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-cli#428 secrets-host script pre-release fixes |
 | [0327](0327-verjson-cli-426-secrets-host-scripts-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-cli#426 secrets-host change scripts |
 | [0326](0326-dotgithub-2304-offline-validation-board/README.md) | 2026-11-27 | Archive the offline release snapshot validation board |
 | [0325](0325-verjson-access-28-server-mode-delivery-arb/README.md) | 2026-11-27 | Delivery ARB archive for verjson-access#28 server mode slice 1 |
