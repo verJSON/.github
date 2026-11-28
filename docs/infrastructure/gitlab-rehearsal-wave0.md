@@ -42,7 +42,7 @@ ADR 0256 §7.
 | `<work>` | The operator's scratch directory. It must be outside every checkout, contain no whitespace, and is created with mode `0700`. Prefer a memory-backed filesystem: `shred` cannot guarantee erasure on journaling or copy-on-write filesystems, or under WSL. |
 | `<tomorrow>` | Tomorrow's UTC date, `YYYY-MM-DD` |
 | `<rehearsal-runner-tag>` | The tag of the rehearsal runner (§9) |
-| `<verjson-ci-generator-command>`, `<verjson-ci-normalize-command>` | The caller generator and result normalizer of the pinned `verjson-ci` release (§9, §10). Neither exists yet. |
+| `<verjson-ci-generator-command>`, `<verjson-ci-normalize-command>` | Record the supported invocations from the verified release used to generate both callers (§9) and compare their result envelopes (§10). |
 | `<github-caller-workflow>`, `<envelope-artifact>`, `<envelope-path>` | Names the generated callers define (§9, §10) |
 | `<sha>`, `<run-id>`, `<job-id>` | The commit and the runs being compared (§9, §10) |
 
@@ -803,9 +803,12 @@ is first measured in wave 1, against the scheduled worker.
       owner has accepted it (ADR 0258 §5, wave 0 exception). Only plain, credential-free
       test jobs run; any image, candidate or OCI build job still needs the full
       verjson-git-runners#208 evidence.
-- [ ] `verjson-ci` has released, at an immutable version, the generator for the GitLab
-      caller (verjson-ci#30). Until it exists, this section cannot run, and no caller is
-      written by hand.
+- [ ] Verify the pinned `verjson-ci` release generates both callers for `proof-html`.
+      Inspect the compiled GitLab job and confirm its tags select the approved
+      rehearsal runner. Exercise the release's supported normalizer on a fixture
+      envelope. Record the release identity and both invocations before
+      enabling CI (verjson-ci#30). Keep this leg on hold if any part is missing.
+      Generate the callers from the release; hand-written callers do not qualify.
 - [ ] The owner has decided whether Actions is enabled on `demo-repository` for the
       comparison window (#1869).
 - [ ] Both forge owners approved the optional leg, its exact fixture IDs, isolated
@@ -820,6 +823,10 @@ is first measured in wave 1, against the scheduled worker.
       records the exact validated ID from the response, bound to the approved group and
       manager deployment in the private record. An ambiguous response leaves the receipt
       empty and blocks teardown until the owner reconciles the attempt.
+      Check the runner's group ID against the disposable top-level group's ID. Before
+      the canary, verify the target project has group runners enabled and lists that
+      runner ID. Registering at the existing organization root would also make the
+      runner available to other eligible projects there.
 
 Save this source push block as `<work>/ci-source-push.sh`. Pass the exact branch name
 and the approved local checkout of the prepared commit. Do not bypass this block
@@ -867,6 +874,11 @@ printf '%s\n' "$oid" > "$receipt"
 
 Apply ADR 0162's conformance contract to each pair of runs:
 
+- **Approved GitLab runner.** For each verification job in the successful and
+  intentionally failing pipelines, read `GET /projects/:id/jobs/:job_id`.
+  Compare its pipeline ID and commit SHA with the run under comparison, then
+  compare `runner.id` with the approved registration in `$WORK/runner.id`.
+  Hold the result if any identity is missing or differs. Retain IDs privately.
 - **Same commit.** GitHub's `gh run view <run-id> --json headSha` equals the GitLab
   pipeline's `sha`.
 - **Same image.** Both result envelopes name the same OCI digest.
