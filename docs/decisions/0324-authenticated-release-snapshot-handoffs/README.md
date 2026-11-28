@@ -83,6 +83,29 @@ publisher, independently resolved route, and actual publisher transaction for
 live qualification. A current run read is a freshness check. Effect-time
 fencing and the durable acceptance transaction provide replay protection.
 
+### Operation-bound issuance
+
+`scripts/snapshot_handoff.py` signs only after the protected adapter supplies an
+authenticated observation of the recorded atomic push. Persist the intent
+before pushing and retain its SHA-256 digest in the operation evidence. That
+digest binds the exact snapshot receipt bytes, operation ID, policy revision,
+source authority and branch, destination, and immutable subject. The observation
+must name the same intent and operation, the exact before and after branch
+commits, and creation of the expected annotated tag from an absent ref. A
+preexisting tag, an uncertain provider response, or ref readback alone cannot
+establish creation. The adapter must return an unresolved outcome in those cases.
+Independently authenticated current remote ref observations must also match the
+recorded postimage before the issuer signs. The issuer requires the intent and
+authenticated dispatch to match the release branch allowed by protected policy.
+For the canonical GitHub workflow this branch is the repository's default.
+
+The issuer checks protected policy scope, the independently observed dispatch,
+and the local Git snapshot before signing. The authenticated commit timestamp
+and current policy lifetime determine the signed time window. Reobserving the
+same operation cannot extend that window. The issuer verifies the returned
+signature with the current policy before releasing the envelope. The protected
+adapter still needs durable intent storage and provider-authenticated push evidence.
+
 ## Transaction order and recovery
 
 1. The pinned producer resolves current policy and authenticates the explicit

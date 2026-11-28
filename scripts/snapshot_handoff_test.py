@@ -11,7 +11,15 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from snapshot_handoff import HandoffDelivery, HandoffPolicy, SignatureVerifierUnavailable, verify_snapshot_handoff
+from snapshot_handoff import (
+    HandoffDelivery,
+    HandoffPolicy,
+    SignatureVerifierUnavailable,
+    SnapshotPushIntent,
+    SnapshotPushObservation,
+    issue_snapshot_handoff,
+    verify_snapshot_handoff,
+)
 from snapshot_receipt_inspect import ReceiptError
 
 
@@ -96,12 +104,15 @@ class SnapshotHandoffTest(unittest.TestCase):
             payload = json.dumps(self.body, indent=2).encode()
         # Sign the original bytes, including JSON whitespace, using DSSE PAE.
         message = b"DSSEv1 %d %s %d %s" % (len(TYPE), TYPE, len(payload), payload)
-        (self.root / "signing-message").write_bytes(message)
-        signature = self.openssl("pkeyutl", "-sign", "-rawin", "-inkey", key + ".pem", "-in", "signing-message")
+        signature = self.sign(message, key=key)
         return json.dumps({
             "payloadType": TYPE.decode(), "payload": base64.b64encode(payload).decode(),
             "signatures": [{"sig": base64.b64encode(signature).decode(), "keyid": hint}],
         }).encode()
+
+    def sign(self, message, *, key="issuer"):
+        (self.root / "signing-message").write_bytes(message)
+        return self.openssl("pkeyutl", "-sign", "-rawin", "-inkey", key + ".pem", "-in", "signing-message")
 
     def delivery(self, envelope):
         return HandoffDelivery("https://provider.example", self.context, digest(envelope),
@@ -269,6 +280,205 @@ class SnapshotHandoffTest(unittest.TestCase):
         second = self.verify(self.envelope(), policy=policy)
 
         self.assertEqual(first.publication_scope, second.publication_scope)
+
+    def push_evidence(self):
+        intent = SnapshotPushIntent(
+            operation_id="snapshot:456:2",
+            repository_authority=self.policy.repository_authority,
+            branch_ref="refs/heads/main",
+            policy_revision=self.policy.revision,
+            destination_id=self.policy.destination_id,
+            subject_id=self.body["subjectId"],
+            subject_sha256=self.body["subjectSha256"],
+            snapshot=json.dumps(self.snapshot).encode(),
+        )
+        observation = SnapshotPushObservation(
+            operation_id=intent.operation_id,
+            intent_sha256=intent.intent_sha256,
+            repository_authority=intent.repository_authority,
+            snapshot_context=self.context,
+            dispatch_ref=intent.branch_ref,
+            branch_ref=intent.branch_ref,
+            branch_before=self.snapshot["sourceCommit"],
+            branch_after=self.snapshot["snapshotCommit"],
+            branch_at_read=self.snapshot["snapshotCommit"],
+            tag_ref=REF,
+            tag_before=None,
+            tag_after=self.snapshot["tagObject"],
+            tag_at_read=self.snapshot["tagObject"],
+            committed_at=NOW - 5,
+        )
+        return intent, observation
+
+    def issue(self, intent, *, observe_push, sign, now=NOW, policy=None):
+        return issue_snapshot_handoff(
+            intent=intent, policy=self.policy if policy is None else policy, allowed_branch_ref="refs/heads/main",
+            now=now, repository=self.repo,
+            observe_push=observe_push, sign=sign,
+        )
+
+    def test_issuer_signs_the_observed_atomic_update_for_the_remaining_effect_window(self):
+        intent, observation = self.push_evidence()
+        observe_push = Mock(return_value=observation)
+        sign = Mock(side_effect=self.sign)
+
+        evidence = self.verify(self.issue(intent, observe_push=observe_push, sign=sign))
+
+        observe_push.assert_called_once_with(intent.operation_id)
+        sign.assert_called_once()
+        self.assertEqual(evidence.snapshot["tagObject"], observation.tag_after)
+        self.assertEqual(evidence.subject_sha256, intent.subject_sha256)
+        self.assertEqual(evidence.issued_at, observation.committed_at)
+        self.assertEqual(evidence.expires_at, observation.committed_at + self.policy.max_lifetime_seconds)
+
+    def test_issuer_refuses_matching_refs_without_an_authenticated_push_observation(self):
+        intent, _ = self.push_evidence()
+        observe_push = Mock(return_value=None)
+        sign = Mock()
+
+        with self.assertRaisesRegex(ReceiptError, "snapshot push outcome requires reconciliation"):
+            self.issue(intent, observe_push=observe_push, sign=sign)
+
+        observe_push.assert_called_once_with(intent.operation_id)
+        sign.assert_not_called()
+
+    def test_issuer_refuses_observation_from_another_operation(self):
+        intent, observation = self.push_evidence()
+        observe_push = Mock(return_value=replace(observation, operation_id="snapshot:other"))
+        sign = Mock(side_effect=self.sign)
+
+        with self.assertRaisesRegex(ReceiptError, "snapshot push observation differs from the recorded atomic update"):
+            self.issue(intent, observe_push=observe_push, sign=sign)
+
+        sign.assert_not_called()
+
+    def test_issuer_refuses_using_a_recorded_operation_with_a_different_subject(self):
+        intent, observation = self.push_evidence()
+        changed_intent = replace(intent, subject_id="artifact:416")
+        sign = Mock(side_effect=self.sign)
+
+        with self.assertRaisesRegex(ReceiptError, "snapshot push observation differs from the recorded atomic update"):
+            self.issue(changed_intent, observe_push=Mock(return_value=observation), sign=sign)
+
+        sign.assert_not_called()
+
+    def test_issuer_refuses_a_tag_already_present_with_the_identical_object(self):
+        intent, observation = self.push_evidence()
+        observe_push = Mock(return_value=replace(observation, tag_before=observation.tag_after))
+        sign = Mock(side_effect=self.sign)
+
+        with self.assertRaisesRegex(ReceiptError, "snapshot push observation differs from the recorded atomic update"):
+            self.issue(intent, observe_push=observe_push, sign=sign)
+
+        sign.assert_not_called()
+
+    def test_issuer_refuses_an_observed_push_when_remote_refs_differ(self):
+        intent, observation = self.push_evidence()
+        for field, oid in (
+            ("branch_at_read", observation.branch_before),
+            ("tag_at_read", observation.branch_after),
+        ):
+            with self.subTest(field=field):
+                changed = replace(observation, **{field: oid})
+                sign = Mock(side_effect=self.sign)
+
+                with self.assertRaisesRegex(ReceiptError, "snapshot push readback differs from the recorded postimage"):
+                    self.issue(intent, observe_push=Mock(return_value=changed), sign=sign)
+
+                sign.assert_not_called()
+
+    def test_issuer_refuses_to_renew_an_expired_push_effect(self):
+        intent, observation = self.push_evidence()
+        expired = replace(observation, committed_at=NOW - self.policy.max_lifetime_seconds)
+        sign = Mock(side_effect=self.sign)
+
+        with self.assertRaisesRegex(ReceiptError, "snapshot push time window is invalid"):
+            self.issue(intent, observe_push=Mock(return_value=expired), sign=sign)
+
+        sign.assert_not_called()
+
+    def test_issuer_rechecks_the_bound_destination_and_revision(self):
+        intent, observation = self.push_evidence()
+        for field in ("destination_id", "revision"):
+            with self.subTest(field=field):
+                observe_push = Mock(return_value=observation)
+                sign = Mock()
+                policy = replace(self.policy, **{field: "changed"})
+
+                with self.assertRaisesRegex(ReceiptError, "outside current trusted policy"):
+                    self.issue(intent, observe_push=observe_push, sign=sign, policy=policy)
+
+                observe_push.assert_not_called()
+                sign.assert_not_called()
+
+    def test_issuer_rejects_an_independently_observed_different_attempt(self):
+        intent, observation = self.push_evidence()
+        different_attempt = replace(observation, snapshot_context=dict(self.context, runAttempt="9"))
+        sign = Mock()
+
+        with self.assertRaisesRegex(ReceiptError, "independent expected context"):
+            self.issue(intent, observe_push=Mock(return_value=different_attempt), sign=sign)
+
+        sign.assert_not_called()
+
+    def test_reobservation_cannot_extend_the_signed_window_or_change_the_payload(self):
+        intent, observation = self.push_evidence()
+        observe_push = Mock(return_value=observation)
+        first = self.verify(self.issue(intent, observe_push=observe_push, sign=self.sign))
+        retry = self.verify(self.issue(intent, observe_push=observe_push, sign=self.sign, now=NOW + 1))
+
+        self.assertEqual(retry.payload_sha256, first.payload_sha256)
+        self.assertEqual(retry.expires_at, first.expires_at)
+
+    def test_issuer_rejects_an_intent_and_push_that_agree_on_an_unauthorized_branch(self):
+        intent, observation = self.push_evidence()
+        intent = replace(intent, branch_ref="refs/heads/other")
+        observation = replace(observation, branch_ref=intent.branch_ref, intent_sha256=intent.intent_sha256)
+        observe_push = Mock(return_value=observation)
+        sign = Mock()
+
+        with self.assertRaisesRegex(ReceiptError, "branch is outside current trusted policy"):
+            self.issue(intent, observe_push=observe_push, sign=sign)
+
+        observe_push.assert_not_called()
+        sign.assert_not_called()
+
+    def test_issuer_requires_the_dispatch_ref_to_match_the_authorized_branch(self):
+        intent, observation = self.push_evidence()
+        different_dispatch = replace(observation, dispatch_ref="refs/heads/other")
+        sign = Mock()
+
+        with self.assertRaisesRegex(ReceiptError, "differs from the recorded atomic update"):
+            self.issue(intent, observe_push=Mock(return_value=different_dispatch), sign=sign)
+
+        sign.assert_not_called()
+
+    def test_issuer_withholds_envelope_when_the_signing_key_differs_from_policy(self):
+        intent, observation = self.push_evidence()
+        other_signer = Mock(side_effect=lambda frame: self.sign(frame, key="other"))
+
+        with self.assertRaisesRegex(ReceiptError, "signature is invalid"):
+            self.issue(intent, observe_push=Mock(return_value=observation), sign=other_signer)
+
+    def test_issuer_holds_when_the_operation_observer_is_unavailable(self):
+        intent, _ = self.push_evidence()
+        error = OSError("operation observer unavailable")
+        sign = Mock()
+
+        with self.assertRaisesRegex(ReceiptError, "push observation is unavailable") as caught:
+            self.issue(intent, observe_push=Mock(side_effect=error), sign=sign)
+
+        self.assertIs(caught.exception.__cause__, error)
+        sign.assert_not_called()
+
+    def test_issuer_holds_when_the_signer_is_unavailable(self):
+        intent, observation = self.push_evidence()
+        error = subprocess.TimeoutExpired("sign", 1)
+
+        with self.assertRaisesRegex(ReceiptError, "signer is unavailable") as caught:
+            self.issue(intent, observe_push=Mock(return_value=observation), sign=Mock(side_effect=error))
+
+        self.assertIs(caught.exception.__cause__, error)
 
 
 if __name__ == "__main__":
